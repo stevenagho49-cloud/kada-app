@@ -1,0 +1,1356 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { supabase } from './lib/supabase'
+import './App.css'
+
+const emerald = '#0b3d2e'
+const emeraldLight = '#145c40'
+const gold = '#c9a227'
+const cream = '#f6f3ea'
+const ivory = '#fffdf8'
+const ink = '#232323'
+const muted = '#767066'
+const rule = '#e4ddc9'
+const warn = '#a3401f'
+const okGreen = '#2e6b47'
+const serif = "'Iowan Old Style', 'Georgia', 'Times New Roman', serif"
+const sans = "'Inter', -apple-system, 'Helvetica Neue', Arial, sans-serif"
+
+const defaultSchools = [
+  { id: 'school-1', name: 'Birmingham Academy', contactName: 'Mrs. Adebayo', email: 'head@birminghamacademy.org', phone: '0121 555 0144', notes: 'Primary enrichment' },
+  { id: 'school-2', name: 'Oakridge School', contactName: 'Mr. Patterson', email: 'patterson@oakridge.uk', phone: '0121 555 7612', notes: 'Black History Month' },
+]
+
+const defaultInstructors = [
+  { id: 'instr-1', name: 'Steven', email: 'steven@kingsarkdance.com', phone: '07800 000001', rate: 180 },
+  { id: 'instr-2', name: 'Temilade', email: 'temi@kingsarkdance.com', phone: '07800 000002', rate: 160 },
+  { id: 'instr-3', name: 'Annedrea', email: 'annedrea@kingsarkdance.com', phone: '07800 000003', rate: 170 },
+]
+
+const defaultBookings = [
+  {
+    id: 'book-1',
+    schoolId: 'school-1',
+    contactName: 'Mrs. Adebayo',
+    contactEmail: 'head@birminghamacademy.org',
+    date: '2026-09-12',
+    sessionType: 'Full day (£490)',
+    price: 490,
+    studentCount: 42,
+    instructorId: 'instr-1',
+    status: 'Confirmed',
+    invoiceStatus: 'Paid',
+    invoiceNumber: 'KADA-0001',
+    notes: 'Primary pupils, 2 instructors recommended',
+  },
+  {
+    id: 'book-2',
+    schoolId: 'school-2',
+    contactName: 'Mr. Patterson',
+    contactEmail: 'patterson@oakridge.uk',
+    date: '2026-09-18',
+    sessionType: 'Full day (£490)',
+    price: 980,
+    studentCount: 60,
+    instructorId: 'instr-2',
+    status: 'Enquiry',
+    invoiceStatus: 'Not sent',
+    invoiceNumber: '',
+    notes: 'Awaiting confirmation',
+  },
+]
+
+const defaultTemplate = {
+  sections: [
+    { id: 'welcome', title: 'Welcome & warm up', minutes: 10 },
+    { id: 'teach', title: 'Core routine teach', minutes: 15 },
+    { id: 'run', title: 'Full run through', minutes: 10 },
+    { id: 'reflect', title: 'Performance & reflection', minutes: 10 },
+  ],
+  maxStudentsPerStaff: 30,
+  defaultDuration: 45,
+  notes: 'Begin with a short prayer and energy check. Keep movement inclusive and uplifting.',
+}
+function normalizePublicInstructor(row) {
+  return { id: row.id, firstName: row.first_name || 'Instructor' }
+}
+
+const valueItems = [
+  { roman: 'I', title: 'Faith First', text: 'Everything we do is rooted in purpose, not just performance.' },
+  { roman: 'II', title: 'Excellence', text: 'Every session, every school, held to the same high standard.' },
+  { roman: 'III', title: 'Confidence', text: 'Dance is the vehicle. Confidence is what we are building.' },
+  { roman: 'IV', title: 'Culture', text: 'Gospel Afrobeats connects young people to heritage and joy.' },
+  { roman: 'V', title: 'Community', text: 'Never a one-off booking. We build relationships that last.' },
+]
+
+const formatCurrency = (value) => `£${Number(value || 0).toLocaleString()}`
+
+const parseStored = (key, fallback) => {
+  if (typeof window === 'undefined') return fallback
+  try {
+    const item = window.localStorage.getItem(key)
+    return item ? JSON.parse(item) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+const supabaseReady = Boolean(supabase)
+
+function normalizeBooking(row = {}) {
+  return {
+    id: row.id,
+    schoolId: row.school_id ?? row.schoolId ?? '',
+    familyId: row.family_id ?? row.familyId ?? '',
+    contactName: row.contact_name ?? row.contactName ?? '',
+    contactEmail: row.contact_email ?? row.contactEmail ?? '',
+    date: row.date ?? '',
+    sessionType: row.session_type ?? row.sessionType ?? 'Full day (£490)',
+    price: Number(row.price ?? 0),
+    studentCount: Number(row.student_count ?? row.studentCount ?? 0),
+    instructorId: row.instructor_id ?? row.instructorId ?? '',
+    status: row.status ?? 'Enquiry',
+    invoiceStatus: row.invoice_status ?? row.invoiceStatus ?? 'Not sent',
+    invoiceNumber: row.invoice_number ?? row.invoiceNumber ?? '',
+    notes: row.notes ?? '',
+    requestedBy: row.requested_by ?? row.requestedBy ?? '',
+    instructorPay: Number(row.instructor_pay ?? row.instructorPay ?? 0),
+    needsAdminAttention: Boolean(row.needs_admin_attention ?? row.needsAdminAttention),
+    completedAt: row.completed_at ?? row.completedAt ?? '',
+  }
+}
+
+function normalizeSchool(row = {}) {
+  return {
+    id: row.id,
+    name: row.name ?? '',
+    contactName: row.contact_name ?? row.contactName ?? '',
+    email: row.email ?? '',
+    phone: row.phone ?? '',
+    notes: row.notes ?? '',
+  }
+}
+
+function normalizeInstructor(row = {}) {
+  return {
+    id: row.id,
+    name: row.name ?? '',
+    email: row.email ?? '',
+    phone: row.phone ?? '',
+    rate: Number(row.rate ?? 0),
+    locationAreas: row.location_areas ?? row.locationAreas ?? '',
+    gender: row.gender ?? '',
+    dbsStatus: row.dbs_status ?? row.dbsStatus ?? 'Missing',
+    dbsFilePath: row.dbs_file_path ?? row.dbsFilePath ?? '',
+    dbsUploadedAt: row.dbs_uploaded_at ?? row.dbsUploadedAt ?? '',
+    dbsDecidedAt: row.dbs_decided_at ?? row.dbsDecidedAt ?? '',
+    dbsRejectionReason: row.dbs_rejection_reason ?? row.dbsRejectionReason ?? '',
+  }
+}
+
+function normalizeStudent(row = {}) {
+  return { id: row.id, bookingId: row.booking_id ?? row.bookingId ?? '', familyId: row.family_id ?? row.familyId ?? '', parentName: row.parent_name ?? row.parentName ?? '', parentEmail: row.parent_email ?? row.parentEmail ?? '', name: row.name ?? '', dateOfBirth: row.date_of_birth ?? row.dateOfBirth ?? '', className: row.class_name ?? row.className ?? '', term: row.term ?? '', membershipStatus: row.membership_status ?? row.membershipStatus ?? 'active' }
+}
+
+function normalizeJob(row = {}) {
+  return { id: row.id, bookingId: row.booking_id ?? '', date: row.date ?? '', sessionType: row.session_type ?? '', studentCount: Number(row.student_count ?? 0), locationArea: row.location_area ?? '', instructorPay: Number(row.instructor_pay ?? 0), status: row.status ?? 'open', claimedBy: row.claimed_by ?? '', rejectionReason: row.rejection_reason ?? '', claimedAt: row.claimed_at ?? row.claimedAt ?? '', decidedAt: row.decided_at ?? row.decidedAt ?? '' }
+}
+
+function normalizeMessage(row = {}) {
+  return { id: row.id, senderKind: row.sender_kind ?? '', senderInstructorId: row.sender_instructor_id ?? '', senderSchoolId: row.sender_school_id ?? '', recipientKind: row.recipient_kind ?? '', recipientInstructorId: row.recipient_instructor_id ?? '', recipientSchoolId: row.recipient_school_id ?? '', body: row.body ?? '', readAt: row.read_at ?? '', createdAt: row.created_at ?? '' }
+}
+
+function toDbBooking(row) {
+  return {
+    id: row.id,
+    school_id: row.schoolId,
+    contact_name: row.contactName,
+    contact_email: row.contactEmail,
+    date: row.date,
+    session_type: row.sessionType,
+    price: Number(row.price ?? 0),
+    student_count: Number(row.studentCount ?? 0),
+    instructor_id: row.instructorId,
+    status: row.status,
+    invoice_status: row.invoiceStatus,
+    invoice_number: row.invoiceNumber,
+    notes: row.notes,
+    requested_by: row.requestedBy || null,
+    instructor_pay: Number(row.instructorPay || 0),
+    needs_admin_attention: Boolean(row.needsAdminAttention),
+    completed_at: row.completedAt || null,
+  }
+}
+
+function toDbSchool(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    contact_name: row.contactName,
+    email: row.email,
+    phone: row.phone,
+    notes: row.notes,
+  }
+}
+
+function toDbInstructor(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    phone: row.phone,
+    rate: Number(row.rate ?? 0),
+    location_areas: row.locationAreas || '',
+    gender: row.gender || null,
+    dbs_status: row.dbsStatus || 'Missing',
+    dbs_file_path: row.dbsFilePath || null,
+    dbs_uploaded_at: row.dbsUploadedAt || null,
+    dbs_decided_at: row.dbsDecidedAt || null,
+    dbs_rejection_reason: row.dbsRejectionReason || null,
+  }
+}
+
+function toDbStudent(row) {
+  return { id: row.id, booking_id: row.bookingId, parent_name: row.parentName, parent_email: row.parentEmail, name: row.name, date_of_birth: row.dateOfBirth, class_name: row.className, term: row.term, membership_status: row.membershipStatus }
+}
+
+function toDbJob(row) {
+  return { id: row.id, booking_id: row.bookingId, date: row.date, session_type: row.sessionType, student_count: Number(row.studentCount || 0), location_area: row.locationArea, instructor_pay: Number(row.instructorPay || 0), status: row.status, claimed_by: row.claimedBy || null, rejection_reason: row.rejectionReason || null, published_at: row.publishedAt, claimed_at: row.claimedAt || null, decided_at: row.decidedAt || null }
+}
+
+async function loadTable(tableName, fallback) {
+  if (!supabaseReady) {
+    return parseStored(tableName, fallback)
+  }
+
+  const { data, error } = await supabase.from(tableName).select('*')
+  if (error) {
+    console.error(`Supabase load failed for ${tableName}:`, error)
+    return []
+  }
+
+  if (!data || !data.length) return []
+
+  if (tableName === 'bookings') return data.map(normalizeBooking)
+  if (tableName === 'schools') return data.map(normalizeSchool)
+  if (tableName === 'instructors') return data.map(normalizeInstructor)
+    if (tableName === 'instructor_public_profiles') return data.map(normalizePublicInstructor)
+  if (tableName === 'students') return data.map(normalizeStudent)
+  if (tableName === 'job_board_jobs') return data.map(normalizeJob)
+  if (tableName === 'messages') return data.map(normalizeMessage)
+  return data
+}
+
+async function saveTable(tableName, rows) {
+  if (!supabaseReady) {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(tableName, JSON.stringify(rows))
+    }
+    return
+  }
+
+  const payload =
+    tableName === 'bookings'
+      ? rows.map(toDbBooking)
+      : tableName === 'schools'
+        ? rows.map(toDbSchool)
+        : tableName === 'instructors'
+          ? rows.map(toDbInstructor)
+          : tableName === 'students'
+            ? rows.map(toDbStudent)
+            : tableName === 'job_board_jobs'
+              ? rows.map(toDbJob)
+          : rows
+
+  const { error } = await supabase.from(tableName).upsert(payload, { onConflict: 'id' })
+  if (error) {
+    console.error(`Supabase save failed for ${tableName}:`, error)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(tableName, JSON.stringify(rows))
+    }
+  }
+}
+
+function buildPrice({ studentCount, sessionType }) {
+  const baseMap = {
+    'Full day (£490)': 490,
+    'Half day': 260,
+    'Single workshop': 150,
+    Custom: 0,
+  }
+
+  const count = Number(studentCount || 0)
+  const base = baseMap[sessionType] ?? 0
+  const staffNeeded = Math.max(1, Math.ceil(count / 30))
+
+  if (sessionType === 'Custom') {
+    return { price: 0, staffNeeded, recommended: 'Custom quote' }
+  }
+
+  return {
+    price: base * staffNeeded,
+    staffNeeded,
+    recommended: staffNeeded > 1 ? `${staffNeeded} instructors recommended` : '1 instructor recommended',
+  }
+}
+
+function Card({ children, style }) {
+  return <div style={{ background: ivory, color: ink, border: `1px solid ${rule}`, borderRadius: 10, ...style }}>{children}</div>
+}
+
+function Field({ label, children }) {
+  return (
+    <label style={{ display: 'block', marginBottom: 14 }}>
+      <span style={{ display: 'block', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#767066', marginBottom: 6 }}>{label}</span>
+      {children}
+    </label>
+  )
+}
+
+const inputStyle = {
+  width: '100%', boxSizing: 'border-box', padding: '9px 11px', fontFamily: 'inherit', fontSize: 14,
+  color: ink, border: `1px solid ${rule}`, borderRadius: 6, outline: 'none', background: ivory,
+}
+
+function Button({ children, onClick, type = 'button', disabled, variant = 'primary', small = false }) {
+  const styles = { primary: { background: emerald, color: ivory }, gold: { background: gold, color: emeraldLight }, ghost: { background: 'transparent', color: emerald, border: `1px solid ${rule}` }, danger: { background: 'transparent', color: warn, border: `1px solid ${rule}` } }
+  return <button type={type} disabled={disabled} onClick={onClick} style={{ ...styles[variant], borderRadius: 6, padding: small ? '6px 11px' : '9px 18px', fontFamily: 'inherit', fontSize: small ? 12 : 13.5, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1 }}>{children}</button>
+}
+
+function Modal({ title, onClose, children, wide = false }) {
+  return <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 50, padding: 20, overflowY: 'auto', background: 'rgba(20,18,10,.45)' }}><div onClick={(event) => event.stopPropagation()} style={{ maxWidth: wide ? 680 : 500, margin: '20px auto', background: cream, borderRadius: 10, border: `1px solid ${rule}`, boxShadow: '0 20px 60px rgba(0,0,0,.25)' }}><div style={{ padding: '16px 20px', borderBottom: `1px solid ${rule}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><h3 style={{ margin: 0, fontFamily: serif, color: emerald, fontWeight: 400 }}>{title}</h3><button type="button" onClick={onClose} style={{ border: 0, background: 'none', cursor: 'pointer', fontSize: 18, color: muted }}>×</button></div><div style={{ padding: 20 }}>{children}</div></div></div>
+}
+
+function statusTone(status) { return status === 'Confirmed' ? 'green' : status === 'Delivered' ? 'gold' : status === 'Cancelled' ? 'red' : 'default' }
+function invoiceTone(status) { return status === 'Paid' ? 'green' : status === 'Sent' ? 'gold' : 'red' }
+function Badge({ text, tone = 'default' }) { const colors = { default: ['#f1eee2', muted], green: ['#e6f0e9', okGreen], gold: ['#faf1d9', '#8a6d10'], red: ['#f7e9e4', warn] }; return <span style={{ background: colors[tone][0], color: colors[tone][1], borderRadius: 20, padding: '3px 9px', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{text}</span> }
+
+function BookingForm({ booking, schools, instructors, onSave, onDelete }) {
+  const [form, setForm] = useState(booking)
+  const set = (field) => (event) => setForm({ ...form, [field]: event.target.value })
+  return <form onSubmit={(event) => { event.preventDefault(); onSave({ ...form, price: Number(form.price || 0), studentCount: Number(form.studentCount || 0) }) }}>
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+      <Field label="School"><select style={inputStyle} value={form.schoolId} onChange={set('schoolId')} required><option value="">Select school</option>{schools.map((school) => <option key={school.id} value={school.id}>{school.name}</option>)}</select></Field>
+      <Field label="Date"><input type="date" style={inputStyle} value={form.date} onChange={set('date')} required /></Field>
+      <Field label="Session type"><select style={inputStyle} value={form.sessionType} onChange={set('sessionType')}><option>Full day (£490)</option><option>Half day</option><option>Single workshop</option><option>Custom</option></select></Field>
+      <Field label="Price (£)"><input type="number" style={inputStyle} value={form.price} onChange={set('price')} /></Field>
+      <Field label="Instructor pay (£)"><input type="number" style={inputStyle} value={form.instructorPay || ''} onChange={set('instructorPay')} placeholder="Set before publishing" /></Field>
+      <Field label="Students"><input type="number" style={inputStyle} value={form.studentCount} onChange={set('studentCount')} /></Field>
+      <Field label="Instructor"><select style={inputStyle} value={form.instructorId} onChange={set('instructorId')}><option value="">Unassigned</option>{instructors.map((instructor) => <option key={instructor.id} value={instructor.id}>{instructor.name}</option>)}</select></Field>
+      <Field label="Booking status"><select style={inputStyle} value={form.status} onChange={set('status')}>{['Enquiry', 'Confirmed', 'Delivered', 'Cancelled'].map((status) => <option key={status}>{status}</option>)}</select></Field>
+      <Field label="Invoice status"><select style={inputStyle} value={form.invoiceStatus} onChange={set('invoiceStatus')}>{['Not sent', 'Sent', 'Paid'].map((status) => <option key={status}>{status}</option>)}</select></Field>
+    </div>
+    {Number(form.studentCount) > 30 && <p style={{ color: warn, fontSize: 12.5 }}>Over 30 students: a second instructor is recommended.</p>}
+    <Field label="Contact name"><input style={inputStyle} value={form.contactName} onChange={set('contactName')} /></Field>
+    <Field label="Contact email"><input type="email" style={inputStyle} value={form.contactEmail} onChange={set('contactEmail')} /></Field>
+    <Field label="Notes"><textarea style={{ ...inputStyle, minHeight: 70 }} value={form.notes} onChange={set('notes')} /></Field>
+    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 16 }}><div>{onDelete && <Button variant="danger" onClick={onDelete}>Delete booking</Button>}</div><Button type="submit">Save booking</Button></div>
+  </form>
+}
+
+function SchoolForm({ school, onSave, onDelete }) {
+  const [form, setForm] = useState(school)
+  const set = (field) => (event) => setForm({ ...form, [field]: event.target.value })
+  return <form onSubmit={(event) => { event.preventDefault(); onSave(form) }}><Field label="School name"><input style={inputStyle} value={form.name} onChange={set('name')} required /></Field><Field label="Contact name"><input style={inputStyle} value={form.contactName} onChange={set('contactName')} /></Field><Field label="Email"><input type="email" style={inputStyle} value={form.email} onChange={set('email')} /></Field><Field label="Phone"><input style={inputStyle} value={form.phone} onChange={set('phone')} /></Field><Field label="Notes"><textarea style={{ ...inputStyle, minHeight: 70 }} value={form.notes} onChange={set('notes')} /></Field><div style={{ display: 'flex', justifyContent: 'space-between' }}><div>{onDelete && <Button variant="danger" onClick={onDelete}>Delete</Button>}</div><Button type="submit">Save school</Button></div></form>
+}
+
+function SchoolRecord({ school, bookings, instructors, onEdit, onBooking, onMessage, onClose }) {
+  const related = bookings.filter((booking) => booking.schoolId === school.id)
+  return <Modal title={school.name} onClose={onClose} wide><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}><div><strong>Contact</strong><p>{school.contactName || 'Not set'}<br />{school.email || 'No email'}<br />{school.phone || 'No phone'}</p></div><div><strong>Notes</strong><p>{school.notes || 'No notes'}</p></div></div><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}><h4 style={{ margin: 0, color: emerald }}>Bookings</h4><Button small onClick={() => onBooking({ ...emptyBooking(), schoolId: school.id, contactName: school.contactName, contactEmail: school.email })}>New booking</Button></div>{related.length === 0 ? <p style={{ color: muted }}>No bookings for this school.</p> : related.map((booking) => <div key={booking.id} onClick={() => onBooking(booking)} style={{ borderTop: `1px solid ${rule}`, padding: '10px 0', cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }}><span>{booking.date || 'No date'} · {booking.sessionType}<br /><small>{instructors.find((instructor) => instructor.id === booking.instructorId)?.name || 'Unassigned'}</small></span><span style={{ display: 'flex', gap: 6 }}><Badge text={booking.status} tone={statusTone(booking.status)} /><Badge text={booking.invoiceStatus} tone={invoiceTone(booking.invoiceStatus)} /></span></div>)}<div style={{ marginTop: 18, display: 'flex', gap: 8 }}><Button variant="ghost" onClick={() => onEdit(school)}>Edit school</Button><Button variant="ghost" onClick={() => onMessage(school)}>Message school</Button></div></Modal>
+}
+
+function InvoicePreview({ booking, onUpdate, onSave, onSend, onDownload, sending, onClose, pdfUrl }) {
+  const invoiceNumber = booking.invoiceNumber || 'Not numbered'
+  const setInvoice = (field) => (event) => onUpdate({ [field]: event.target.value })
+  return <Modal title={`Invoice ${invoiceNumber}`} onClose={onClose} wide><div style={{ display: 'grid', gridTemplateColumns: 'minmax(240px, 0.8fr) minmax(0, 1.4fr)', gap: 18, alignItems: 'start' }}><div><h4 style={{ margin: '0 0 10px', color: emerald }}>Edit before sending</h4><Field label="Line item description"><input style={inputStyle} value={booking.invoiceDescription ?? booking.sessionType ?? ''} onChange={setInvoice('invoiceDescription')} /></Field><Field label="Rate"><input type="number" min="0" step="0.01" style={inputStyle} value={booking.invoiceRate ?? booking.price ?? 0} onChange={setInvoice('invoiceRate')} /></Field><Field label="Amount"><input type="number" min="0" step="0.01" style={inputStyle} value={booking.invoiceAmount ?? booking.price ?? 0} onChange={setInvoice('invoiceAmount')} /></Field><Field label="Discount (%)"><input type="number" min="0" max="100" step="0.01" style={inputStyle} value={booking.discountPercent ?? 0} onChange={setInvoice('discountPercent')} /></Field></div><div style={{ border: `1px solid ${rule}`, background: '#e9e5da', padding: 10, minHeight: 520 }}>{pdfUrl ? <iframe title={`Invoice ${invoiceNumber} PDF preview`} src={pdfUrl} style={{ display: 'block', width: '100%', height: 620, border: 0, background: '#fff' }} /> : <p style={{ padding: 18, color: muted }}>Loading designed invoice preview…</p>}</div></div><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}><Button variant="gold" disabled={sending || booking.invoiceStatus === 'Paid'} onClick={() => onSend(booking)}>{sending ? 'Sending…' : 'Send invoice'}</Button><Button variant="ghost" onClick={() => onDownload(booking)}>Download PDF</Button><Button variant="ghost" onClick={() => onSave({ ...booking, invoiceStatus: 'Sent' })}>Mark sent</Button>{['Not sent', 'Sent', 'Paid'].map((status) => <Button key={status} variant={booking.invoiceStatus === status ? 'primary' : 'ghost'} onClick={() => onSave({ ...booking, invoiceStatus: status })}>{status}</Button>)}</div></Modal>
+}
+
+function InvoiceSettings({ settings, onSave, saving }) {
+  const [local, setLocal] = useState(settings)
+  const set = (field) => (event) => setLocal({ ...local, [field]: event.target.value })
+  return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Invoice settings</h2><p style={{ color: muted }}>Payment details shown on generated invoices. Admin access only.</p><Card style={{ maxWidth: 560, padding: 20 }}><Field label="Bank account name"><input style={inputStyle} value={local.accountName} onChange={set('accountName')} required /></Field><Field label="Sort code"><input style={inputStyle} value={local.sortCode} onChange={set('sortCode')} required /></Field><Field label="Account number"><input style={inputStyle} value={local.accountNumber} onChange={set('accountNumber')} required /></Field><Button disabled={saving} onClick={() => onSave(local)}>{saving ? 'Saving…' : 'Save invoice settings'}</Button></Card></div>
+}
+
+function emptyBooking() { return { id: crypto.randomUUID(), schoolId: '', contactName: '', contactEmail: '', date: '', sessionType: 'Full day (£490)', price: 490, studentCount: '', instructorId: '', status: 'Enquiry', invoiceStatus: 'Not sent', invoiceNumber: '', notes: '' } }
+function emptySchool() { return { id: crypto.randomUUID(), name: '', contactName: '', email: '', phone: '', notes: '' } }
+
+function ageFromDob(dateOfBirth) {
+  if (!dateOfBirth) return ''
+  const today = new Date()
+  const birth = new Date(`${dateOfBirth}T00:00:00`)
+  let age = today.getFullYear() - birth.getFullYear()
+  const beforeBirthday = today.getMonth() < birth.getMonth() || (today.getMonth() === birth.getMonth() && today.getDate() < birth.getDate())
+  if (beforeBirthday) age -= 1
+  return age
+}
+
+function birthdayDistance(dateOfBirth) {
+  if (!dateOfBirth) return null
+  const today = new Date()
+  const birth = new Date(`${dateOfBirth}T00:00:00`)
+  const next = new Date(today.getFullYear(), birth.getMonth(), birth.getDate())
+  if (next < new Date(today.getFullYear(), today.getMonth(), today.getDate())) next.setFullYear(today.getFullYear() + 1)
+  return Math.round((next - new Date(today.getFullYear(), today.getMonth(), today.getDate())) / 86400000)
+}
+
+function InstructorForm({ instructor, onSave, onDelete }) {
+  const [form, setForm] = useState(instructor)
+  const set = (field) => (event) => setForm({ ...form, [field]: event.target.value })
+  return <form onSubmit={(event) => { event.preventDefault(); onSave({ ...form, rate: Number(form.rate || 0) }) }}><Field label="Name"><input style={inputStyle} value={form.name} onChange={set('name')} required /></Field><Field label="Email"><input type="email" style={inputStyle} value={form.email} onChange={set('email')} /></Field><Field label="Phone"><input style={inputStyle} value={form.phone} onChange={set('phone')} /></Field><Field label="Rate per session (£)"><input type="number" style={inputStyle} value={form.rate} onChange={set('rate')} /></Field><Field label="Locations / areas"><input style={inputStyle} value={form.locationAreas} onChange={set('locationAreas')} placeholder="e.g. Birmingham, Solihull" /></Field><Field label="Gender (optional)"><select style={inputStyle} value={form.gender} onChange={set('gender')}><option value="">Prefer not to say</option><option>Female</option><option>Male</option><option>Non-binary</option><option>Self-describe</option></select></Field><div style={{ display: 'flex', justifyContent: 'space-between' }}><div>{onDelete && <Button variant="danger" onClick={onDelete}>Delete</Button>}</div><Button type="submit">Save instructor</Button></div></form>
+}
+
+function TemplateView({ template, onSave }) {
+  const [local, setLocal] = useState(template)
+  const setSection = (id, field, value) => setLocal({ ...local, sections: local.sections.map((section) => section.id === id ? { ...section, [field]: value } : section) })
+  const total = local.sections.reduce((sum, section) => sum + Number(section.minutes || 0), 0)
+  return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Workshop template</h2><p style={{ color: muted }}>Edit the live template used by instructors.</p><Card style={{ padding: 20 }}><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}><Field label="Default duration (minutes)"><input type="number" style={inputStyle} value={local.defaultDuration} onChange={(event) => setLocal({ ...local, defaultDuration: event.target.value })} /></Field><Field label="Max students per staff"><input type="number" style={inputStyle} value={local.maxStudentsPerStaff} onChange={(event) => setLocal({ ...local, maxStudentsPerStaff: event.target.value })} /></Field></div><p style={{ color: total === Number(local.defaultDuration) ? okGreen : warn, fontSize: 12 }}>{total} minutes total</p>{local.sections.map((section, index) => <div key={section.id} style={{ display: 'grid', gridTemplateColumns: '28px 1fr 90px', gap: 8, marginBottom: 8, alignItems: 'center' }}><span>{index + 1}</span><input style={inputStyle} value={section.title} onChange={(event) => setSection(section.id, 'title', event.target.value)} /><input type="number" style={inputStyle} value={section.minutes} onChange={(event) => setSection(section.id, 'minutes', event.target.value)} /></div>)}<Button variant="ghost" onClick={() => setLocal({ ...local, sections: [...local.sections, { id: crypto.randomUUID(), title: '', minutes: 10 }] })}>Add section</Button><Field label="Notes"><textarea style={{ ...inputStyle, minHeight: 80 }} value={local.notes} onChange={(event) => setLocal({ ...local, notes: event.target.value })} /></Field><Button onClick={() => onSave(local)}>Save template</Button></Card></div>
+}
+
+function BirthdayNotice({ students }) {
+  const upcoming = students.filter((student) => student.membershipStatus === 'active' && birthdayDistance(student.dateOfBirth) !== null && birthdayDistance(student.dateOfBirth) <= 7)
+  if (!upcoming.length) return null
+  return <Card style={{ padding: 16, marginBottom: 18, background: '#fff8e8', borderColor: '#ead7a3' }}><strong style={{ color: emerald }}>Birthdays coming up</strong>{upcoming.map((student) => <p key={student.id} style={{ margin: '6px 0 0', color: ink, fontSize: 13 }}>{student.name} · {birthdayDistance(student.dateOfBirth) === 0 ? 'today' : `in ${birthdayDistance(student.dateOfBirth)} days`} · turning {ageFromDob(student.dateOfBirth) + 1}</p>)}</Card>
+}
+
+function NeedsAttention({ jobs, bookings, instructors, messages, schools, isAdmin, onOpenJobs, onOpenBookings, onOpenInstructors, onOpenMessages, dismissed, onDismiss }) {
+  const notifications = [
+    ...jobs.filter((job) => job.status === 'pending').map((job) => ({ id: `claim:${job.id}:${job.claimedAt || ''}`, label: `Job claim pending approval · ${job.date} · ${instructors.find((instructor) => instructor.id === job.claimedBy)?.name || 'Instructor'}`, onOpen: onOpenJobs })),
+    ...bookings.filter((booking) => booking.needsAdminAttention).map((booking) => ({ id: `completed:${booking.id}:${booking.completedAt || ''}`, label: `Session delivered · payment review needed · ${booking.date}`, onOpen: onOpenBookings })),
+    ...bookings.filter((booking) => booking.familyId && booking.status !== 'Cancelled').map((booking) => ({ id: `parent-booking:${booking.id}`, label: `New parent booking · ${booking.date} · ${booking.sessionType}`, onOpen: onOpenBookings })),
+    ...bookings.filter((booking) => booking.status === 'Enquiry' && !booking.familyId).map((booking) => ({ id: `school-enquiry:${booking.id}`, label: `New school enquiry · ${booking.contactName || 'School contact'} · ${booking.date || 'Date to confirm'}`, onOpen: onOpenBookings })),
+    ...(isAdmin ? instructors.filter((instructor) => instructor.dbsStatus === 'Pending').map((instructor) => ({ id: `dbs:${instructor.id}:${instructor.dbsUploadedAt || ''}`, label: `DBS certificate uploaded · review required · ${instructor.name}`, onOpen: onOpenInstructors })) : []),
+    ...(isAdmin ? messages.filter((message) => !message.readAt && message.recipientKind === 'admin').map((message) => ({ id: `message:${message.id}`, label: `New message · ${message.senderKind === 'instructor' ? instructors.find((instructor) => instructor.id === message.senderInstructorId)?.name || 'Instructor' : schools.find((school) => school.id === message.senderSchoolId)?.name || 'School'} · ${message.body.slice(0, 60)}${message.body.length > 60 ? '…' : ''}`, onOpen: onOpenMessages })) : []),
+  ].filter((notification) => !dismissed.includes(notification.id))
+  if (!notifications.length) return null
+  return <Card style={{ padding: 18, marginBottom: 20, borderColor: '#ead7a3', background: '#fff8e8' }}><h3 style={{ margin: '0 0 10px', color: emerald }}>Needs attention</h3>{notifications.map((notification) => <div key={notification.id} style={{ display: 'flex', alignItems: 'center', gap: 8, borderTop: `1px solid ${rule}` }}><button type="button" onClick={notification.onOpen} style={{ flex: 1, display: 'block', padding: '9px 0', textAlign: 'left', border: 0, background: 'transparent', cursor: 'pointer', color: ink }}>{notification.label}</button><button type="button" aria-label={`Dismiss ${notification.label}`} title="Dismiss notification" onClick={() => onDismiss(notification.id)} style={{ border: 0, background: 'transparent', color: muted, cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 6 }}>×</button></div>)}</Card>
+}
+
+function StudentPlansView({ students }) {
+  return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Students</h2><p style={{ color: muted }}>Current membership status by student.</p><Card>{students.length ? students.map((student) => <div key={student.id} style={{ padding: '13px 18px', borderTop: `1px solid ${rule}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><strong>{student.name}</strong><Badge text={student.membershipStatus} tone={student.membershipStatus === 'active' ? 'green' : student.membershipStatus === 'cancelled' ? 'red' : 'gold'} /></div>) : <p style={{ padding: 18, color: muted }}>No students found.</p>}</Card></div>
+}
+
+function DbsUpload({ instructor, onUpload, uploading }) {
+  const [file, setFile] = useState(null)
+  if (!instructor) return null
+  return <Card style={{ padding: 18, marginBottom: 20, borderColor: instructor.dbsStatus === 'Approved' ? rule : '#ead7a3', background: instructor.dbsStatus === 'Approved' ? ivory : '#fff8e8' }}><h3 style={{ margin: '0 0 10px', color: emerald }}>DBS certificate</h3><p style={{ color: muted, margin: '0 0 10px' }}>Your DBS must be approved before job board listings become available.</p><div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><Badge text={instructor.dbsStatus} tone={instructor.dbsStatus === 'Approved' ? 'green' : instructor.dbsStatus === 'Rejected' ? 'red' : 'gold'} />{instructor.dbsStatus === 'Rejected' && instructor.dbsRejectionReason && <span style={{ color: warn, fontSize: 12 }}>Rejected: {instructor.dbsRejectionReason}</span>}<input type="file" accept="application/pdf,image/png,image/jpeg,image/webp" onChange={(event) => setFile(event.target.files?.[0] || null)} /><Button small disabled={!file || uploading} onClick={() => onUpload(file)}>{uploading ? 'Uploading…' : instructor.dbsStatus === 'Missing' ? 'Upload DBS' : 'Re-upload DBS'}</Button></div></Card>
+}
+
+function MessagesView({ messages, myKind, myInstructorId, mySchoolId, schools, instructors, isAdmin, onSend, onMarkRead }) {
+  const [draft, setDraft] = useState('')
+  const [target, setTarget] = useState(null)
+  const threads = {}
+  messages.forEach((message) => {
+    const other = message.senderKind === 'admin' ? (message.recipientKind === 'instructor' ? `instructor:${message.recipientInstructorId}` : message.recipientKind === 'school' ? `school:${message.recipientSchoolId}` : 'admin') : (message.senderKind === 'instructor' ? `instructor:${message.senderInstructorId}` : message.senderKind === 'school' ? `school:${message.senderSchoolId}` : 'admin')
+    threads[other] = [...(threads[other] || []), message]
+  })
+  const threadKeys = Object.keys(threads).sort((a, b) => (threads[b].at(-1)?.createdAt || '').localeCompare(threads[a].at(-1)?.createdAt || ''))
+  const active = target && threads[target] ? target : threadKeys[0] || null
+  const activeMessages = active ? threads[active].slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)) : []
+  const threadLabel = (key) => { const [kind, id] = key.split(':'); return kind === 'instructor' ? instructors.find((instructor) => instructor.id === id)?.name || 'Instructor' : kind === 'school' ? schools.find((school) => school.id === id)?.name || 'School' : 'KADA Admin' }
+  const unreadInThread = (key) => threads[key].filter((message) => !message.readAt && !(message.senderKind === myKind && (myKind === 'admin' || message.senderInstructorId === myInstructorId || message.senderSchoolId === mySchoolId))).length
+  const send = () => {
+    if (!draft.trim() || !active) return
+    const [kind, id] = active.split(':')
+    if (isAdmin) onSend({ senderKind: 'admin', recipientKind: kind, recipientInstructorId: kind === 'instructor' ? id : null, recipientSchoolId: kind === 'school' ? id : null, body: draft.trim() })
+    else onSend({ senderKind: myKind, senderInstructorId: myInstructorId || null, senderSchoolId: mySchoolId || null, recipientKind: 'admin', body: draft.trim() })
+    setDraft('')
+  }
+  useEffect(() => {
+    if (!active) return
+    threads[active]
+      .filter((message) => !message.readAt && !(message.senderKind === myKind && (myKind === 'admin' || message.senderInstructorId === myInstructorId || message.senderSchoolId === mySchoolId)))
+      .forEach((message) => onMarkRead(message))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, messages])
+  return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Messages</h2><p style={{ color: muted }}>{isAdmin ? 'Conversations with instructors and schools.' : 'Your conversation with KADA admin.'}</p><div style={{ display: 'grid', gridTemplateColumns: isAdmin ? '220px 1fr' : '1fr', gap: 14 }}>{isAdmin && <Card style={{ padding: 10 }}>{threadKeys.length ? threadKeys.map((key) => <button key={key} type="button" onClick={() => setTarget(key)} style={{ display: 'flex', justifyContent: 'space-between', width: '100%', padding: '9px 8px', border: 0, borderTop: `1px solid ${rule}`, background: active === key ? '#f1eee2' : 'transparent', cursor: 'pointer', color: ink, fontWeight: active === key ? 700 : 400, textAlign: 'left' }}><span>{threadLabel(key)}</span>{unreadInThread(key) > 0 && <span style={{ background: warn, color: '#fff', borderRadius: 10, padding: '1px 7px', fontSize: 11, fontWeight: 700 }}>{unreadInThread(key)}</span>}</button>) : <p style={{ color: muted, padding: 8, fontSize: 13 }}>No conversations yet.</p>}</Card>}<Card style={{ padding: 16 }}>{activeMessages.length ? activeMessages.map((message) => { const mine = message.senderKind === myKind && (myKind === 'admin' || message.senderInstructorId === myInstructorId || message.senderSchoolId === mySchoolId); return <div key={message.id} style={{ marginBottom: 10, textAlign: mine ? 'right' : 'left' }}><div style={{ display: 'inline-block', maxWidth: '75%', background: mine ? emerald : '#f1eee2', color: mine ? '#fff' : ink, borderRadius: 10, padding: '8px 12px', fontSize: 13, lineHeight: 1.5, textAlign: 'left' }}>{message.body}</div><div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{mine ? 'You' : threadLabel(`${message.senderKind}:${message.senderInstructorId || message.senderSchoolId || ''}`)} · {new Date(message.createdAt).toLocaleString()}{!mine && !message.readAt ? ' · new' : ''}</div></div> }) : <p style={{ color: muted }}>No messages yet. {isAdmin ? 'Open an instructor or school record to start one.' : 'Send a message below to reach KADA admin.'}</p>}<div style={{ display: 'flex', gap: 8, marginTop: 12 }}><input style={inputStyle} placeholder="Write a message…" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') send() }} /><Button small onClick={send} disabled={!draft.trim() || (isAdmin && !active)}>Send</Button></div></Card></div></div>
+}
+
+function JobBoardView({ jobs, bookings, schools, instructors, isAdmin, onClaim, onDecision }) {
+  const [reasonJob, setReasonJob] = useState(null)
+  const [reason, setReason] = useState('')
+  return <div><div style={{ marginBottom: 18 }}><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Job board</h2><p style={{ color: muted }}>Available work is anonymized until an admin accepts a claim.</p></div><Card style={{ padding: 18 }}>{jobs.length ? jobs.map((job) => <div key={job.id} style={{ borderTop: `1px solid ${rule}`, padding: '14px 0', display: 'flex', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap' }}><div>{isAdmin && job.claimedBy && <p style={{ margin: '0 0 5px', color: emerald, fontWeight: 700 }}>Claimed by {instructors.find((instructor) => instructor.id === job.claimedBy)?.name || 'Instructor'}</p>}{isAdmin && job.claimedBy && <p style={{ margin: '0 0 5px', color: muted, fontSize: 12 }}>{(() => { const instructor = instructors.find((item) => item.id === job.claimedBy); return instructor ? `${instructor.email || 'No email'} · ${instructor.phone || 'No phone'} · ${instructor.locationAreas || 'No locations'} · ${instructor.gender || 'Gender not provided'}` : 'Instructor profile unavailable' })()}</p>}<strong>{job.status === 'accepted' && job.bookingId ? schools.find((school) => school.id === bookings.find((booking) => booking.id === job.bookingId)?.schoolId)?.name : 'School workshop'}</strong><p style={{ margin: '4px 0 0', color: muted }}>{job.date} · {job.sessionType} · {job.locationArea || 'Location shared after acceptance'} · {job.studentCount} students · {formatCurrency(job.instructorPay)}</p>{job.status === 'rejected' && <p style={{ color: warn, margin: '4px 0 0' }}>Rejected: {job.rejectionReason}</p>}</div><div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Badge text={job.status} tone={job.status === 'accepted' ? 'green' : job.status === 'rejected' ? 'red' : 'gold'} />{isAdmin && job.status === 'pending' && <><Button small onClick={() => onDecision(job, 'accepted')}>Accept</Button><Button small variant="danger" onClick={() => { setReasonJob(job); setReason('') }}>Reject</Button></>}{isAdmin && (job.status === 'accepted' || job.status === 'rejected') && <Button small variant="ghost" onClick={() => onDecision(job, 'undo')}>Undo</Button>}{!isAdmin && job.status === 'open' && <Button small onClick={() => onClaim(job)}>Claim job</Button>}{!isAdmin && job.status === 'pending' && <span style={{ color: muted, fontSize: 12 }}>Pending approval</span>}</div></div>) : <p style={{ color: muted }}>No jobs are currently published.</p>}</Card>{reasonJob && <Modal title="Reject claim" onClose={() => setReasonJob(null)}><Field label="Reason"><textarea style={{ ...inputStyle, minHeight: 80 }} value={reason} onChange={(event) => setReason(event.target.value)} required /></Field><Button onClick={() => { onDecision(reasonJob, 'rejected', reason); setReasonJob(null) }}>Reject claim</Button></Modal>}</div>
+}
+
+function ParentDashboard({ session, family, bookings, students, onCancelBooking, onBillingPortal, onCancelSubscription, onBack, onSignOut }) {
+  const activeStudents = students.filter((student) => student.membershipStatus === 'active' || student.familyId === family?.id)
+  return <main className="ops-shell wrap"><div className="ops-header"><div><p className="eyebrow dark">Parent dashboard</p><h2 className="display">Welcome, {family?.guardian_name || session.user.email}</h2><p style={{ color: muted }}>Your family bookings, students, and plan.</p></div><div style={{ display: 'flex', gap: 8 }}><Button variant="ghost" onClick={onBack}>Back to site</Button><Button variant="ghost" onClick={onSignOut}>Sign out</Button></div></div><div className="ops-grid"><div className="panel stat-panel"><div className="panel-label">Plan</div><strong>{family?.plan_type === 'monthly_membership' ? '£25 / month' : family?.plan_type === 'day_pass' ? 'Day pass' : 'No plan yet'}</strong></div><div className="panel stat-panel"><div className="panel-label">Plan status</div><strong>{family?.membership_status || 'Pending'}</strong></div><div className="panel stat-panel"><div className="panel-label">Children</div><strong>{activeStudents.length}</strong></div></div><div className="panel" style={{ marginBottom: 18 }}><div className="panel-head"><h3>Your children</h3></div>{activeStudents.length ? activeStudents.map((student) => <div key={student.id} className="booking-item"><div><strong>{student.name}</strong><p>{student.dateOfBirth} · Age {ageFromDob(student.dateOfBirth)} · {student.className}</p></div><Badge text={student.membershipStatus} tone="green" /></div>) : <p style={{ color: muted }}>Children appear here after a completed class booking.</p>}</div><div className="panel"><div className="panel-head"><h3>Your bookings</h3></div>{bookings.length ? bookings.map((booking) => <div key={booking.id} className="booking-item"><div><strong>{booking.sessionType}</strong><p>{booking.date} · {formatCurrency(booking.price)} · {booking.status}</p></div>{booking.status !== 'Cancelled' && <Button small variant="danger" onClick={() => onCancelBooking(booking.id)}>Cancel booking</Button>}</div>) : <p style={{ color: muted }}>No bookings yet.</p>}<div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 18 }}>{family?.stripe_customer_id && <Button variant="ghost" onClick={onBillingPortal}>Change payment details</Button>}{family?.stripe_subscription_id && family.membership_status === 'active' && <Button variant="danger" onClick={onCancelSubscription}>Cancel subscription</Button>}</div></div></main>
+}
+
+function AuthScreen({ onAuthenticated }) {
+  const [mode, setMode] = useState('signin')
+  const [role, setRole] = useState('school')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [fullName, setFullName] = useState('')
+  const [schoolName, setSchoolName] = useState('')
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const submit = async (event) => {
+    event.preventDefault()
+    setBusy(true)
+    setMessage('')
+
+    if (mode === 'signin') {
+      const { error } = await supabase.auth.signInWithPassword({ email, password })
+      if (error) setMessage(error.message)
+      else onAuthenticated()
+    } else {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { data: { role, full_name: fullName, school_name: schoolName } },
+      })
+      if (error) {
+        setMessage(error.message)
+      } else if (data.user) {
+        setMessage('Account created. Check your email if confirmation is enabled, then sign in.')
+      }
+    }
+    setBusy(false)
+  }
+
+  return (
+    <main style={{ minHeight: '100vh', background: cream, display: 'grid', placeItems: 'center', padding: 24, fontFamily: sans }}>
+      <div style={{ width: '100%', maxWidth: 430 }}>
+        <p style={{ color: gold, fontSize: 11, letterSpacing: '0.18em', textTransform: 'uppercase', fontWeight: 700 }}>King's Ark Dance Academy</p>
+        <h1 style={{ fontFamily: serif, color: emerald, fontSize: 32, fontWeight: 400, margin: '6px 0 8px' }}>{mode === 'signin' ? 'Welcome back.' : 'Create an account.'}</h1>
+        <p style={{ color: muted, fontSize: 14, marginBottom: 24 }}>{mode === 'signin' ? 'Sign in to access your KADA workspace.' : 'Create a school or instructor account.'}</p>
+        <Card style={{ padding: 22 }}>
+          <form onSubmit={submit}>
+            {mode === 'signup' && <>
+              <Field label="Account type"><select style={inputStyle} value={role} onChange={(event) => setRole(event.target.value)}><option value="parent">Parent</option><option value="school">School</option><option value="instructor">Instructor</option></select></Field>
+              <Field label="Full name"><input style={inputStyle} value={fullName} onChange={(event) => setFullName(event.target.value)} required /></Field>
+              {role === 'school' && <Field label="School name"><input style={inputStyle} value={schoolName} onChange={(event) => setSchoolName(event.target.value)} required /></Field>}
+            </>}
+            <Field label="Email"><input type="email" style={inputStyle} value={email} onChange={(event) => setEmail(event.target.value)} required /></Field>
+            <Field label="Password"><input type="password" minLength="8" style={inputStyle} value={password} onChange={(event) => setPassword(event.target.value)} required /></Field>
+            <Button type="submit" disabled={busy}>{busy ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}</Button>
+          </form>
+          {message && <p style={{ fontSize: 13, lineHeight: 1.5, color: message.includes('created') ? okGreen : warn, margin: '16px 0 0' }}>{message}</p>}
+          <button type="button" onClick={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setMessage('') }} style={{ marginTop: 18, background: 'none', border: 'none', padding: 0, color: emerald, fontFamily: sans, fontSize: 13, cursor: 'pointer' }}>{mode === 'signin' ? 'Create a new account' : 'Already have an account? Sign in'}</button>
+        </Card>
+      </div>
+    </main>
+  )
+}
+
+function App() {
+  const [view, setView] = useState('site')
+  const pendingPublicSection = useRef(null)
+  const [session, setSession] = useState(null)
+  const [profile, setProfile] = useState(null)
+  const [authReady, setAuthReady] = useState(!supabaseReady)
+  const [bookings, setBookings] = useState(defaultBookings)
+  const [schools, setSchools] = useState(defaultSchools)
+  const [instructors, setInstructors] = useState(defaultInstructors)
+    const [publicInstructors, setPublicInstructors] = useState([])
+  const [template, setTemplate] = useState(() => parseStored('kada-template', defaultTemplate))
+  const [tab, setTab] = useState('dashboard')
+  const [bookingSearch, setBookingSearch] = useState('')
+  const [schoolSearch, setSchoolSearch] = useState('')
+  const [instructorSearch, setInstructorSearch] = useState('')
+  const [instructorSort, setInstructorSort] = useState('name')
+  const [showAllBookings, setShowAllBookings] = useState(false)
+  const [showAllSchools, setShowAllSchools] = useState(false)
+  const [showAllInstructors, setShowAllInstructors] = useState(false)
+  const [bookingModal, setBookingModal] = useState(null)
+  const [schoolModal, setSchoolModal] = useState(null)
+  const [schoolRecord, setSchoolRecord] = useState(null)
+  const [instructorModal, setInstructorModal] = useState(null)
+  const [invoiceBooking, setInvoiceBooking] = useState(null)
+  const [invoicePdfUrl, setInvoicePdfUrl] = useState('')
+  const [messageTarget, setMessageTarget] = useState(null)
+  const [messageDraft, setMessageDraft] = useState('')
+  const [dbsUploading, setDbsUploading] = useState(false)
+  const [invoiceSettings, setInvoiceSettings] = useState({ accountName: '', sortCode: '', accountNumber: '' })
+  const [invoiceSettingsSaving, setInvoiceSettingsSaving] = useState(false)
+  const [invoicePermissionIds, setInvoicePermissionIds] = useState([])
+  const [quote, setQuote] = useState(null)
+  const [toast, setToast] = useState('')
+  const [dismissedNotifications, setDismissedNotifications] = useState(() => parseStored('kada-dismissed-notifications', []))
+  const [schoolRequest, setSchoolRequest] = useState({
+    schoolName: '',
+    contactName: '',
+    email: '',
+    studentCount: 45,
+    sessionType: 'Full day (£490)',
+    date: '2026-09-18',
+    notes: '',
+  })
+
+  useEffect(() => {
+    if (view !== 'site' || !pendingPublicSection.current) return undefined
+    const target = pendingPublicSection.current
+    const frame = window.requestAnimationFrame(() => {
+      document.querySelector(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      pendingPublicSection.current = null
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [view])
+  const [parentBooking, setParentBooking] = useState({ planType: 'monthly_membership', className: 'Saturday Gospel Afrobeats', classDate: '2026-09-05', parentName: '', parentEmail: '', students: [{ name: '', dateOfBirth: '' }] })
+  const [students, setStudents] = useState([])
+  const [families, setFamilies] = useState([])
+  const [jobs, setJobs] = useState([])
+  const [messages, setMessages] = useState([])
+  const [checkoutBusy, setCheckoutBusy] = useState(false)
+  const [invoiceSending, setInvoiceSending] = useState(false)
+  const [publicMenuOpen, setPublicMenuOpen] = useState(false)
+  const [publicForm, setPublicForm] = useState(null)
+  const headerRef = useRef(null)
+
+  useEffect(() => {
+    if (!publicMenuOpen) return undefined
+    const closeOnOutsideTap = (event) => {
+      if (!headerRef.current?.contains(event.target)) setPublicMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsideTap)
+    return () => document.removeEventListener('pointerdown', closeOnOutsideTap)
+  }, [publicMenuOpen])
+
+  useEffect(() => {
+    if (!supabase) return undefined
+
+    let mounted = true
+    const loadSession = async () => {
+      const { data } = await supabase.auth.getSession()
+      if (!mounted) return
+      setSession(data.session)
+      setAuthReady(true)
+    }
+    loadSession()
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession)
+      if (!nextSession) {
+        setProfile(null)
+        setView('site')
+      }
+    })
+
+    return () => {
+      mounted = false
+      listener.subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!session || !supabaseReady) return undefined
+    let mounted = true
+
+    const loadRecords = async () => {
+      const { data: nextProfile } = await supabase.from('profiles').select('*').eq('id', session.user.id).maybeSingle()
+      const parentResponse = nextProfile?.role === 'parent'
+        ? await fetch('/api/parent/dashboard', { headers: { Authorization: `Bearer ${session.access_token}` } })
+        : null
+      const parentData = parentResponse?.ok ? await parentResponse.json() : null
+      const [nextBookings, nextSchools, nextInstructors, nextPublicInstructors, nextStudents, nextFamilies, nextJobs, nextMessages, templateResponse] = await Promise.all([
+        loadTable('bookings', []),
+        loadTable('schools', []),
+        loadTable('instructors', []),
+        loadTable('instructor_public_profiles', []),
+        loadTable('students', []),
+        loadTable('parent_families', []),
+        loadTable('job_board_jobs', []),
+        loadTable('messages', []),
+        supabase.from('workshop_template').select('*').limit(1).maybeSingle(),
+      ])
+
+      if (!mounted) return
+      setBookings(parentData ? parentData.bookings.map(normalizeBooking) : nextBookings)
+      setSchools(nextSchools)
+      setInstructors(nextInstructors)
+        setPublicInstructors(nextPublicInstructors)
+      setStudents(parentData ? parentData.students.map(normalizeStudent) : nextStudents)
+      setFamilies(parentData ? [parentData.family] : nextFamilies)
+      setJobs(nextJobs)
+      setMessages(nextMessages)
+      setTemplate(templateResponse.data
+        ? { sections: templateResponse.data.sections || [], maxStudentsPerStaff: templateResponse.data.max_students_per_staff || 30, defaultDuration: templateResponse.data.default_duration || 45, notes: templateResponse.data.notes || '' }
+        : parseStored('kada-template', defaultTemplate))
+      setProfile(nextProfile)
+    }
+
+    loadRecords()
+
+    return () => {
+      mounted = false
+    }
+  }, [session])
+
+  useEffect(() => {
+    if (!supabaseReady || profile?.role !== 'admin') return undefined
+    let mounted = true
+    supabase.from('invoice_settings').select('account_name,sort_code,account_number').eq('id', 'default').maybeSingle().then(({ data }) => {
+      if (mounted && data) setInvoiceSettings({ accountName: data.account_name || '', sortCode: data.sort_code || '', accountNumber: data.account_number || '' })
+    })
+    return () => { mounted = false }
+  }, [profile?.role])
+
+  useEffect(() => {
+    if (!session || profile?.role !== 'admin') return undefined
+    fetch('/api/admin/invoice-permissions', { headers: { Authorization: `Bearer ${session.access_token}` } }).then((response) => response.ok ? response.json() : null).then((result) => { if (result) setInvoicePermissionIds(result.users.map((user) => user.email.toLowerCase())) })
+    return undefined
+  }, [session, profile?.role])
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('kada-bookings', JSON.stringify(bookings))
+      window.localStorage.setItem('kada-schools', JSON.stringify(schools))
+      window.localStorage.setItem('kada-instructors', JSON.stringify(instructors))
+      window.localStorage.setItem('kada-template', JSON.stringify(template))
+    }
+  }, [bookings, schools, instructors, template])
+
+  useEffect(() => {
+    if (!toast) return undefined
+    const timer = window.setTimeout(() => setToast(''), 2000)
+    return () => window.clearTimeout(timer)
+  }, [toast])
+
+  useEffect(() => {
+    window.localStorage.setItem('kada-dismissed-notifications', JSON.stringify(dismissedNotifications))
+  }, [dismissedNotifications])
+
+  useEffect(() => {
+    if (!supabaseReady || profile?.role !== 'admin' || (tab !== 'dashboard' && tab !== 'instructors')) return undefined
+    let mounted = true
+    supabase.from('instructors').select('*').then(({ data, error }) => {
+      if (mounted && !error && data) setInstructors(data.map(normalizeInstructor))
+    })
+    return () => { mounted = false }
+  }, [tab, profile?.role])
+
+  useEffect(() => {
+    if (view !== 'site' || !authReady) return undefined
+    const revealItems = document.querySelectorAll('.site-public .reveal')
+    console.log('[KADA reveal] observing', revealItems.length, 'elements')
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return
+        console.log('[KADA reveal]', {
+          target: entry.target.className,
+          section: entry.target.closest('section')?.id || entry.target.closest('section')?.className,
+          intersectionRatio: entry.intersectionRatio,
+        })
+        entry.target.classList.add('in')
+        observer.unobserve(entry.target)
+      })
+    }, { threshold: 0.12, rootMargin: '0px 0px -60px 0px' })
+    revealItems.forEach((item) => {
+      observer.observe(item)
+      const rect = item.getBoundingClientRect()
+      if (rect.top < window.innerHeight && rect.bottom > 0) item.classList.add('in')
+    })
+    const onScroll = () => {
+      document.querySelectorAll('.site-public [data-parallax]').forEach((item) => {
+        const speed = Number(item.dataset.parallax || 0.12)
+        item.style.transform = `translateY(${window.scrollY * speed}px)`
+      })
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    onScroll()
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('scroll', onScroll)
+    }
+  }, [view, authReady])
+
+  const conflicts = useMemo(() => {
+    const map = {}
+    bookings.forEach((booking) => {
+      if (!booking.date || !booking.instructorId || booking.status === 'Cancelled') return
+      const key = `${booking.date}|${booking.instructorId}`
+      map[key] = (map[key] || []).concat(booking.id)
+    })
+    return new Set(
+      Object.values(map)
+        .filter((ids) => ids.length > 1)
+        .flat(),
+    )
+  }, [bookings])
+
+  const stats = useMemo(() => {
+    const upcomingCount = bookings.filter((booking) => booking.status !== 'Cancelled').length
+    const confirmedRevenue = bookings.reduce((sum, booking) => {
+      if (booking.status === 'Cancelled') return sum
+      return sum + Number(booking.price || 0)
+    }, 0)
+    const unpaidInvoices = bookings.filter((booking) => booking.invoiceStatus !== 'Paid' && booking.status !== 'Cancelled').length
+    return { upcomingCount, confirmedRevenue, unpaidInvoices }
+  }, [bookings])
+
+  const handleQuoteChange = (field, value) => {
+    setSchoolRequest((previous) => ({ ...previous, [field]: value }))
+  }
+
+  const navigatePublicSection = (event, target) => {
+    event.preventDefault()
+    setPublicMenuOpen(false)
+    if (view !== 'site') {
+      pendingPublicSection.current = target
+      setView('site')
+      return
+    }
+    document.querySelector(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  const openPublicForm = (event, form) => {
+    event.preventDefault()
+    setPublicForm(form)
+    setPublicMenuOpen(false)
+  }
+
+  const startClassCheckout = async (event) => {
+    event.preventDefault()
+    setCheckoutBusy(true)
+    try {
+      const response = await fetch('/api/stripe/create-checkout-session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parentBooking) })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Checkout could not be started.')
+      window.location.assign(result.url)
+    } catch (error) {
+      setToast(error.message)
+      setCheckoutBusy(false)
+    }
+  }
+
+  const handleQuoteSubmit = (event) => {
+    event.preventDefault()
+    if (!session) {
+      setView('auth')
+      setToast('Sign in or create a school account to request a booking.')
+      return
+    }
+    if (profile?.role === 'instructor') {
+      setToast('Instructor accounts cannot request school bookings.')
+      return
+    }
+    const priceData = buildPrice(schoolRequest)
+    const needed = priceData.staffNeeded
+    const available = instructors.filter((instructor) => {
+      const assigned = bookings.some(
+        (booking) =>
+          booking.date === schoolRequest.date &&
+          booking.instructorId === instructor.id &&
+          booking.status !== 'Cancelled',
+      )
+      return !assigned
+    })
+
+    const fits = available.length >= needed
+    const nextQuote = {
+      ...schoolRequest,
+      price: priceData.price,
+      staffNeeded: needed,
+      availableInstructors: available.length,
+      statusText: fits ? 'Ready to book' : 'Callback required',
+      canBook: fits,
+    }
+
+    setQuote(nextQuote)
+
+    if (fits) {
+      const bookingId = `book-${Date.now()}`
+      const schoolId = profile?.school_id || `school-${Date.now()}`
+      const booking = {
+        id: bookingId,
+        schoolId,
+        contactName: schoolRequest.contactName || 'School contact',
+        contactEmail: schoolRequest.email || 'school@example.com',
+        date: schoolRequest.date,
+        sessionType: schoolRequest.sessionType,
+        price: priceData.price,
+        studentCount: Number(schoolRequest.studentCount || 0),
+        instructorId: available[0]?.id || '',
+        status: 'Enquiry',
+        invoiceStatus: 'Not sent',
+        invoiceNumber: '',
+        notes: schoolRequest.notes || 'School enquiry received via website form',
+        requestedBy: session.user.id,
+      }
+
+      const schoolRecord = {
+        id: schoolId,
+        name: schoolRequest.schoolName,
+        contactName: schoolRequest.contactName,
+        email: schoolRequest.email,
+        phone: '',
+        notes: 'Website enquiry',
+      }
+
+      const nextBookings = [booking, ...bookings]
+      const nextSchools = schools.some((school) => school.name === schoolRequest.schoolName)
+        ? schools
+        : [schoolRecord, ...schools]
+
+      setBookings(nextBookings)
+      setSchools(nextSchools)
+      void saveTable('bookings', nextBookings)
+      void saveTable('schools', nextSchools)
+      setToast('Booking sent to the operations system.')
+    } else {
+      setToast('This date needs more instructor coverage; callback requested.')
+    }
+  }
+
+  const quotePrice = quote ? quote.price : buildPrice(schoolRequest).price
+  const quoteStaff = quote ? quote.staffNeeded : buildPrice(schoolRequest).staffNeeded
+  const isAdmin = profile?.role === 'admin'
+  const isInstructor = profile?.role === 'instructor'
+
+  const persistRows = (tableName, rows, setter) => { setter(rows); void saveTable(tableName, rows) }
+  const _saveStudent = (student) => { const next = students.some((item) => item.id === student.id) ? students.map((item) => item.id === student.id ? student : item) : [student, ...students]; persistRows('students', next, setStudents) }
+  const sendInvoice = async (booking) => {
+    const school = schools.find((item) => item.id === booking.schoolId)
+    setInvoiceSending(true)
+    try {
+      const invoiceOverrides = { description: booking.invoiceDescription, rate: booking.invoiceRate, amount: booking.invoiceAmount, discountPercent: booking.discountPercent }
+      const response = await fetch('/api/invoices/send', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ booking: { ...booking, invoiceOverrides }, school }) })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Invoice could not be sent.')
+      const sentBooking = { ...booking, invoiceStatus: 'Sent' }
+      const next = bookings.some((item) => item.id === sentBooking.id) ? bookings.map((item) => item.id === sentBooking.id ? sentBooking : item) : [sentBooking, ...bookings]
+      setBookings(next)
+      setInvoiceBooking(sentBooking)
+      setToast(`Invoice sent to ${result.recipient}.`)
+    } catch (error) {
+      setToast(error.message)
+    } finally {
+      setInvoiceSending(false)
+    }
+  }
+  const saveBooking = async (booking) => {
+    const previous = bookings.find((item) => item.id === booking.id)
+    const next = bookings.some((item) => item.id === booking.id) ? bookings.map((item) => item.id === booking.id ? booking : item) : [booking, ...bookings]
+    persistRows('bookings', next, setBookings)
+    setBookingModal(null)
+    if (booking.status === 'Confirmed' && booking.invoiceStatus === 'Not sent' && previous?.status !== 'Confirmed' && (schools.find((item) => item.id === booking.schoolId)?.email || booking.contactEmail)) await sendInvoice(booking)
+  }
+  const saveSchool = (school) => { const next = schools.some((item) => item.id === school.id) ? schools.map((item) => item.id === school.id ? school : item) : [school, ...schools]; persistRows('schools', next, setSchools); setSchoolModal(null); setSchoolRecord(next.find((item) => item.id === school.id) || null) }
+  const saveInstructor = (instructor) => { const next = instructors.some((item) => item.id === instructor.id) ? instructors.map((item) => item.id === instructor.id ? instructor : item) : [instructor, ...instructors]; persistRows('instructors', next, setInstructors); setInstructorModal(null) }
+  const publishJob = (booking, draft) => { const pay = Number(draft.pay || booking.instructorPay || 0); if (!pay) { setToast('Set an instructor pay rate before publishing.'); return } const job = { id: `job-${booking.id}`, bookingId: booking.id, date: booking.date, sessionType: booking.sessionType, studentCount: booking.studentCount, locationArea: draft.location || 'Location shared after acceptance', instructorPay: pay, status: 'open', claimedBy: '' }; const updatedBooking = { ...booking, instructorPay: pay }; const nextBookings = bookings.map((item) => item.id === booking.id ? updatedBooking : item); persistRows('bookings', nextBookings, setBookings); persistRows('job_board_jobs', [job, ...jobs], setJobs) }
+  const claimJob = (job) => { const next = jobs.map((item) => item.id === job.id ? { ...item, status: 'pending', claimedBy: profile.instructor_id, claimedAt: new Date().toISOString(), decidedAt: '' } : item); persistRows('job_board_jobs', next, setJobs) }
+  const decideJob = (job, decision, rejectionReason = '') => { const timestamp = new Date().toISOString(); const nextStatus = decision === 'undo' ? 'pending' : decision; const next = jobs.map((item) => item.id === job.id ? { ...item, status: nextStatus, rejectionReason: decision === 'undo' ? '' : rejectionReason, decidedAt: decision === 'undo' ? '' : timestamp } : item); persistRows('job_board_jobs', next, setJobs); if (decision === 'accepted' || decision === 'undo') { const booking = bookings.find((item) => item.id === job.bookingId); if (booking) saveBooking({ ...booking, instructorId: decision === 'accepted' ? job.claimedBy : '' }) } }
+  const saveTemplate = async (next) => { setTemplate(next); window.localStorage.setItem('kada-template', JSON.stringify(next)); const { data: current } = await supabase.from('workshop_template').select('id').limit(1).maybeSingle(); const row = { id: current?.id || 'default', max_students_per_staff: Number(next.maxStudentsPerStaff), default_duration: Number(next.defaultDuration), sections: next.sections, notes: next.notes }; const { error } = await supabase.from('workshop_template').upsert(row, { onConflict: 'id' }); setToast(error ? 'Template could not be saved.' : 'Workshop template saved.') }
+
+  const parentFamily = families.find((family) => family.owner_user_id === session?.user.id) || families.find((family) => family.guardian_email === session?.user.email)
+  const parentBookings = parentFamily ? bookings.filter((booking) => booking.familyId === parentFamily.id) : bookings
+  const parentStudents = parentFamily ? students.filter((student) => student.familyId === parentFamily.id) : students
+  const parentRequest = (path, body = {}) => fetch(path, { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const cancelParentBooking = async (bookingId) => { const response = await parentRequest('/api/parent/cancel-booking', { bookingId }); setToast(response.ok ? 'Booking cancelled.' : 'Booking could not be cancelled.'); if (response.ok) setBookings(bookings.map((booking) => booking.id === bookingId ? { ...booking, status: 'Cancelled' } : booking)) }
+  const openBillingPortal = async () => { const response = await parentRequest('/api/parent/billing-portal'); const result = await response.json(); if (response.ok) window.location.assign(result.url); else setToast(result.error) }
+  const cancelParentSubscription = async () => { const response = await parentRequest('/api/parent/cancel-subscription'); setToast(response.ok ? 'Subscription cancelled.' : 'Subscription could not be cancelled.') }
+  const markBookingDone = async (bookingId) => { const completedAt = new Date().toISOString(); const response = await fetch('/api/instructor/mark-done', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId }) }); if (response.ok) setBookings(bookings.map((booking) => booking.id === bookingId ? { ...booking, status: 'Delivered', needsAdminAttention: true, completedAt } : booking)); setToast(response.ok ? 'Session marked as done. Admin review is now pending.' : 'Session could not be marked as done.') }
+  const instructorRecord = isInstructor ? instructors.find((instructor) => instructor.id === profile?.instructor_id) : null
+  const uploadDbs = async (file) => {
+    if (!file || !instructorRecord) return
+    setDbsUploading(true)
+    const path = `${instructorRecord.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`
+    try {
+      const { error } = await supabase.storage.from('dbs-certificates').upload(path, file, { cacheControl: '3600', upsert: false, contentType: file.type })
+      if (error) throw error
+      const { data, error: updateError } = await supabase.from('instructors').update({ dbs_status: 'Pending', dbs_file_path: path, dbs_uploaded_at: new Date().toISOString(), dbs_decided_at: null, dbs_rejection_reason: null }).eq('id', instructorRecord.id).select().single()
+      if (updateError) throw updateError
+      const updated = normalizeInstructor(data)
+      setInstructors(instructors.map((instructor) => instructor.id === updated.id ? updated : instructor))
+      setToast('DBS certificate uploaded for admin review.')
+    } catch (error) {
+      await supabase.storage.from('dbs-certificates').remove([path])
+      setToast(error.message || 'DBS certificate could not be uploaded.')
+    } finally {
+      setDbsUploading(false)
+    }
+  }
+  const openDbsFile = async (instructorId) => { const response = await fetch(`/api/dbs/file/${encodeURIComponent(instructorId)}`, { headers: { Authorization: `Bearer ${session.access_token}` } }); const result = await response.json(); if (response.ok) window.open(result.url, '_blank', 'noopener,noreferrer'); else setToast(result.error || 'DBS certificate could not be opened.') }
+  const reviewDbs = async (instructor, decision, rejectionReason = '') => { const response = await fetch('/api/dbs/review', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ instructorId: instructor.id, decision, rejectionReason }) }); if (response.ok) { const updated = { ...instructor, dbsStatus: decision, dbsDecidedAt: new Date().toISOString(), dbsRejectionReason: decision === 'Rejected' ? rejectionReason : '' }; persistRows('instructors', instructors.map((item) => item.id === instructor.id ? updated : item), setInstructors) } setToast(response.ok ? `DBS ${decision.toLowerCase()}.` : 'DBS decision could not be saved.') }
+  const downloadInvoice = async (booking) => { const params = new URLSearchParams({ description: booking.invoiceDescription ?? '', rate: String(booking.invoiceRate ?? booking.price ?? 0), amount: String(booking.invoiceAmount ?? booking.price ?? 0), discountPercent: String(booking.discountPercent ?? 0) }); const response = await fetch(`/api/invoices/pdf/${encodeURIComponent(booking.id)}?${params}`, { headers: { Authorization: `Bearer ${session.access_token}` } }); if (!response.ok) { setToast('Invoice PDF could not be generated.'); return } const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${booking.invoiceNumber || booking.id}.pdf`; document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000) }
+  const _toggleInvoicePermission = async (instructor) => { const enabled = !invoicePermissionIds.includes((instructor.email || '').toLowerCase()); const response = await fetch('/api/admin/invoice-permissions', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ instructorId: instructor.id, enabled }) }); const result = await response.json(); if (!response.ok) { setToast(result.error || 'Invoice permission could not be saved.'); return } setInvoicePermissionIds((current) => enabled ? [...current, instructor.email.toLowerCase()] : current.filter((email) => email !== instructor.email.toLowerCase())); setToast(enabled ? `${instructor.name} can now send invoices.` : `${instructor.name} invoice access removed.`) }
+  const sendMessage = async (draft) => {
+    const row = { id: crypto.randomUUID(), sender_kind: draft.senderKind, sender_instructor_id: draft.senderInstructorId || null, sender_school_id: draft.senderSchoolId || null, recipient_kind: draft.recipientKind, recipient_instructor_id: draft.recipientInstructorId || null, recipient_school_id: draft.recipientSchoolId || null, body: draft.body }
+    const { data, error } = await supabase.from('messages').insert(row).select().single()
+    if (error) { setToast(error.message || 'Message could not be sent.'); return }
+    setMessages([...messages, normalizeMessage(data)])
+  }
+  const saveInvoiceSettings = async (settings) => {
+    setInvoiceSettingsSaving(true)
+    const { error } = await supabase.from('invoice_settings').upsert({ id: 'default', account_name: settings.accountName, sort_code: settings.sortCode, account_number: settings.accountNumber, updated_at: new Date().toISOString(), updated_by: session.user.id }, { onConflict: 'id' })
+    setInvoiceSettingsSaving(false)
+    setToast(error ? `Invoice settings could not be saved: ${error.message}` : 'Invoice settings saved.')
+    if (!error) setInvoiceSettings(settings)
+  }
+  const markMessageRead = async (message) => {
+    const readAt = new Date().toISOString()
+    const { error } = await supabase.from('messages').update({ read_at: readAt }).eq('id', message.id).is('read_at', null)
+    if (!error) setMessages((current) => current.map((item) => item.id === message.id ? { ...item, readAt } : item))
+  }
+  const myKind = isAdmin ? 'admin' : isInstructor ? 'instructor' : 'school'
+  const myInstructorId = isInstructor ? profile?.instructor_id : ''
+  const mySchoolId = profile?.role === 'school' ? profile?.school_id : ''
+  const unreadMessages = messages.filter((message) => !message.readAt && (isAdmin ? message.recipientKind === 'admin' : isInstructor ? message.recipientKind === 'instructor' && message.recipientInstructorId === myInstructorId : message.recipientKind === 'school' && message.recipientSchoolId === mySchoolId)).length
+  const canIssueInvoices = isAdmin || Boolean(profile?.can_send_invoices)
+  useEffect(() => {
+    if (!invoiceBooking || !session || !canIssueInvoices) {
+      return undefined
+    }
+    let active = true
+    let objectUrl = ''
+    const params = new URLSearchParams({ description: invoiceBooking.invoiceDescription ?? invoiceBooking.sessionType ?? '', rate: String(invoiceBooking.invoiceRate ?? invoiceBooking.price ?? 0), amount: String(invoiceBooking.invoiceAmount ?? invoiceBooking.price ?? 0), discountPercent: String(invoiceBooking.discountPercent ?? 0) })
+    fetch(`/api/invoices/pdf/${encodeURIComponent(invoiceBooking.id)}?${params}`, { headers: { Authorization: `Bearer ${session.access_token}` } }).then(async (response) => {
+      if (!response.ok) throw new Error('Invoice PDF could not be generated.')
+      const blob = await response.blob()
+      objectUrl = URL.createObjectURL(blob)
+      if (active) setInvoicePdfUrl(objectUrl)
+    }).catch((error) => { if (active) setToast(error.message) })
+    return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [invoiceBooking, session, canIssueInvoices])
+  const visibleBookings = bookings.filter((booking) => `${booking.date} ${booking.sessionType} ${booking.status} ${booking.contactName}`.toLowerCase().includes(bookingSearch.toLowerCase()))
+  const visibleSchools = schools.filter((school) => `${school.name} ${school.contactName} ${school.email}`.toLowerCase().includes(schoolSearch.toLowerCase()))
+  const completedByInstructor = (id) => bookings.filter((booking) => booking.instructorId === id && booking.status === 'Delivered').length
+  const visibleInstructors = instructors.filter((instructor) => `${instructor.name} ${instructor.email} ${instructor.locationAreas} ${instructor.gender}`.toLowerCase().includes(instructorSearch.toLowerCase())).sort((first, second) => instructorSort === 'completed' ? completedByInstructor(second.id) - completedByInstructor(first.id) : instructorSort === 'location' ? first.locationAreas.localeCompare(second.locationAreas) : instructorSort === 'gender' ? first.gender.localeCompare(second.gender) : first.name.localeCompare(second.name))
+  const assignedInstructorLabel = (booking) => isAdmin || isInstructor ? instructors.find((instructor) => instructor.id === booking.instructorId)?.name : publicInstructors.find((instructor) => instructor.id === booking.instructorId)?.firstName
+
+  if (!authReady) return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', fontFamily: 'sans-serif' }}>Loading...</div>
+  if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
+  if (view === 'ops' && profile?.role === 'parent') return <ParentDashboard session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} />
+
+  return (
+    <div className="app-shell">
+      <header ref={headerRef} className="site-header">
+        <div className="wrap nav-wrap">
+          <div className="brand" aria-label="King's Ark Dance Academy home">
+                <img className="brand-logo" src="/images/logo.jpg" alt="King's Ark Dance Academy logo" />
+            <div className="brand-text">
+              <span className="name">King's Ark</span>
+              <span className="sub">Dance Academy</span>
+            </div>
+          </div>
+
+          <button type="button" className="mobile-menu-toggle" aria-label={publicMenuOpen ? 'Close navigation' : 'Open navigation'} aria-expanded={publicMenuOpen} onClick={() => setPublicMenuOpen(!publicMenuOpen)}><span></span><span></span><span></span></button>
+          <nav className={`nav-links ${publicMenuOpen ? 'open' : ''}`} aria-label="Main navigation">
+            <a href="#about" onClick={(event) => navigatePublicSection(event, '#about')}>About</a>
+            <a href="#workshops" onClick={(event) => navigatePublicSection(event, '#workshops')}>School Workshops</a>
+            <a href="#classes" onClick={(event) => navigatePublicSection(event, '#classes')}>Classes</a>
+            <a href="#videos" onClick={(event) => navigatePublicSection(event, '#videos')}>Stories</a>
+            <a href="#contact" onClick={(event) => navigatePublicSection(event, '#contact')}>Contact</a>
+            <button type="button" className="nav-cta" onClick={() => setView(session ? 'ops' : 'auth')}>{session ? 'Operations' : 'Sign in'}</button>
+          </nav>
+        </div>
+      </header>
+
+      {view === 'site' ? (
+        <div className="site-public">
+          <section className="hero">
+            <div className="wrap">
+              <div className="hero-stamp" aria-label="Established Birmingham, King's Ark Dance Academy"><svg viewBox="0 0 104 104" aria-hidden="true"><defs><path id="hero-stamp-path" d="M 52,52 m -38,0 a 38,38 0 1,1 76,0 a 38,38 0 1,1 -76,0" /></defs><text><textPath href="#hero-stamp-path">EST. BIRMINGHAM · KING'S ARK DANCE ACADEMY · </textPath></text></svg></div>
+              <div className="hero-grid hero-row">
+              <div className="hero-copy">
+                <div className="hero-eyebrow eyebrow">Faith · Culture · Movement</div>
+                <h1 className="display reveal in">Inspiring, uplifting.<span className="line2">Transforming lives.</span></h1>
+                <p className="lede">Faith inspired Gospel Afrobeats for the next generation, building confidence and character in children aged 5–16.</p>
+                <div className="hero-ctas">
+                  <a href="#classes" className="btn btn-gold" onClick={(event) => navigatePublicSection(event, '#classes')}>Our Classes</a>
+                  <a href="#workshops" className="btn btn-outline">School Workshops</a>
+                </div>
+              </div>
+              <div className="hero-visual-wrap"><div className="hero-visual reveal in" style={{ backgroundImage: "url('/images/hero-workshop.jpeg')" }}></div><div className="hero-float" aria-hidden="true" style={{ backgroundImage: "url('/images/nVgB0rjQ.jpeg')" }}></div></div>
+              </div>
+            </div>
+          </section>
+
+          <section className="stats-strip">
+            <div className="wrap stats-grid">
+              <div className="stat-inline"><div className="num display">1,000+</div><div className="label">Children<br />Empowered</div></div>
+              <div className="stat-inline"><div className="num display">50+</div><div className="label">Schools<br />Partnered</div></div>
+              <div className="stat-inline"><div className="num display">10+</div><div className="label">Years of<br />Impact</div></div>
+            </div>
+          </section>
+
+          <section className="about" id="about">
+            <div className="wrap about-grid">
+              <div className="about-img reveal" style={{ backgroundImage: "url('/images/about-kada.jpeg')" }}></div>
+              <div className="about-copy reveal reveal-delay-1">
+                <div className="eyebrow wine">About KADA</div>
+                <h2 className="display section-title">More than dance. <em>It's a movement.</em></h2>
+                <p>King's Ark Dance Academy, formerly Dance With Stago, is a faith inspired dance school rooted in Gospel Afrobeats. We work with children and young people aged 5–16, using dance to build confidence, teamwork, creativity and cultural awareness.</p>
+                <p>We've delivered workshops to over a thousand UK schools, with moments alongside ITV, BBC and the Commonwealth Games. The heart of what we do happens in the room: a shy child finding their voice, a group of strangers becoming a team in under an hour.</p>
+                <a href="#contact" className="btn btn-dark-outline">Learn More About Us</a>
+              </div>
+            </div>
+          </section>
+
+          <section className="values">
+            <div className="wrap">
+              <div className="section-head">
+                <span className="eyebrow">What We Stand On</span>
+                <h2 className="display">Our <em>values.</em></h2>
+              </div>
+
+              <div className="value-list reveal">
+                {valueItems.map((item) => (
+                  <div className="value-line" key={item.roman}>
+                    <span className="roman">{item.roman}</span>
+                    <h3 className="display">{item.title}</h3>
+                    <p>{item.text}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="service dark" id="workshops">
+            <div className="service-bg" style={{ backgroundImage: "url('/images/u.dance sunday warm up2.JPG')" }}></div>
+            <div className="wrap"><div className="service-card reveal">
+              <span className="eyebrow">For Schools</span>
+              <h2 className="display">Bring your school to life through Afrobeats.</h2>
+              <p>High energy, fully interactive workshops built for enrichment days, Culture Days and Black History Month. No dance experience needed, only enthusiasm.</p>
+              <a href="#school-quote" className="btn btn-solid" onClick={(event) => openPublicForm(event, 'school')}>Get a Quote</a>
+            </div></div>
+          </section>
+
+          <section className="service light" id="classes">
+            <div className="service-bg" style={{ backgroundImage: "url('/images/u.dance saturday20.JPG')" }}></div>
+            <div className="wrap"><div className="service-card reveal">
+              <span className="eyebrow">For Families</span>
+              <h2 className="display">Saturday classes, ages 5–16.</h2>
+              <p>Confidence, creativity and skill, term by term, in a joyful and faith rooted environment.</p>
+              <a href="#class-booking" className="btn btn-solid" onClick={(event) => openPublicForm(event, 'class')}>Book a Saturday class</a>
+            </div></div>
+          </section>
+
+          {publicForm === 'class' && <Modal title="Reserve a place" onClose={() => setPublicForm(null)} wide><section className="quote-section" id="class-booking">
+            <div className="wrap quote-wrap">
+              <div className="section-head left-align"><span className="eyebrow">Saturday Classes</span><h2 className="display">Reserve a place.</h2><p>Secure your child’s place through Stripe test checkout. The booking is confirmed after payment is completed.</p></div>
+              <form className="quote-form" onSubmit={startClassCheckout}>
+                <label><span>Plan</span><select value={parentBooking.planType} onChange={(event) => setParentBooking({ ...parentBooking, planType: event.target.value })}><option value="monthly_membership">Monthly Membership (£25/month)</option><option value="day_pass">Day Pass (£10)</option></select></label>
+                <label><span>Class</span><select value={parentBooking.className} onChange={(event) => setParentBooking({ ...parentBooking, className: event.target.value })}><option>Saturday Gospel Afrobeats</option><option>Saturday Foundations</option><option>Saturday Performance Team</option></select></label>
+                <label><span>Term / class date</span><input type="date" value={parentBooking.classDate} onChange={(event) => setParentBooking({ ...parentBooking, classDate: event.target.value })} required /></label>
+                <label><span>Parent / guardian name</span><input value={parentBooking.parentName} onChange={(event) => setParentBooking({ ...parentBooking, parentName: event.target.value })} required /></label>
+                <label><span>Parent / guardian email</span><input type="email" value={parentBooking.parentEmail} onChange={(event) => setParentBooking({ ...parentBooking, parentEmail: event.target.value })} required /></label>
+                <div><span className="label">Children</span>{parentBooking.students.map((student, index) => <div key={index} className="student-row"><input aria-label={`Child ${index + 1} name`} placeholder="Child name" value={student.name} onChange={(event) => { const students = [...parentBooking.students]; students[index] = { ...student, name: event.target.value }; setParentBooking({ ...parentBooking, students }) }} required /><input aria-label={`Child ${index + 1} date of birth`} type="date" value={student.dateOfBirth} onChange={(event) => { const students = [...parentBooking.students]; students[index] = { ...student, dateOfBirth: event.target.value }; setParentBooking({ ...parentBooking, students }) }} required />{index > 0 && <button type="button" className="remove-child" onClick={() => setParentBooking({ ...parentBooking, students: parentBooking.students.filter((_, childIndex) => childIndex !== index) })}>Remove</button>}</div>)}<button type="button" className="add-child" onClick={() => setParentBooking({ ...parentBooking, students: [...parentBooking.students, { name: '', dateOfBirth: '' }] })}>+ Add another child</button></div>
+                <div className="quote-summary"><div><span className="label">Price</span><strong>{parentBooking.planType === 'monthly_membership' ? '£25 / month' : '£10'}</strong></div><div><span className="label">Payment</span><strong>{parentBooking.planType === 'monthly_membership' ? 'Recurring' : 'One-time'}</strong></div></div>
+                <button type="submit" className="btn btn-gold submit-btn" disabled={checkoutBusy}>{checkoutBusy ? 'Opening checkout…' : 'Continue to payment'}</button>
+              </form>
+            </div>
+          </section></Modal>}
+
+          {publicForm === 'school' && <Modal title="Get a pricing estimate" onClose={() => setPublicForm(null)} wide><section className="quote-section" id="school-quote">
+            <div className="wrap quote-wrap">
+              <div className="section-head left-align">
+                <span className="eyebrow">School Enquiry</span>
+                <h2 className="display">Get a pricing estimate.</h2>
+              </div>
+
+              <form className="quote-form" onSubmit={handleQuoteSubmit}>
+                <div className="field-row">
+                  <label>
+                    <span>School name</span>
+                    <input value={schoolRequest.schoolName} onChange={(event) => handleQuoteChange('schoolName', event.target.value)} placeholder="Your school" required />
+                  </label>
+                  <label>
+                    <span>Contact name</span>
+                    <input value={schoolRequest.contactName} onChange={(event) => handleQuoteChange('contactName', event.target.value)} placeholder="Name" required />
+                  </label>
+                </div>
+
+                <div className="field-row">
+                  <label>
+                    <span>Email</span>
+                    <input type="email" value={schoolRequest.email} onChange={(event) => handleQuoteChange('email', event.target.value)} placeholder="school@email.com" required />
+                  </label>
+                  <label>
+                    <span>Student count</span>
+                    <input type="number" min="1" value={schoolRequest.studentCount} onChange={(event) => handleQuoteChange('studentCount', Number(event.target.value))} required />
+                  </label>
+                </div>
+
+                <div className="field-row">
+                  <label>
+                    <span>Session type</span>
+                    <select value={schoolRequest.sessionType} onChange={(event) => handleQuoteChange('sessionType', event.target.value)}>
+                      <option>Full day (£490)</option>
+                      <option>Half day</option>
+                      <option>Single workshop</option>
+                      <option>Custom</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Date</span>
+                    <input type="date" value={schoolRequest.date} onChange={(event) => handleQuoteChange('date', event.target.value)} required />
+                  </label>
+                </div>
+
+                <label>
+                  <span>Notes</span>
+                  <textarea value={schoolRequest.notes} onChange={(event) => handleQuoteChange('notes', event.target.value)} placeholder="Tell us about your event, age group or goals." />
+                </label>
+
+                <div className="quote-summary">
+                  <div>
+                    <span className="label">Estimated quote</span>
+                    <strong>{formatCurrency(quotePrice)}</strong>
+                  </div>
+                  <div>
+                    <span className="label">Instructor coverage</span>
+                    <strong>{quoteStaff} staff</strong>
+                  </div>
+                </div>
+
+                <button type="submit" className="btn btn-gold submit-btn">Request booking</button>
+              </form>
+            </div>
+          </section></Modal>}
+
+          <section className="team" id="team">
+            <div className="wrap">
+              <div className="section-head">
+                <span className="eyebrow">The People Behind KADA</span>
+                <h2 className="display">Meet the team.</h2>
+              </div>
+              <div className="team-row reveal">
+                <div className="team-card"><div className="photo" style={{ backgroundImage: "url('/images/team-steven.jpg')" }}></div><div className="info"><div className="name display">Steven</div><div className="role">Founder &amp; Lead Instructor</div></div></div>
+                <div className="team-card"><div className="photo placeholder-photo"><span>Photo coming soon</span></div><div className="info"><div className="name display">Temilade</div><div className="role">Programme Coordinator</div></div></div>
+                <div className="team-card"><div className="photo" style={{ backgroundImage: "url('/images/team-annedrea.jpg')" }}></div><div className="info"><div className="name display">Annedrea</div><div className="role">School Partnerships</div></div></div>
+              </div>
+            </div>
+          </section>
+
+          <section className="videos" id="videos">
+            <div className="wrap">
+              <div className="section-head">
+                <span className="eyebrow">In Their Own Words</span>
+                <h2 className="display">Real stories, <em>real confidence.</em></h2>
+              </div>
+
+              <div className="video-row reveal">
+                {[['A Parent’s Story', 'parent-review.mp4'], ['A Student’s Story', 'student-review.mp4']].map(([label, file]) => <div className="video-card" key={label}><div className="video-frame"><video controls preload="metadata"><source src={`/images/videos/${file}`} type="video/mp4" />Your browser cannot play this video.</video></div><div className="video-caption"><div className="who display">{label}</div><div className="what">Watch the review</div></div></div>)}
+              </div>
+              <p className="note">Note: these reflect general class experience. Swap in parent and student quotes once gathered.</p>
+            </div>
+          </section>
+
+          <section className="sponsors">
+            <div className="wrap">
+              <span className="eyebrow">Sponsors &amp; Partners</span>
+              <div className="sponsor-row">
+                <span className="mark">Partner logos coming soon</span>
+              </div>
+            </div>
+          </section>
+
+          <section className="contact" id="contact">
+            <div className="wrap">
+              <div className="eyebrow">Get In Touch</div>
+              <h2 className="display">Let's <em>talk.</em></h2>
+              <p>Whether you're a parent, a school, or an organisation looking to partner with us, we'd love to hear from you.</p>
+              <div className="contact-details">
+                <div><span className="k">Email</span>bookings@kingsarkdance.com</div>
+                <div><span className="k">Phone</span>+44 7535 897732</div>
+                <div><span className="k">Address</span>395 College Rd, Birmingham B44 0HF</div>
+              </div>
+            </div>
+          </section>
+
+          <footer>
+            <div className="wrap footer-row">
+              <div>
+                <div className="f-brand">King's Ark Dance Academy</div>
+                <div className="f-links">
+                  <a href="#">TikTok</a>
+                  <a href="#">Instagram</a>
+                  <a href="#">YouTube</a>
+                </div>
+              </div>
+              <div className="f-links">
+                <a href="#">Terms &amp; Conditions</a>
+                <a href="#">Privacy Policy</a>
+                <a href="#">Accessibility</a>
+              </div>
+            </div>
+
+            <div className="bottom wrap">© 2026 King's Ark Dance Academy. All rights reserved.</div>
+          </footer>
+        </div>
+      ) : (
+        <main className="ops-shell wrap">
+          <div className="ops-header">
+            <div>
+              <p className="eyebrow dark">Operations</p>
+              <h2 className="display">{isAdmin ? 'Operations dashboard' : isInstructor ? 'Instructor dashboard' : 'School dashboard'}</h2>
+            </div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <span style={{ color: '#767066', fontSize: 12 }}>{profile?.full_name || session?.user.email} · {profile?.role || 'account'}</span>
+              <button type="button" className="btn btn-dark-outline small" onClick={() => setView('site')}>Back to site</button>
+              <button type="button" className="btn btn-dark-outline small" onClick={() => supabase.auth.signOut()}>Sign out</button>
+            </div>
+          </div>
+
+          {tab === 'dashboard' && <>{isInstructor && <DbsUpload instructor={instructorRecord} onUpload={uploadDbs} uploading={dbsUploading} />}<NeedsAttention jobs={jobs} bookings={bookings} instructors={instructors} schools={schools} messages={messages} isAdmin={isAdmin} dismissed={dismissedNotifications} onDismiss={(id) => setDismissedNotifications((current) => [...current, id])} onOpenJobs={() => setTab('jobs')} onOpenBookings={() => setTab('bookings')} onOpenInstructors={() => setTab('instructors')} onOpenMessages={() => setTab('messages')} /><BirthdayNotice students={students} /></>}
+
+          <div className="ops-grid">
+            <div className="panel stat-panel">
+              <div className="panel-label">Upcoming bookings</div>
+              <strong>{stats.upcomingCount}</strong>
+            </div>
+            <div className="panel stat-panel">
+              <div className="panel-label">Confirmed revenue</div>
+              <strong>{formatCurrency(stats.confirmedRevenue)}</strong>
+            </div>
+            <div className="panel stat-panel">
+              <div className="panel-label">Unpaid / pending</div>
+              <strong>{stats.unpaidInvoices}</strong>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 18 }}>
+            {['dashboard', 'bookings', ...(isAdmin ? ['schools', 'instructors', 'students', 'jobs', 'invoice-settings'] : []), ...(isInstructor || isAdmin ? ['jobs'] : []), ...(!profile || isInstructor || isAdmin ? ['template'] : []), ...(profile ? ['messages'] : [])].filter((item, index, items) => items.indexOf(item) === index).map((item) => <Button key={item} variant={tab === item ? 'primary' : 'ghost'} small onClick={() => setTab(item)}>{item === 'template' ? 'Workshop template' : item === 'jobs' ? 'Job board' : item === 'messages' ? `Messages${unreadMessages ? ` (${unreadMessages})` : ''}` : item === 'invoice-settings' ? 'Invoice settings' : item[0].toUpperCase() + item.slice(1)}</Button>)}
+          </div>
+
+          {tab === 'students' && isAdmin && <StudentPlansView students={students} />}
+          {tab === 'invoice-settings' && isAdmin && <InvoiceSettings settings={invoiceSettings} onSave={saveInvoiceSettings} saving={invoiceSettingsSaving} />}
+          {tab === 'jobs' && (isAdmin || isInstructor) && <JobBoardView jobs={isInstructor ? jobs.filter((job) => job.status === 'open' || job.claimedBy === profile.instructor_id) : jobs} bookings={bookings} schools={schools} instructors={instructors} isAdmin={isAdmin} onClaim={claimJob} onDecision={decideJob} />}
+
+          {tab === 'bookings' && <div className="panel">
+            <div className="panel-head">
+              <h3>Bookings</h3>
+              <span className={`pill ${conflicts.size ? 'warn' : 'ok'}`}>{conflicts.size ? `${conflicts.size} conflict(s)` : 'Clear schedule'}</span>
+            </div>
+            <input style={{ ...inputStyle, marginBottom: 12 }} placeholder="Search bookings" value={bookingSearch} onChange={(event) => setBookingSearch(event.target.value)} />
+            <div className="booking-list">
+              {(showAllBookings ? visibleBookings : visibleBookings.slice(0, 3)).map((booking) => (
+                <div key={booking.id} className={`booking-item ${conflicts.has(booking.id) ? 'conflict' : ''}`}>
+                  <div>
+                    <strong onClick={() => setSchoolRecord(schools.find((school) => school.id === booking.schoolId))} style={{ cursor: 'pointer', color: emerald }}>{schools.find((school) => school.id === booking.schoolId)?.name || 'School enquiry'}</strong>
+                    <p>{booking.date} · {booking.sessionType} · {booking.studentCount} students</p>
+                    <p style={{ margin: '4px 0 0', color: muted, fontSize: 12 }}>Instructor: {assignedInstructorLabel(booking) || 'To be confirmed'}</p>
+                  </div>
+                  <div className="booking-meta">
+                    <span className="pill">{booking.status}</span>
+                    <span className="pill neutral">{booking.invoiceStatus}</span>
+                    {isInstructor && booking.status !== 'Delivered' && <Button small onClick={() => markBookingDone(booking.id)}>Mark as done</Button>}{canIssueInvoices && <Button small variant="ghost" onClick={() => setInvoiceBooking(booking)}>Invoice</Button>}{isAdmin && <><Button small variant="ghost" onClick={() => setBookingModal(booking)}>Edit</Button>{!jobs.some((job) => job.bookingId === booking.id) && <Button small onClick={() => publishJob(booking, { pay: booking.instructorPay, location: 'Location shared after claim' })}>Publish job</Button>}</>}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {visibleBookings.length > 3 && <button type="button" onClick={() => setShowAllBookings(!showAllBookings)} style={{ marginTop: 12, border: 0, background: 'none', color: emerald, cursor: 'pointer', fontWeight: 700 }}>{showAllBookings ? 'Show less' : `Show more (${visibleBookings.length - 3})`}</button>}
+          </div>}
+
+          {isAdmin && tab === 'schools' && <div className="panel"><div className="panel-head"><h3>Schools</h3><Button small onClick={() => setSchoolModal(emptySchool())}>Add school</Button></div><input style={{ ...inputStyle, marginBottom: 12 }} placeholder="Search schools" value={schoolSearch} onChange={(event) => setSchoolSearch(event.target.value)} />{(showAllSchools ? visibleSchools : visibleSchools.slice(0, 3)).map((school) => <div key={school.id} className="booking-item" onClick={() => setSchoolRecord(school)}><strong style={{ color: emerald, cursor: 'pointer' }}>{school.name}</strong><span>{bookings.filter((booking) => booking.schoolId === school.id).length} bookings</span></div>)}{visibleSchools.length > 3 && <button type="button" onClick={() => setShowAllSchools(!showAllSchools)} style={{ marginTop: 12, border: 0, background: 'none', color: emerald, cursor: 'pointer', fontWeight: 700 }}>{showAllSchools ? 'Show less' : `Show more (${visibleSchools.length - 3})`}</button>}</div>}
+          {isAdmin && tab === 'instructors' && <div className="panel"><div className="panel-head"><h3>Instructors and assignments</h3><Button small onClick={() => setInstructorModal({ id: crypto.randomUUID(), name: '', email: '', phone: '', rate: 100, locationAreas: '', gender: '', dbsStatus: 'Missing' })}>Add instructor</Button></div><div style={{ display: 'grid', gridTemplateColumns: '1fr 180px', gap: 8, marginBottom: 12 }}><input style={inputStyle} placeholder="Search by name, location, gender" value={instructorSearch} onChange={(event) => setInstructorSearch(event.target.value)} /><select style={inputStyle} value={instructorSort} onChange={(event) => setInstructorSort(event.target.value)}><option value="name">Sort by name</option><option value="location">Sort by location</option><option value="gender">Sort by gender</option><option value="completed">Sort by completed</option></select></div>{(showAllInstructors ? visibleInstructors : visibleInstructors.slice(0, 3)).map((instructor) => <div key={instructor.id} style={{ borderTop: `1px solid ${rule}`, padding: '14px 0' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}><strong>{instructor.name}</strong><span style={{ color: muted, fontSize: 12 }}>{completedByInstructor(instructor.id)} completed</span><Badge text={`DBS ${instructor.dbsStatus}`} tone={instructor.dbsStatus === 'Approved' ? 'green' : instructor.dbsStatus === 'Rejected' ? 'red' : 'gold'} /><Button small variant="ghost" onClick={() => setMessageTarget({ kind: 'instructor', id: instructor.id, name: instructor.name })}>Message</Button><Button small variant="ghost" onClick={() => setInstructorModal(instructor)}>Edit</Button></div><p style={{ color: muted, fontSize: 12, margin: '4px 0' }}>{instructor.locationAreas || 'No locations'} · {instructor.gender || 'Gender not provided'}</p>{instructor.dbsFilePath && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}><Button small variant="ghost" onClick={() => openDbsFile(instructor.id)}>View DBS</Button><Button small onClick={() => reviewDbs(instructor, 'Approved')}>Approve</Button><Button small variant="danger" onClick={() => reviewDbs(instructor, 'Rejected', window.prompt('Optional rejection reason') || '')}>Reject</Button></div>}{instructor.dbsStatus === 'Rejected' && instructor.dbsRejectionReason && <p style={{ color: warn, fontSize: 12, margin: '4px 0' }}>Rejected: {instructor.dbsRejectionReason}</p>}{bookings.filter((booking) => booking.instructorId === instructor.id).map((booking) => <div key={booking.id} style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 13 }}><span>{schools.find((school) => school.id === booking.schoolId)?.name || 'School'} · {booking.date}</span><Button small variant="danger" onClick={() => saveBooking({ ...booking, instructorId: '' })}>Remove</Button></div>)}</div>)}{visibleInstructors.length > 3 && <button type="button" onClick={() => setShowAllInstructors(!showAllInstructors)} style={{ marginTop: 12, border: 0, background: 'none', color: emerald, cursor: 'pointer', fontWeight: 700 }}>{showAllInstructors ? 'Show less' : `Show more (${visibleInstructors.length - 3})`}</button>}</div>}
+          {tab === 'template' && <TemplateView template={template} onSave={saveTemplate} />}
+          {tab === 'messages' && profile && <MessagesView messages={messages} myKind={myKind} myInstructorId={myInstructorId} mySchoolId={mySchoolId} schools={schools} instructors={instructors} isAdmin={isAdmin} onSend={sendMessage} onMarkRead={markMessageRead} />}
+
+          {schoolRecord && <SchoolRecord school={schoolRecord} bookings={bookings} instructors={instructors} onEdit={setSchoolModal} onBooking={setBookingModal} onMessage={(school) => setMessageTarget({ kind: 'school', id: school.id, name: school.name })} onClose={() => setSchoolRecord(null)} />}
+          {bookingModal && <Modal title="Booking" onClose={() => setBookingModal(null)} wide><BookingForm booking={bookingModal} schools={schools} instructors={instructors} onSave={saveBooking} onDelete={() => { const next = bookings.filter((item) => item.id !== bookingModal.id); persistRows('bookings', next, setBookings); setBookingModal(null) }} /></Modal>}
+          {schoolModal && <Modal title="School" onClose={() => setSchoolModal(null)}><SchoolForm school={schoolModal} onSave={saveSchool} /></Modal>}
+          {instructorModal && <Modal title="Instructor" onClose={() => setInstructorModal(null)}><InstructorForm instructor={instructorModal} onSave={saveInstructor} /></Modal>}
+          {invoiceBooking && <InvoicePreview booking={invoiceBooking} onUpdate={(changes) => setInvoiceBooking((current) => ({ ...current, ...changes }))} onSave={(booking) => { saveBooking(booking); setInvoiceBooking(null) }} onSend={sendInvoice} onDownload={downloadInvoice} sending={invoiceSending} pdfUrl={invoicePdfUrl} onClose={() => { setInvoiceBooking(null); setInvoicePdfUrl('') }} />}
+          {messageTarget && <Modal title={`Message ${messageTarget.name}`} onClose={() => { setMessageTarget(null); setMessageDraft('') }}><Field label="Message"><textarea style={{ ...inputStyle, minHeight: 90 }} value={messageDraft} onChange={(event) => setMessageDraft(event.target.value)} /></Field><Button disabled={!messageDraft.trim()} onClick={() => { sendMessage({ senderKind: 'admin', recipientKind: messageTarget.kind, recipientInstructorId: messageTarget.kind === 'instructor' ? messageTarget.id : null, recipientSchoolId: messageTarget.kind === 'school' ? messageTarget.id : null, body: messageDraft.trim() }); setMessageTarget(null); setMessageDraft(''); setTab('messages') }}>Send message</Button></Modal>}
+        </main>
+      )}
+
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  )
+}
+
+export default App
