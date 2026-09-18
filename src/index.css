@@ -21,12 +21,24 @@
 
 html {
   scroll-behavior: smooth;
+  /* Keep mobile browsers fitted to the frame: no horizontal overflow that
+     triggers zoom-out/distortion. */
+  overflow-x: hidden;
 }
 
 body {
   margin: 0;
   min-width: 320px;
   background: #faf6ec;
+  overflow-x: hidden;
+}
+
+/* overflow: clip does not create a scroll container, so it keeps
+   position: sticky working (e.g. the desktop ops sidebar). */
+@supports (overflow: clip) {
+  html, body {
+    overflow-x: clip;
+  }
 }
 
 img,

@@ -217,6 +217,39 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     }
     if (!error) {
       await notifyAdmin('New paid class booking', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New paid class booking</h2><p><strong>Parent:</strong> ${metadata.parent_name} (${session.customer_details?.email || metadata.parent_email})<br><strong>Class:</strong> ${metadata.class_name} (${planType})<br><strong>Date:</strong> ${metadata.class_date}<br><strong>Amount:</strong> ${money(metadata.amount_pence)}<br><strong>Children:</strong> ${studentList.length}</p>${dashboardButton('bookings', 'View booking', metadata.booking_id)}</div>`)
+
+      // Parent confirmation email, exactly once per booking — same idempotency
+      // pattern as event tickets: atomically claim the booking by setting
+      // confirmation_sent_at only where still null; a redelivery skips.
+      const { data: claimed } = await supabase
+        .from('bookings')
+        .update({ confirmation_sent_at: new Date().toISOString() })
+        .eq('id', metadata.booking_id)
+        .is('confirmation_sent_at', null)
+        .select('id')
+      if ((claimed || []).length > 0) {
+        const parentEmailTo = session.customer_details?.email || metadata.parent_email
+        const [{ data: classSession }, { data: bookingStudents }] = await Promise.all([
+          supabase.from('class_sessions').select('start_time,end_time,description').eq('name', metadata.class_name).eq('active', true).maybeSingle(),
+          supabase.from('students').select('name').eq('booking_id', metadata.booking_id),
+        ])
+        const studentNames = (bookingStudents || []).map((student) => student.name).filter(Boolean)
+        const planLabel = planType === 'monthly_membership' ? 'Monthly Membership (£25/month)' : 'Day Pass (£10)'
+        const classTime = classSession?.start_time ? ` · ${String(classSession.start_time).slice(0, 5)}${classSession.end_time ? `–${String(classSession.end_time).slice(0, 5)}` : ''}` : ''
+        const classesUrl = `${PUBLIC_BASE_URL}#classes`
+        const ics = metadata.class_date ? buildIcs({ title: `${metadata.class_name} — King's Ark Dance Academy`, date: metadata.class_date, startTime: classSession?.start_time || '10:00', endTime: classSession?.end_time || classSession?.start_time || '11:00', location: "King's Ark Dance Academy, 395 College Rd, Birmingham B44 0HF", description: classSession?.description || '', url: classesUrl }) : ''
+        const emailResult = await sendEmail({
+          to: parentEmailTo,
+          subject: `Booking confirmed: ${metadata.class_name}`,
+          html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>You're booked in! 🎉</h2><p>Hi ${(metadata.parent_name || 'there').split(' ')[0]},</p><p>Thank you — your payment was successful and your child's place is confirmed:</p><p><strong>Class:</strong> ${metadata.class_name}<br><strong>Date:</strong> ${formatDateGB(metadata.class_date)}${classTime}<br><strong>Children:</strong> ${studentNames.join(', ') || studentList.length}<br><strong>Plan:</strong> ${planLabel}<br><strong>Total paid:</strong> ${money(metadata.amount_pence)}</p><p><a href="${classesUrl}" style="background:#c9a227;color:#0b3d2e;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">View classes</a></p><p>A calendar file is attached — tap it to add the class to your phone's calendar. We can't wait to see you there.</p></div>`,
+          attachments: ics ? [{ filename: 'class.ics', content: Buffer.from(ics).toString('base64') }] : [],
+        })
+        // If the send failed, release the claim so a webhook retry can send it.
+        if (!emailResult.sent) {
+          await supabase.from('bookings').update({ confirmation_sent_at: null }).eq('id', metadata.booking_id)
+          console.error('Class booking confirmation email failed:', emailResult.reason)
+        }
+      }
     }
   }
 
@@ -539,6 +572,18 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   const bookingId = `parent-${crypto.randomUUID()}`
   const familyId = `family-${crypto.randomUUID()}`
   if (!supabase) return response.status(503).json({ error: 'Supabase server storage is not configured.' })
+
+  // The chosen date must be a real scheduled session for the chosen class: matching
+  // day of week, not in the past, and within the booking window the form offers.
+  const { data: classSession } = await supabase.from('class_sessions').select('id,day_of_week').eq('name', className).eq('active', true).maybeSingle()
+  if (!classSession) return response.status(400).json({ error: 'That class is not currently scheduled. Please pick an available class and date.' })
+  const requestedDate = new Date(`${classDate}T00:00:00Z`)
+  const todayUtc = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`)
+  const daysAhead = (requestedDate - todayUtc) / 86400000
+  if (Number.isNaN(requestedDate.getTime()) || requestedDate.getUTCDay() !== Number(classSession.day_of_week) || daysAhead < 0 || daysAhead > 180) {
+    return response.status(400).json({ error: 'That date is not available for this class. Please pick a highlighted class date.' })
+  }
+
   const user = await authenticatedUser(request)
   const { error: familyError } = await supabase.from('parent_families').insert({ id: familyId, owner_user_id: user?.id || null, guardian_name: parentName, guardian_email: parentEmail, plan_type: planType, membership_status: 'pending' })
   if (familyError) return response.status(500).json({ error: 'Family record could not be created.' })
@@ -649,6 +694,36 @@ app.get('/api/stripe/event-order/:sessionId/calendar.ics', async (request, respo
   response.type('text/calendar').set('Content-Disposition', 'attachment; filename="event.ics"').send(ics)
 })
 
+// Public booking lookup for the post-payment class success screen. The Stripe
+// session id acts as the secret (same pattern as the event-order lookup).
+app.get('/api/stripe/class-booking/:sessionId', async (request, response) => {
+  if (!supabase) return response.status(503).json({ error: 'Supabase server storage is not configured.' })
+  const { data: booking, error } = await supabase.from('bookings').select('*').eq('stripe_checkout_session_id', request.params.sessionId).maybeSingle()
+  if (error) return response.status(500).json({ error: 'Booking could not be loaded.' })
+  if (!booking) return response.status(404).json({ status: 'pending' })
+  // session_type is stored as "Class name (plan_type)" by the webhook.
+  const className = (booking.session_type || '').replace(/ \((monthly_membership|day_pass)\)$/, '')
+  const [{ data: bookingStudents }, { data: family }, { data: classSession }] = await Promise.all([
+    supabase.from('students').select('name').eq('booking_id', booking.id),
+    booking.family_id ? supabase.from('parent_families').select('plan_type').eq('id', booking.family_id).maybeSingle() : Promise.resolve({ data: null }),
+    supabase.from('class_sessions').select('start_time,end_time').eq('name', className).eq('active', true).maybeSingle(),
+  ])
+  response.json({
+    status: booking.payment_status,
+    booking: {
+      className,
+      classDate: booking.date,
+      startTime: classSession?.start_time ? String(classSession.start_time).slice(0, 5) : '',
+      endTime: classSession?.end_time ? String(classSession.end_time).slice(0, 5) : '',
+      planType: family?.plan_type || '',
+      parentName: booking.contact_name,
+      parentEmail: booking.contact_email,
+      pricePence: Math.round(Number(booking.price || 0) * 100),
+      students: (bookingStudents || []).map((student) => student.name).filter(Boolean),
+    },
+  })
+})
+
 app.post('/api/parent/billing-portal', async (request, response) => {
   if (!stripe || !supabase) return response.status(503).json({ error: 'Billing is not configured on the server.' })
   const user = await authenticatedUser(request)
@@ -704,6 +779,52 @@ app.post('/api/admin/subscriptions/:familyId/:action', async (request, response)
   } catch (error) {
     response.status(502).json({ error: error.message || 'Stripe could not apply the subscription action.' })
   }
+})
+
+// Admin "reset test data" — deliberately two-step. POST {} returns a preview of
+// exactly which records would be deleted; only POST { confirm: 'DELETE' } actually
+// deletes. Clears class bookings, students, parent families, and event ticket
+// orders. Site content (events, schools, instructors, class schedule, messages)
+// is untouched, and no Stripe objects are modified — refunds are handled
+// separately in the Stripe dashboard.
+app.post('/api/admin/reset-test-data', async (request, response) => {
+  if (!supabase) return response.status(503).json({ error: 'Supabase server storage is not configured.' })
+  const user = await authenticatedUser(request)
+  if (!user) return response.status(401).json({ error: 'Authentication is required.' })
+  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle()
+  if (profile?.role !== 'admin') return response.status(403).json({ error: 'Only admins can reset test data.' })
+
+  const [students, bookings, families, ticketOrders] = await Promise.all([
+    supabase.from('students').select('id,name,parent_email,class_name,membership_status'),
+    supabase.from('bookings').select('id,contact_name,contact_email,date,session_type,price,status,payment_status,stripe_checkout_session_id'),
+    supabase.from('parent_families').select('id,guardian_name,guardian_email,plan_type,membership_status,stripe_subscription_id'),
+    supabase.from('event_ticket_orders').select('id,buyer_name,buyer_email,tier_name,tickets,total_pence,payment_status'),
+  ])
+  const firstError = [students, bookings, families, ticketOrders].find((result) => result.error)
+  if (firstError) return response.status(500).json({ error: `Records could not be listed: ${firstError.error.message}` })
+
+  const preview = {
+    students: students.data || [],
+    bookings: bookings.data || [],
+    parentFamilies: families.data || [],
+    eventTicketOrders: ticketOrders.data || [],
+  }
+  const counts = Object.fromEntries(Object.entries(preview).map(([key, rows]) => [key, rows.length]))
+
+  // Default pass is a dry run — nothing is deleted without explicit confirmation.
+  if (request.body?.confirm !== 'DELETE') return response.json({ dryRun: true, counts, preview })
+
+  // FK-safe order: students first (their family_id is plain text), then bookings
+  // (cascades booking-linked students + job_board_jobs), then the standalone tables.
+  const deletions = [
+    ['students', await supabase.from('students').delete().neq('id', '')],
+    ['bookings', await supabase.from('bookings').delete().neq('id', '')],
+    ['parent_families', await supabase.from('parent_families').delete().neq('id', '')],
+    ['event_ticket_orders', await supabase.from('event_ticket_orders').delete().neq('id', '')],
+  ]
+  const failed = deletions.find(([, result]) => result.error)
+  if (failed) return response.status(500).json({ error: `Reset failed while deleting ${failed[0]}: ${failed[1].error.message}` })
+  response.json({ dryRun: false, deleted: counts })
 })
 
 app.post('/api/parent/cancel-booking', async (request, response) => {

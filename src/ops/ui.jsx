@@ -44,18 +44,23 @@ export function OpsButton({ children, onClick, type = 'button', disabled, varian
 }
 
 /* ------------------------------------------------------------------ */
-/* Left sidebar — King's Ark branding, dark, collapsible nav groups.  */
+/* Left sidebar — dark, collapsible nav groups; a tap-to-open drawer   */
+/* on mobile (branding lives in the site header, not duplicated here). */
 /* ------------------------------------------------------------------ */
 export function OpsSidebar({ caption = 'Operations', items, active, onSelect, openGroups, onToggleGroup }) {
+  // Mobile: the sidebar collapses into a tap-to-open drawer (no duplicated
+  // branding — the site header already carries it). Selecting an item navigates
+  // and closes the drawer in one action.
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const handleSelect = (key) => { setMobileOpen(false); onSelect(key) }
+  const activeLabel = items.flatMap((item) => item.children || [item]).find((item) => item.key === active)?.label || caption
   return (
     <aside className="ops-sidebar">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 10px 18px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-        <div style={{ width: 30, height: 30, borderRadius: 8, background: '#d5a443', display: 'grid', placeItems: 'center', color: '#1a1b29', fontWeight: 700 }}>K</div>
-        <div>
-          <div style={{ fontFamily: 'Fraunces, Georgia, serif', fontSize: 18, fontWeight: 700 }}>King's Ark</div>
-          <div style={{ color: '#b9b3c9', fontSize: 12 }}>Dance Academy</div>
-        </div>
-      </div>
+      <button type="button" className="ops-nav-toggle" aria-expanded={mobileOpen} onClick={() => setMobileOpen((current) => !current)}>
+        <span>{activeLabel}</span>
+        <span aria-hidden="true">{mobileOpen ? '▾' : '▸'}</span>
+      </button>
+      <div className={`ops-nav-body${mobileOpen ? ' open' : ''}`}>
       <div style={{ padding: '18px 10px 10px' }}>
         <div style={{ color: '#cbc2e2', fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 10 }}>{caption}</div>
         <div style={{ display: 'grid', gap: 6 }}>
@@ -69,7 +74,7 @@ export function OpsSidebar({ caption = 'Operations', items, active, onSelect, op
                 {openGroups.has(item.label) && (
                   <div style={{ display: 'grid', gap: 4, paddingLeft: 12, marginTop: 6 }}>
                     {item.children.map((child) => (
-                      <button key={child.key} type="button" onClick={() => onSelect(child.key)} style={{ width: '100%', textAlign: 'left', borderRadius: 8, padding: '8px 10px', color: active === child.key || child.action ? (child.action && active !== child.key ? '#d5a443' : '#f7c76a') : '#dfe3f7', background: active === child.key ? 'rgba(255, 189, 75, 0.12)' : 'transparent', borderLeft: active === child.key ? '2px solid #f7c76a' : '2px solid transparent', fontWeight: active === child.key ? 700 : 500, cursor: 'pointer' }}>
+                      <button key={child.key} type="button" onClick={() => handleSelect(child.key)} style={{ width: '100%', textAlign: 'left', borderRadius: 8, padding: '8px 10px', color: active === child.key || child.action ? (child.action && active !== child.key ? '#d5a443' : '#f7c76a') : '#dfe3f7', background: active === child.key ? 'rgba(255, 189, 75, 0.12)' : 'transparent', borderLeft: active === child.key ? '2px solid #f7c76a' : '2px solid transparent', fontWeight: active === child.key ? 700 : 500, cursor: 'pointer' }}>
                         {child.label}
                       </button>
                     ))}
@@ -77,12 +82,13 @@ export function OpsSidebar({ caption = 'Operations', items, active, onSelect, op
                 )}
               </div>
             ) : (
-              <button key={item.key} type="button" onClick={() => onSelect(item.key)} style={{ width: '100%', textAlign: 'left', borderRadius: 10, padding: '10px 12px', color: active === item.key ? '#f7c76a' : '#dfe3f7', background: active === item.key ? 'rgba(255, 189, 75, 0.12)' : 'transparent', borderLeft: active === item.key ? '2px solid #f7c76a' : '2px solid transparent', fontWeight: active === item.key ? 700 : 500, cursor: 'pointer' }}>
+              <button key={item.key} type="button" onClick={() => handleSelect(item.key)} style={{ width: '100%', textAlign: 'left', borderRadius: 10, padding: '10px 12px', color: active === item.key ? '#f7c76a' : '#dfe3f7', background: active === item.key ? 'rgba(255, 189, 75, 0.12)' : 'transparent', borderLeft: active === item.key ? '2px solid #f7c76a' : '2px solid transparent', fontWeight: active === item.key ? 700 : 500, cursor: 'pointer' }}>
                 {item.label}
               </button>
             )
           ))}
         </div>
+      </div>
       </div>
     </aside>
   )

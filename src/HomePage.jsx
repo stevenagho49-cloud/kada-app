@@ -1,5 +1,82 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { flyerPublicUrl, formatEventTimeRange } from './ops/EventsPage'
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+const BOOKING_WINDOW_DAYS = 84 // parents can book up to 12 weeks ahead
+
+function startOfToday() {
+  const now = new Date()
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate())
+}
+
+function toLocalIso(date) {
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
+
+// Nearest date (today or later) on which the given class session actually runs.
+function nextClassDate(session, from = startOfToday()) {
+  if (!session) return ''
+  for (let offset = 0; offset <= BOOKING_WINDOW_DAYS; offset += 1) {
+    const candidate = new Date(from)
+    candidate.setDate(from.getDate() + offset)
+    if (candidate.getDay() === Number(session.day_of_week)) return toLocalIso(candidate)
+  }
+  return ''
+}
+
+/* Month-grid date picker for the class booking form. Only dates matching the
+   chosen class's scheduled day of week (today → +12 weeks) are selectable;
+   every other day is disabled/greyed out. */
+function ClassDatePicker({ session, value, onChange }) {
+  const todayStart = startOfToday()
+  const maxDate = new Date(todayStart)
+  maxDate.setDate(maxDate.getDate() + BOOKING_WINDOW_DAYS)
+  const selected = value ? new Date(`${value}T00:00:00`) : null
+  const [month, setMonth] = useState(() => {
+    const base = selected && !Number.isNaN(selected.getTime()) && selected > todayStart ? selected : todayStart
+    return new Date(base.getFullYear(), base.getMonth(), 1)
+  })
+
+  const firstOfMonth = new Date(month.getFullYear(), month.getMonth(), 1)
+  const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate()
+  const leadingBlanks = (firstOfMonth.getDay() + 6) % 7 // Monday-first grid
+  const cells = [...Array(leadingBlanks).fill(null)]
+  for (let day = 1; day <= daysInMonth; day += 1) cells.push(new Date(month.getFullYear(), month.getMonth(), day))
+  const earliestMonth = new Date(todayStart.getFullYear(), todayStart.getMonth(), 1)
+  const canGoBack = firstOfMonth > earliestMonth
+  const canGoForward = new Date(month.getFullYear(), month.getMonth() + 1, 1) <= maxDate
+
+  return (
+    <div className="class-date-picker">
+      <div className="class-date-picker-head">
+        <button type="button" aria-label="Previous month" disabled={!canGoBack} onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}>‹</button>
+        <strong>{month.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}</strong>
+        <button type="button" aria-label="Next month" disabled={!canGoForward} onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}>›</button>
+      </div>
+      <div className="class-date-grid class-date-weekdays">{['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day) => <span key={day}>{day}</span>)}</div>
+      <div className="class-date-grid">
+        {cells.map((date, index) => {
+          if (!date) return <span key={`blank-${index}`} className="class-date-cell empty" aria-hidden="true" />
+          const iso = toLocalIso(date)
+          const enabled = Boolean(session) && date >= todayStart && date <= maxDate && date.getDay() === Number(session.day_of_week)
+          const isSelected = value === iso
+          return (
+            <button key={iso} type="button" className={`class-date-cell${isSelected ? ' selected' : ''}`} disabled={!enabled} aria-pressed={isSelected} aria-label={date.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} onClick={() => onChange(iso)}>
+              {date.getDate()}
+            </button>
+          )
+        })}
+      </div>
+      <p className="class-date-hint">
+        {session
+          ? `${session.name} runs every ${DAY_NAMES[Number(session.day_of_week)]}${session.start_time ? `, ${String(session.start_time).slice(0, 5)}${session.end_time ? `–${String(session.end_time).slice(0, 5)}` : ''}` : ''} — only class days are selectable.`
+          : 'Choose a class to see its available dates.'}
+      </p>
+    </div>
+  )
+}
 
 export const HOME_SECTIONS = [
   { key: 'hero', label: 'Hero' },
@@ -16,7 +93,22 @@ export const HOME_SECTIONS = [
 ]
 export const DEFAULT_SECTION_ORDER = HOME_SECTIONS.map((section, index) => ({ sectionKey: section.key, label: section.label, visible: true, sortOrder: (index + 1) * 10 }))
 
-export default function HomePage({ siteEvents, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, valueItems, Modal }) {
+export default function HomePage({ siteEvents, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, valueItems, Modal }) {
+  const selectedSession = classSessions.find((session) => session.name === parentBooking.className) || classSessions[0] || null
+
+  // Pre-select the nearest upcoming real class date whenever the booking form
+  // opens, the chosen class changes, or the schedule finishes loading.
+  useEffect(() => {
+    if (publicForm !== 'class' || !classSessions.length) return
+    const session = classSessions.find((item) => item.name === parentBooking.className) || classSessions[0]
+    const picked = parentBooking.classDate ? new Date(`${parentBooking.classDate}T00:00:00`) : null
+    const dateValid = picked && !Number.isNaN(picked.getTime()) && picked >= startOfToday() && picked.getDay() === Number(session.day_of_week)
+    if (session.name !== parentBooking.className || !dateValid) {
+      setParentBooking({ ...parentBooking, className: session.name, classDate: nextClassDate(session) })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publicForm, parentBooking.className, classSessions])
+
   const renderSection = (sectionKey) => {
     switch (sectionKey) {
       case 'hero':
@@ -112,16 +204,22 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
 
             {publicForm === 'class' && <Modal title="Reserve a place" onClose={() => setPublicForm(null)} wide><section className="quote-section" id="class-booking">
               <div className="wrap quote-wrap">
-                <div className="section-head left-align"><span className="eyebrow">Saturday Classes</span><h2 className="display">Reserve a place.</h2><p>Secure your child's place through Stripe test checkout. The booking is confirmed after payment is completed.</p></div>
+                <div className="section-head left-align"><span className="eyebrow">Saturday Classes</span><h2 className="display">Reserve a place.</h2><p>Secure your child's place through secure checkout. The booking is confirmed after payment is completed.</p></div>
                 <form className="quote-form" onSubmit={startClassCheckout}>
                   <label><span>Plan</span><select value={parentBooking.planType} onChange={(event) => setParentBooking({ ...parentBooking, planType: event.target.value })}><option value="monthly_membership">Monthly Membership (£25/month)</option><option value="day_pass">Day Pass (£10)</option></select></label>
-                  <label><span>Class</span><select value={parentBooking.className} onChange={(event) => setParentBooking({ ...parentBooking, className: event.target.value })}><option>Saturday Gospel Afrobeats</option><option>Saturday Foundations</option><option>Saturday Performance Team</option></select></label>
-                  <label><span>Term / class date</span><input type="date" value={parentBooking.classDate} onChange={(event) => setParentBooking({ ...parentBooking, classDate: event.target.value })} required /></label>
+                  {classSessions.length === 0 ? (
+                    <p className="class-date-hint">Class times are being finalised — please check back shortly.</p>
+                  ) : (
+                    <>
+                      <label><span>Class</span><select value={parentBooking.className} onChange={(event) => setParentBooking({ ...parentBooking, className: event.target.value })}>{classSessions.map((session) => <option key={session.id} value={session.name}>{session.name} · {DAY_NAMES[Number(session.day_of_week)]}s {String(session.start_time).slice(0, 5)}</option>)}</select></label>
+                      <div className="class-date-field"><span className="label">Class date</span><ClassDatePicker session={selectedSession} value={parentBooking.classDate} onChange={(date) => setParentBooking({ ...parentBooking, classDate: date })} /></div>
+                    </>
+                  )}
                   <label><span>Parent / guardian name</span><input value={parentBooking.parentName} onChange={(event) => setParentBooking({ ...parentBooking, parentName: event.target.value })} required /></label>
                   <label><span>Parent / guardian email</span><input type="email" value={parentBooking.parentEmail} onChange={(event) => setParentBooking({ ...parentBooking, parentEmail: event.target.value })} required /></label>
                   <div><span className="label">Children</span>{parentBooking.students.map((student, index) => <div key={index} className="student-row"><input aria-label={`Child ${index + 1} name`} placeholder="Child name" value={student.name} onChange={(event) => { const students = [...parentBooking.students]; students[index] = { ...student, name: event.target.value }; setParentBooking({ ...parentBooking, students }) }} required /><input aria-label={`Child ${index + 1} date of birth`} type="date" value={student.dateOfBirth} onChange={(event) => { const students = [...parentBooking.students]; students[index] = { ...student, dateOfBirth: event.target.value }; setParentBooking({ ...parentBooking, students }) }} required />{index > 0 && <button type="button" className="remove-child" onClick={() => setParentBooking({ ...parentBooking, students: parentBooking.students.filter((_, childIndex) => childIndex !== index) })}>Remove</button>}</div>)}<button type="button" className="add-child" onClick={() => setParentBooking({ ...parentBooking, students: [...parentBooking.students, { name: '', dateOfBirth: '' }] })}>+ Add another child</button></div>
                   <div className="quote-summary"><div><span className="label">Price</span><strong>{parentBooking.planType === 'monthly_membership' ? '£25 / month' : '£10'}</strong></div><div><span className="label">Payment</span><strong>{parentBooking.planType === 'monthly_membership' ? 'Recurring' : 'One-time'}</strong></div></div>
-                  <button type="submit" className="btn btn-gold submit-btn" disabled={checkoutBusy}>{checkoutBusy ? 'Opening checkout…' : 'Continue to payment'}</button>
+                  <button type="submit" className="btn btn-gold submit-btn" disabled={checkoutBusy || !parentBooking.classDate || !classSessions.length}>{checkoutBusy ? 'Opening checkout…' : 'Continue to payment'}</button>
                 </form>
               </div>
             </section></Modal>}

@@ -7,6 +7,7 @@ import SubscriptionsPage from './ops/SubscriptionsPage'
 import { EventsPage, EventForm, emptyEvent, normalizeEvent, toDbEvent } from './ops/EventsPage'
 import { EventTicketPage } from './EventTicketPage'
 import { SiteLayoutPage } from './ops/SiteLayoutPage'
+import { ClassSchedulePage } from './ops/ClassSchedulePage'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
 
 const emerald = '#0b3d2e'
@@ -326,6 +327,40 @@ function Button({ children, onClick, type = 'button', disabled, variant = 'prima
 
 function Modal({ title, onClose, children, wide = false }) {
   return <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 50, padding: 20, overflowY: 'auto', background: 'rgba(20,18,10,.45)' }}><div onClick={(event) => event.stopPropagation()} style={{ maxWidth: wide ? 680 : 500, margin: '20px auto', background: cream, borderRadius: 10, border: `1px solid ${rule}`, boxShadow: '0 20px 60px rgba(0,0,0,.25)' }}><div style={{ padding: '16px 20px', borderBottom: `1px solid ${rule}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><h3 style={{ margin: 0, fontFamily: serif, color: emerald, fontWeight: 400 }}>{title}</h3><button type="button" onClick={onClose} style={{ border: 0, background: 'none', cursor: 'pointer', fontSize: 18, color: muted }}>×</button></div><div style={{ padding: 20 }}>{children}</div></div></div>
+}
+
+function ResetPreview({ preview, counts, confirmText, onConfirmTextChange, onConfirm, busy }) {
+  const groups = [
+    { key: 'bookings', label: 'Bookings', rows: preview.bookings, describe: (row) => `${row.contact_name || 'Unknown'} · ${row.session_type || 'Booking'} · ${row.date || 'no date'} · £${Number(row.price || 0).toFixed(2)} · ${row.status}${row.payment_status ? ` · ${row.payment_status}` : ''}` },
+    { key: 'students', label: 'Students', rows: preview.students, describe: (row) => `${row.name || 'Unnamed'} · ${row.parent_email || 'no email'}${row.class_name ? ` · ${row.class_name}` : ''} · ${row.membership_status}` },
+    { key: 'parentFamilies', label: 'Family accounts', rows: preview.parentFamilies, describe: (row) => `${row.guardian_name || 'Unknown'} · ${row.guardian_email || 'no email'} · ${row.plan_type || 'no plan'} · ${row.membership_status}${row.stripe_subscription_id ? ' · has Stripe subscription' : ''}` },
+    { key: 'eventTicketOrders', label: 'Event ticket orders', rows: preview.eventTicketOrders, describe: (row) => `${row.buyer_name || 'Unknown'} · ${row.buyer_email || 'no email'} · ${row.tier_name || 'Ticket'} × ${row.tickets} · £${(Number(row.total_pence || 0) / 100).toFixed(2)} · ${row.payment_status}` },
+  ]
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0)
+  const confirmed = confirmText.trim().toUpperCase() === 'DELETE'
+  return (
+    <div style={{ display: 'grid', gap: 14, fontFamily: sans }}>
+      <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6, color: ink }}>
+        The following <strong>{total} record{total === 1 ? '' : 's'}</strong> will be permanently deleted. Site content (events, schools, instructors, class schedule, messages) is not touched, and nothing in Stripe is modified — process any refunds separately in the Stripe dashboard.
+      </p>
+      {groups.map((group) => (
+        <div key={group.key} style={{ border: `1px solid ${rule}`, borderRadius: 8, padding: '10px 12px', background: ivory }}>
+          <strong style={{ fontSize: 13, color: emerald }}>{group.label} ({group.rows.length})</strong>
+          {group.rows.length === 0 ? <div style={{ fontSize: 12.5, color: muted, marginTop: 6 }}>None.</div> : (
+            <ul style={{ margin: '8px 0 0', paddingLeft: 18, display: 'grid', gap: 4 }}>
+              {group.rows.map((row) => <li key={row.id} style={{ fontSize: 12.5, color: ink, lineHeight: 1.45 }}>{group.describe(row)}</li>)}
+            </ul>
+          )}
+        </div>
+      ))}
+      {total > 0 ? (
+        <>
+          <Field label="Type DELETE to confirm"><input style={inputStyle} value={confirmText} onChange={(event) => onConfirmTextChange(event.target.value)} placeholder="DELETE" autoComplete="off" /></Field>
+          <div><Button variant="danger" disabled={!confirmed || busy} onClick={onConfirm}>{busy ? 'Deleting…' : `Permanently delete ${total} record${total === 1 ? '' : 's'}`}</Button></div>
+        </>
+      ) : <p style={{ margin: 0, fontSize: 13, color: okGreen }}>Nothing to delete — the tables are already empty.</p>}
+    </div>
+  )
 }
 
 function statusTone(status) { return status === 'Confirmed' ? 'green' : status === 'Delivered' ? 'gold' : status === 'Cancelled' ? 'red' : 'default' }
@@ -668,7 +703,7 @@ function App() {
     })
     return () => window.cancelAnimationFrame(frame)
   }, [view])
-  const [parentBooking, setParentBooking] = useState({ planType: 'monthly_membership', className: 'Saturday Gospel Afrobeats', classDate: '2026-09-05', parentName: '', parentEmail: '', students: [{ name: '', dateOfBirth: '' }] })
+  const [parentBooking, setParentBooking] = useState({ planType: 'monthly_membership', className: 'Saturday Gospel Afrobeats', classDate: '', parentName: '', parentEmail: '', students: [{ name: '', dateOfBirth: '' }] })
   const [students, setStudents] = useState([])
   const [families, setFamilies] = useState([])
   const [jobs, setJobs] = useState([])
@@ -678,12 +713,18 @@ function App() {
   const [eventPageId, setEventPageId] = useState(() => window.location.hash.match(/^#event\/([\w-]+)/)?.[1] || null)
   const [siteEvents, setSiteEvents] = useState([])
   const [sectionLayout, setSectionLayout] = useState([])
+  const [classSessions, setClassSessions] = useState([])
+  const [classSessionsVersion, setClassSessionsVersion] = useState(0)
   const [subscriptionBusyId, setSubscriptionBusyId] = useState('')
+  const [resetPreview, setResetPreview] = useState(null)
+  const [resetBusy, setResetBusy] = useState(false)
+  const [resetConfirmText, setResetConfirmText] = useState('')
   const [checkoutBusy, setCheckoutBusy] = useState(false)
   const [invoiceSending, setInvoiceSending] = useState(false)
   const [publicMenuOpen, setPublicMenuOpen] = useState(false)
   const [opsOpenGroups, setOpsOpenGroups] = useState(() => new Set(['Operations', 'Events', 'Sales', 'Your family']))
   const [publicForm, setPublicForm] = useState(null)
+  const [classBookingSuccess, setClassBookingSuccess] = useState(null) // null | 'loading' | 'pending' | booking details object
   const headerRef = useRef(null)
 
   useEffect(() => {
@@ -700,6 +741,34 @@ function App() {
     const onHashChange = () => setEventPageId(window.location.hash.match(/^#event\/([\w-]+)/)?.[1] || null)
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
+
+  // Class booking success — Stripe redirects back to ?payment=success&session_id=…
+  // Poll for the webhook-recorded booking (the webhook can lag a second or two),
+  // then show an on-screen confirmation; a confirmation email arrives separately.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const sessionId = params.get('session_id') || ''
+    if (params.get('payment') !== 'success' || !sessionId) return undefined
+    setClassBookingSuccess('loading')
+    window.history.replaceState(null, '', `${window.location.pathname}#classes`)
+    let cancelled = false
+    let attempts = 0
+    const poll = async () => {
+      attempts += 1
+      try {
+        const response = await fetch(`/api/stripe/class-booking/${encodeURIComponent(sessionId)}`)
+        if (response.ok) {
+          const result = await response.json()
+          if (!cancelled) setClassBookingSuccess(result.booking)
+          return
+        }
+      } catch { /* retry below */ }
+      if (!cancelled && attempts < 10) window.setTimeout(poll, 1500)
+      else if (!cancelled) setClassBookingSuccess('pending')
+    }
+    poll()
+    return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
@@ -840,6 +909,17 @@ function App() {
     })
     return () => { mounted = false }
   }, [view])
+
+  // Weekly class schedule — guests/parents get bookable (active) sessions for the
+  // public booking form; admins get every row for the Class schedule page.
+  useEffect(() => {
+    if (!supabaseReady) return undefined
+    let mounted = true
+    let query = supabase.from('class_sessions').select('*').order('day_of_week').order('start_time')
+    if (profile?.role !== 'admin') query = query.eq('active', true)
+    query.then(({ data, error }) => { if (mounted && !error && data) setClassSessions(data) })
+    return () => { mounted = false }
+  }, [profile?.role, classSessionsVersion])
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -1113,6 +1193,24 @@ function App() {
     const { error } = await supabase.from('site_sections').upsert(next.map((section) => ({ section_key: section.sectionKey, label: section.label, visible: section.visible, sort_order: section.sortOrder })))
     setToast(error ? `Layout could not be saved: ${error.message}` : 'Homepage layout updated.')
   }
+  const saveClassSession = async (sessionRow, changes) => {
+    const payload = { ...changes }
+    if (payload.day_of_week !== undefined) payload.day_of_week = Number(payload.day_of_week)
+    setClassSessions((current) => current.map((item) => item.id === sessionRow.id ? { ...item, ...payload } : item))
+    const { error } = await supabase.from('class_sessions').update(payload).eq('id', sessionRow.id)
+    if (error) setToast(`Class session could not be saved: ${error.message}`)
+    else setClassSessionsVersion((version) => version + 1)
+  }
+  const addClassSession = async (draft) => {
+    const { error } = await supabase.from('class_sessions').insert({ name: draft.name, day_of_week: Number(draft.day_of_week), start_time: draft.start_time, end_time: draft.end_time || null, description: draft.description || null, active: true })
+    setToast(error ? `Class session could not be added: ${error.message}` : `Class "${draft.name}" added to the schedule.`)
+    if (!error) setClassSessionsVersion((version) => version + 1)
+  }
+  const deleteClassSession = async (sessionRow) => {
+    const { error } = await supabase.from('class_sessions').delete().eq('id', sessionRow.id)
+    setToast(error ? `Class session could not be removed: ${error.message}` : `Class "${sessionRow.name}" removed from the schedule.`)
+    if (!error) setClassSessionsVersion((version) => version + 1)
+  }
   const saveFamily = async (family, changes) => {
     setFamilies((current) => current.map((item) => item.id === family.id ? { ...item, ...changes } : item))
     const { error } = await supabase.from('parent_families').update({ ...changes, updated_at: new Date().toISOString() }).eq('id', family.id)
@@ -1130,6 +1228,37 @@ function App() {
       setToast(error.message)
     } finally {
       setSubscriptionBusyId('')
+    }
+  }
+
+  const openResetPreview = async () => {
+    setResetBusy(true)
+    setResetConfirmText('')
+    try {
+      const response = await fetch('/api/admin/reset-test-data', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: '{}' })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'The preview could not be loaded.')
+      setResetPreview(result)
+    } catch (error) {
+      setToast(error.message)
+    } finally {
+      setResetBusy(false)
+    }
+  }
+  const runResetTestData = async () => {
+    if (resetConfirmText.trim().toUpperCase() !== 'DELETE') return
+    setResetBusy(true)
+    try {
+      const response = await fetch('/api/admin/reset-test-data', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: 'DELETE' }) })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Reset failed.')
+      const total = Object.values(result.deleted || {}).reduce((sum, count) => sum + count, 0)
+      setResetPreview(null)
+      setToast(`Test data reset — ${total} record${total === 1 ? '' : 's'} removed.`)
+      window.setTimeout(() => window.location.reload(), 900)
+    } catch (error) {
+      setToast(error.message)
+      setResetBusy(false)
     }
   }
 
@@ -1216,7 +1345,7 @@ function App() {
       label: 'Operations',
       children: [
         { key: 'bookings', label: 'Bookings' },
-        ...(isAdmin ? [{ key: 'schools', label: 'Schools' }, { key: 'instructors', label: 'Instructors' }, { key: 'students', label: 'Students' }] : []),
+        ...(isAdmin ? [{ key: 'schools', label: 'Schools' }, { key: 'instructors', label: 'Instructors' }, { key: 'students', label: 'Students' }, { key: 'class-schedule', label: 'Class schedule' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'jobs', label: 'Job board' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'template', label: 'Workshop template' }] : []),
       ],
@@ -1278,7 +1407,7 @@ function App() {
             {siteEvents.length > 0 && <a href="#events" onClick={(event) => navigatePublicSection(event, '#events')}>Events</a>}
             <a href="#videos" onClick={(event) => navigatePublicSection(event, '#videos')}>Stories</a>
             <a href="#contact" onClick={(event) => navigatePublicSection(event, '#contact')}>Contact</a>
-            <button type="button" className="nav-cta" onClick={() => setView(session ? 'ops' : 'auth')}>{session ? 'Operations' : 'Sign in'}</button>
+            <button type="button" className="nav-cta" onClick={() => { setPublicMenuOpen(false); setView(session ? 'ops' : 'auth') }}>{session ? 'Operations' : 'Sign in'}</button>
           </nav>
         </div>
       </header>
@@ -1295,6 +1424,7 @@ function App() {
           parentBooking={parentBooking}
           setParentBooking={setParentBooking}
           checkoutBusy={checkoutBusy}
+          classSessions={classSessions.filter((session) => session.active)}
           handleQuoteSubmit={handleQuoteSubmit}
           schoolRequest={schoolRequest}
           handleQuoteChange={handleQuoteChange}
@@ -1320,8 +1450,22 @@ function App() {
             </div>
           </div>
 
-          {tab === 'dashboard' && <>{isInstructor && <DbsUpload instructor={instructorRecord} onUpload={uploadDbs} uploading={dbsUploading} />}<NeedsAttention jobs={jobs} bookings={bookings} instructors={instructors} schools={schools} messages={messages} isAdmin={isAdmin} dismissed={dismissedNotifications} onDismiss={(id) => setDismissedNotifications((current) => [...current, id])} onOpenJobs={() => setTab('jobs')} onOpenBookings={() => setTab('bookings')} onOpenInstructors={() => setTab('instructors')} onOpenMessages={() => setTab('messages')} /><BirthdayNotice students={students} /></>}
+          {tab === 'dashboard' && (
+            <>
+              {isInstructor && <DbsUpload instructor={instructorRecord} onUpload={uploadDbs} uploading={dbsUploading} />}
+              <NeedsAttention jobs={jobs} bookings={bookings} instructors={instructors} schools={schools} messages={messages} isAdmin={isAdmin} dismissed={dismissedNotifications} onDismiss={(id) => setDismissedNotifications((current) => [...current, id])} onOpenJobs={() => setTab('jobs')} onOpenBookings={() => setTab('bookings')} onOpenInstructors={() => setTab('instructors')} onOpenMessages={() => setTab('messages')} />
+              <BirthdayNotice students={students} />
+              {isAdmin && (
+                <div className="panel" style={{ borderColor: '#e0b4a6' }}>
+                  <div className="panel-head"><h3>Test data</h3></div>
+                  <p style={{ color: muted, fontSize: 13, lineHeight: 1.55, margin: '0 0 12px' }}>Clear test bookings, students, family accounts, and ticket orders so dashboard counts return to zero. You review the exact records before anything is deleted. Stripe refunds are handled separately in the Stripe dashboard.</p>
+                  <Button small variant="danger" disabled={resetBusy} onClick={openResetPreview}>{resetBusy && !resetPreview ? 'Loading preview…' : 'Review & reset test data…'}</Button>
+                </div>
+              )}
+            </>
+          )}
 
+          {tab === 'dashboard' && (
           <div className="ops-grid">
             <div className="panel stat-panel">
               <div className="panel-label">Upcoming bookings</div>
@@ -1336,6 +1480,7 @@ function App() {
               <strong>{stats.unpaidInvoices}</strong>
             </div>
           </div>
+          )}
 
           {tab === 'students' && isAdmin && <StudentPlansView students={students} />}
           {tab === 'invoice-settings' && isAdmin && <InvoiceSettings settings={invoiceSettings} onSave={saveInvoiceSettings} saving={invoiceSettingsSaving} />}
@@ -1373,6 +1518,7 @@ function App() {
           {isAdmin && (tab === 'events-published' || tab === 'events-drafts') && <EventsPage view={tab === 'events-published' ? 'published' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} />}
           {isAdmin && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} />}
           {isAdmin && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
+          {isAdmin && tab === 'class-schedule' && <ClassSchedulePage sessions={classSessions} onSave={saveClassSession} onAdd={addClassSession} onDelete={deleteClassSession} />}
           {tab === 'template' && <TemplateView template={template} onSave={saveTemplate} />}
           {tab === 'messages' && profile && <MessagesView messages={messages} myKind={myKind} myInstructorId={myInstructorId} mySchoolId={mySchoolId} schools={schools} instructors={instructors} isAdmin={isAdmin} onSend={sendMessage} onMarkRead={markMessageRead} />}
 
@@ -1382,9 +1528,31 @@ function App() {
           {instructorModal && <Modal title="Instructor" onClose={() => setInstructorModal(null)}><InstructorForm instructor={instructorModal} onSave={saveInstructor} /></Modal>}
           {eventModal && <Modal title={eventModal.title ? 'Edit event' : 'New event'} onClose={() => setEventModal(null)}><EventForm event={eventModal} onSave={saveEvent} onUploadFlyer={uploadEventFlyer} /></Modal>}
           {invoiceBooking && <InvoicePreview booking={invoiceBooking} onUpdate={(changes) => setInvoiceBooking((current) => ({ ...current, ...changes }))} onSave={(booking) => { saveBooking(booking); setInvoiceBooking(null) }} onSend={sendInvoice} onDownload={downloadInvoice} sending={invoiceSending} pdfUrl={invoicePdfUrl} onClose={() => { setInvoiceBooking(null); setInvoicePdfUrl('') }} />}
+          {resetPreview && <Modal title="Reset test data — review before deleting" onClose={() => setResetPreview(null)} wide><ResetPreview preview={resetPreview.preview} counts={resetPreview.counts} confirmText={resetConfirmText} onConfirmTextChange={setResetConfirmText} onConfirm={runResetTestData} busy={resetBusy} /></Modal>}
           {messageTarget && <Modal title={`Message ${messageTarget.name}`} onClose={() => { setMessageTarget(null); setMessageDraft('') }}><Field label="Message"><textarea style={{ ...inputStyle, minHeight: 90 }} value={messageDraft} onChange={(event) => setMessageDraft(event.target.value)} /></Field><Button disabled={!messageDraft.trim()} onClick={() => { sendMessage({ senderKind: 'admin', recipientKind: messageTarget.kind, recipientInstructorId: messageTarget.kind === 'instructor' ? messageTarget.id : null, recipientSchoolId: messageTarget.kind === 'school' ? messageTarget.id : null, body: messageDraft.trim() }); setMessageTarget(null); setMessageDraft(''); setTab('messages') }}>Send message</Button></Modal>}
           </div>
         </main>
+      )}
+
+      {classBookingSuccess && (
+        <Modal title={classBookingSuccess === 'loading' ? 'Confirming your booking…' : classBookingSuccess === 'pending' ? 'Almost there…' : 'Booking confirmed'} onClose={() => setClassBookingSuccess(null)}>
+          {classBookingSuccess === 'loading' && <p style={{ margin: 0, fontFamily: sans, fontSize: 14, color: muted, lineHeight: 1.6 }}>Confirming your payment with Stripe — this takes a moment…</p>}
+          {classBookingSuccess === 'pending' && <p style={{ margin: 0, fontFamily: sans, fontSize: 14, color: ink, lineHeight: 1.6 }}>Your payment was received and your booking is being processed. A confirmation email will arrive shortly — contact bookings@kingsarkdance.com if it doesn't.</p>}
+          {classBookingSuccess && classBookingSuccess !== 'loading' && classBookingSuccess !== 'pending' && (
+            <div style={{ fontFamily: sans, color: ink, lineHeight: 1.6 }}>
+              <p style={{ fontSize: 16, margin: '0 0 10px' }}><strong>You're booked in! 🎉</strong></p>
+              <p style={{ margin: '0 0 12px', fontSize: 14 }}>
+                <strong>Class:</strong> {classBookingSuccess.className}<br />
+                <strong>Date:</strong> {classBookingSuccess.classDate ? new Date(`${classBookingSuccess.classDate}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '—'}{classBookingSuccess.startTime ? ` · ${classBookingSuccess.startTime}${classBookingSuccess.endTime ? `–${classBookingSuccess.endTime}` : ''}` : ''}<br />
+                <strong>Children:</strong> {classBookingSuccess.students.length ? classBookingSuccess.students.join(', ') : '—'}<br />
+                <strong>Plan:</strong> {classBookingSuccess.planType === 'monthly_membership' ? 'Monthly Membership (£25/month)' : 'Day Pass (£10)'}<br />
+                <strong>Total paid:</strong> £{(classBookingSuccess.pricePence / 100).toFixed(2)}
+              </p>
+              <p style={{ margin: '0 0 16px', fontSize: 13.5, color: muted }}>A confirmation email with a calendar file is on its way to <strong>{classBookingSuccess.parentEmail}</strong>.</p>
+              <Button onClick={() => setClassBookingSuccess(null)}>Done</Button>
+            </div>
+          )}
+        </Modal>
       )}
 
       {toast && <div className="toast">{toast}</div>}
