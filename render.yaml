@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: kada-app
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    # Customer-facing domain links (emails, calendar files). Set APP_URL to your
+    # production URL (e.g. https://kingsarkdance.com) once the custom domain is live.
+    envVars:
+      # --- Build-time (Vite bakes these into the frontend bundle) ---
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      # --- Runtime: Supabase ---
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # --- Runtime: Stripe ---
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_MONTHLY_PRICE_ID
+        sync: false
+      - key: STRIPE_DAY_PASS_PRICE_ID
+        sync: false
+      # --- Runtime: Email (Resend) ---
+      - key: RESEND_API_KEY
+        sync: false
+      - key: INVOICE_FROM_EMAIL
+        sync: false
+      - key: ADMIN_NOTIFICATION_EMAIL
+        sync: false
+      # --- Runtime: app config ---
+      - key: APP_URL
+        sync: false

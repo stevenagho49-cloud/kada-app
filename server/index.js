@@ -15,7 +15,98 @@ const supabase = process.env.SUPABASE_SERVICE_ROLE_KEY
   ? createClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null
 
-app.use(cors({ origin: process.env.CLIENT_URL || 'http://localhost:5173' }))
+// CORS: in production the same server serves the frontend, so same-origin requests need
+// no cross-origin allowance. In dev, Vite (5173) proxies /api so cross-origin rarely fires.
+// CLIENT_URLS (comma-separated) can whitelist extra origins if the frontend is hosted separately.
+const allowedOrigins = (process.env.CLIENT_URLS || process.env.CLIENT_URL || 'http://localhost:5173').split(',').map((origin) => origin.trim()).filter(Boolean)
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true) // same-origin / server-to-server / whitelisted
+    return callback(null, true) // permissive fallback — tighten by setting CLIENT_URLS if the API is exposed cross-origin
+  },
+  credentials: true,
+}))
+
+/* ------------------------------------------------------------------ */
+/* Email via Resend — ticket confirmations, reminders, and admin       */
+/* notifications. No-ops (returns {sent:false}) when not configured.   */
+/* ------------------------------------------------------------------ */
+const EMAIL_FROM = process.env.INVOICE_FROM_EMAIL || "King's Ark Dance Academy <onboarding@resend.dev>"
+const ADMIN_EMAIL = process.env.ADMIN_NOTIFICATION_EMAIL || ''
+// APP_URL is the customer-facing domain used inside emails and calendar files.
+// CLIENT_URL (default localhost:5173) is the dev server for Stripe redirects during development.
+const APP_URL = (process.env.APP_URL || 'https://kingsarkdance.com').replace(/\/$/, '')
+const PUBLIC_BASE_URL = APP_URL
+
+async function sendEmail({ to, subject, html, attachments = [] }) {
+  if (!process.env.RESEND_API_KEY || !to) return { sent: false, reason: 'email not configured' }
+  try {
+    const resendResponse = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: EMAIL_FROM,
+        to: Array.isArray(to) ? to : [to],
+        subject,
+        html,
+        ...(attachments.length ? { attachments } : {}),
+      }),
+    })
+    const result = await resendResponse.json()
+    if (!resendResponse.ok) {
+      console.error('Resend send failed:', result)
+      return { sent: false, reason: result.message || 'resend error' }
+    }
+    return { sent: true, id: result.id }
+  } catch (error) {
+    console.error('Resend send error:', error)
+    return { sent: false, reason: error.message }
+  }
+}
+
+function money(pence) {
+  return `£${(Number(pence || 0) / 100).toFixed(2)}`
+}
+function formatDateGB(value) {
+  return value ? new Date(`${value}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : ''
+}
+function toIcsDate(date, time) {
+  const [h = '0', m = '0'] = (time || '00:00').split(':')
+  const d = new Date(`${date}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`)
+  return d.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'
+}
+function buildIcs({ title, date, startTime, endTime, location, description, url }) {
+  const dtStart = toIcsDate(date, startTime)
+  const dtEnd = endTime ? toIcsDate(date, endTime) : toIcsDate(date, startTime)
+  const stamp = toIcsDate(new Date().toISOString().slice(0, 10), new Date().toISOString().slice(11, 16))
+  const esc = (text) => String(text || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n')
+  return [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//KADA//Events//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+    'BEGIN:VEVENT',
+    `UID:${Date.now()}@kingsarkdance.com`,
+    `DTSTAMP:${stamp}`,
+    `DTSTART:${dtStart}`,
+    `DTEND:${dtEnd}`,
+    `SUMMARY:${esc(title)}`,
+    location ? `LOCATION:${esc(location)}` : '',
+    description ? `DESCRIPTION:${esc(description)}` : '',
+    url ? `URL:${url}` : '',
+    'END:VEVENT', 'END:VCALENDAR',
+  ].filter(Boolean).join('\r\n')
+}
+
+async function notifyAdmin(subject, html) {
+  if (!ADMIN_EMAIL) return { sent: false, reason: 'ADMIN_NOTIFICATION_EMAIL not set' }
+  return sendEmail({ to: ADMIN_EMAIL, subject: `[KADA] ${subject}`, html })
+}
+
+// A prominent button linking into the relevant Operations dashboard tab (deep link
+// via #ops/<tab>, which signs the admin in and lands on that page). Pass recordId to
+// open that exact record's modal: #ops/<tab>/<recordId>.
+function dashboardButton(tab, label, recordId) {
+  const href = `${APP_URL}#ops/${tab}${recordId ? `/${recordId}` : ''}`
+  return `<p style="margin:18px 0 4px"><a href="${href}" style="background:#0b3d2e;color:#fffdf8;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">${label || 'Open in dashboard'} →</a></p>`
+}
 
 async function authenticatedUser(request) {
   if (!supabase) return null
@@ -38,6 +129,55 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object
     const metadata = session.metadata || {}
+
+    // Ticketed event purchases take a separate path from class bookings.
+    // The Day Pass/Membership booking logic below is unchanged.
+    if (metadata.kind === 'event_ticket') {
+      const orderId = `ticket-${session.id}`
+      const { error: ticketError } = await supabase.from('event_ticket_orders').upsert({
+        id: orderId,
+        event_id: metadata.event_id,
+        buyer_name: metadata.buyer_name || session.customer_details?.name || 'Guest',
+        buyer_email: session.customer_details?.email || metadata.buyer_email || '',
+        tier_id: metadata.tier_id,
+        tier_name: metadata.tier_name,
+        tickets: Number(metadata.tickets || 1),
+        total_pence: Number(metadata.total_pence || session.amount_total || 0),
+        stripe_checkout_session_id: session.id,
+        payment_status: 'paid',
+      }, { onConflict: 'stripe_checkout_session_id' })
+      if (ticketError) console.error('Ticket order creation failed:', ticketError)
+
+      // Send confirmation email exactly once per order. Stripe redelivers webhook
+      // events, so we atomically claim the order by setting confirmation_sent_at
+      // only where it is still null — a redelivery finds it already set and skips.
+      const { data: claimed } = await supabase
+        .from('event_ticket_orders')
+        .update({ confirmation_sent_at: new Date().toISOString() })
+        .eq('stripe_checkout_session_id', session.id)
+        .is('confirmation_sent_at', null)
+        .select('id')
+      const shouldSend = !ticketError && (claimed || []).length > 0
+      if (shouldSend) {
+        const { data: orderEvent } = await supabase.from('events').select('*').eq('id', metadata.event_id).maybeSingle()
+        const buyerEmail = session.customer_details?.email || metadata.buyer_email
+        const eventPageUrl = `${PUBLIC_BASE_URL}#event/${metadata.event_id}`
+        const calendarUrl = `${PUBLIC_BASE_URL}/api/stripe/event-order/${session.id}/calendar.ics`
+        const emailResult = await sendEmail({
+          to: buyerEmail,
+          subject: `Your tickets: ${orderEvent?.title || 'Event'}`,
+          html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>You're booked in! 🎟</h2><p>Hi ${(metadata.buyer_name || 'there').split(' ')[0]},</p><p>Thank you for your purchase. Here are your ticket details:</p><p><strong>Event:</strong> ${orderEvent?.title || 'Event'}<br><strong>Date:</strong> ${formatDateGB(orderEvent?.event_date)}${orderEvent?.event_time ? ` · ${orderEvent.event_time.slice(0, 5)}` : ''}<br><strong>Venue:</strong> ${orderEvent?.location || 'To be confirmed'}<br><strong>Ticket type:</strong> ${metadata.tier_name}<br><strong>Tickets:</strong> ${metadata.tickets}<br><strong>Total paid:</strong> ${money(metadata.total_pence)}</p><p><a href="${calendarUrl}" style="background:#c9a227;color:#0b3d2e;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Add to calendar</a>&nbsp;&nbsp;<a href="${eventPageUrl}" style="color:#0b3d2e">View event page</a></p><p>We can't wait to see you there.</p></div>`,
+          attachments: orderEvent?.event_date ? [{ filename: 'event.ics', content: Buffer.from(buildIcs({ title: orderEvent.title, date: orderEvent.event_date, startTime: orderEvent.event_time, endTime: orderEvent.event_end_time, location: orderEvent.location, description: orderEvent.description, url: eventPageUrl })).toString('base64') }] : [],
+        })
+        // If the send failed (e.g. Resend not configured), release the claim so a retry can send it.
+        if (!emailResult.sent) {
+          await supabase.from('event_ticket_orders').update({ confirmation_sent_at: null }).eq('stripe_checkout_session_id', session.id)
+          console.error('Confirmation email failed:', emailResult.reason)
+        }
+      }
+      return response.json({ received: true })
+    }
+
     const planType = metadata.plan_type || 'day_pass'
     const { data: existingStudents } = await supabase.from('students').select('*').eq('booking_id', metadata.booking_id)
     const studentList = existingStudents || []
@@ -75,6 +215,9 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       const { error: studentError } = await supabase.from('students').update({ membership_status: 'active' }).eq('booking_id', metadata.booking_id)
       if (studentError) console.error('Student creation failed:', studentError)
     }
+    if (!error) {
+      await notifyAdmin('New paid class booking', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New paid class booking</h2><p><strong>Parent:</strong> ${metadata.parent_name} (${session.customer_details?.email || metadata.parent_email})<br><strong>Class:</strong> ${metadata.class_name} (${planType})<br><strong>Date:</strong> ${metadata.class_date}<br><strong>Amount:</strong> ${money(metadata.amount_pence)}<br><strong>Children:</strong> ${studentList.length}</p>${dashboardButton('bookings', 'View booking', metadata.booking_id)}</div>`)
+    }
   }
 
   if (event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {
@@ -87,6 +230,46 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 })
 
 app.use(express.json())
+
+// Health check for Render's uptime monitor — confirms the server is up and can
+// reach Supabase (the critical dependency for auth, data, and ticketing).
+app.get('/api/health', async (_request, response) => {
+  const status = { ok: true, service: 'kada-app', timestamp: new Date().toISOString(), checks: {} }
+  status.checks.stripe = stripe ? 'configured' : 'not configured'
+  status.checks.email = process.env.RESEND_API_KEY ? 'configured' : 'not configured'
+  if (!supabase) {
+    status.ok = false
+    status.checks.supabase = 'not configured'
+    return response.status(503).json(status)
+  }
+  try {
+    const { error } = await supabase.from('events').select('id', { count: 'exact', head: true })
+    status.checks.supabase = error ? `error: ${error.message}` : 'reachable'
+    if (error) status.ok = false
+  } catch (error) {
+    status.ok = false
+    status.checks.supabase = `error: ${error.message}`
+  }
+  response.status(status.ok ? 200 : 503).json(status)
+})
+
+// Admin notification relay — the dashboard calls this after client-side actions that
+// need an admin email (job claim pending review, DBS uploaded, school enquiry received).
+app.post('/api/notify-admin', async (request, response) => {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
+  const { type, detail = {} } = request.body || {}
+  const templates = {
+    'job-claim': () => ['Job claim needs review', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Job claim pending review</h2><p><strong>Job:</strong> ${detail.sessionType || ''} on ${detail.date || ''}<br><strong>Claimed by:</strong> ${detail.claimedBy || ''}</p>${dashboardButton('jobs', 'Review job claim')}</div>`],
+    'dbs-upload': () => ['New DBS certificate uploaded', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>DBS certificate uploaded</h2><p><strong>Instructor:</strong> ${detail.instructorName || ''}</p>${dashboardButton('instructors', 'Review certificate', detail.instructorId)}</div>`],
+    'school-enquiry': () => ['New school enquiry', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New school booking enquiry</h2><p><strong>School:</strong> ${detail.schoolName || ''}<br><strong>Contact:</strong> ${detail.contactName || ''} (${detail.email || ''})<br><strong>Session:</strong> ${detail.sessionType || ''} on ${detail.date || ''}<br><strong>Students:</strong> ${detail.studentCount || ''}</p>${dashboardButton('schools', 'View school', detail.schoolId)}</div>`],
+  }
+  const template = templates[type]
+  if (!template) return response.status(400).json({ error: 'Unknown notification type.' })
+  const [subject, html] = template()
+  const result = await notifyAdmin(subject, html)
+  response.json(result)
+})
 
 app.get('/api/parent/dashboard', async (request, response) => {
   const user = await authenticatedUser(request)
@@ -112,6 +295,9 @@ app.post('/api/instructor/mark-done', async (request, response) => {
   if (!booking) return response.status(404).json({ error: 'Assigned booking not found.' })
   const { error } = await supabase.from('bookings').update({ status: 'Delivered', needs_admin_attention: true, completed_at: new Date().toISOString() }).eq('id', bookingId)
   if (error) return response.status(500).json({ error: 'Session could not be marked done.' })
+  const { data: doneBooking } = await supabase.from('bookings').select('date, session_type, schools(name)').eq('id', bookingId).maybeSingle()
+  const { data: instructor } = await supabase.from('instructors').select('name').eq('id', profile.instructor_id).maybeSingle()
+  await notifyAdmin('Session marked done — payment review needed', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Session awaiting payment review</h2><p><strong>Instructor:</strong> ${instructor?.name || profile.instructor_id}<br><strong>Session:</strong> ${doneBooking?.session_type || ''}<br><strong>School:</strong> ${doneBooking?.schools?.name || '—'}<br><strong>Date:</strong> ${doneBooking?.date || ''}</p>${dashboardButton('bookings', 'Review session', bookingId)}</div>`)
   response.json({ completed: true })
 })
 
@@ -365,11 +551,102 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
     customer_email: parentEmail,
     line_items: [{ price: priceId, quantity: 1 }],
     metadata: { booking_id: bookingId, family_id: familyId, plan_type: planType, class_name: className, class_date: classDate, amount_pence: planType === 'monthly_membership' ? '2500' : '1000', parent_name: parentName, parent_email: parentEmail },
-    success_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}?payment=success&session_id={CHECKOUT_SESSION_ID}#classes`,
-    cancel_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}#classes`,
+    success_url: `${APP_URL}?payment=success&session_id={CHECKOUT_SESSION_ID}#classes`,
+    cancel_url: `${APP_URL}#classes`,
   })
 
   response.json({ url: session.url })
+})
+
+// ------------------------------------------------------------------
+// Ticketed events — separate from the Day Pass/Membership flow above.
+// Line items are built ad-hoc per ticket tier (price_data); the existing
+// Stripe products/prices are never touched.
+// ------------------------------------------------------------------
+app.post('/api/stripe/create-event-checkout', async (request, response) => {
+  if (!stripe || !supabase) return response.status(503).json({ error: 'Ticketing is not configured on the server.' })
+  const { eventId, tierId, quantity, buyerName, buyerEmail } = request.body || {}
+  const qty = Math.floor(Number(quantity))
+  if (!eventId || !tierId || !Number.isInteger(qty) || qty < 1 || qty > 20 || !buyerName?.trim() || !/.+@.+\..+/.test(buyerEmail || '')) {
+    return response.status(400).json({ error: 'Event, ticket tier, quantity (1-20), and your name and email are required.' })
+  }
+  const { data: event, error: eventError } = await supabase.from('events').select('*').eq('id', eventId).maybeSingle()
+  if (eventError || !event) return response.status(404).json({ error: 'Event not found.' })
+  if (event.status !== 'published' || !event.ticketing_enabled) return response.status(400).json({ error: 'Tickets are not on sale for this event.' })
+  const tier = (event.ticket_tiers || []).find((item) => item.id === tierId)
+  if (!tier) return response.status(400).json({ error: 'That ticket tier is not available for this event.' })
+  const unitAmount = Math.round(Number(tier.pricePence))
+  const bundleSize = Math.max(1, Math.floor(Number(tier.bundleSize) || 1))
+  if (!Number.isInteger(unitAmount) || unitAmount < 30) return response.status(400).json({ error: 'This ticket tier is not priced correctly yet.' })
+
+  const tierDescription = [bundleSize > 1 ? `${bundleSize} tickets per purchase` : '', event.event_date ? `Event date: ${event.event_date}` : ''].filter(Boolean).join(' · ')
+  // Return to the host the buyer actually used (works through the Codespaces forwarded
+  // URL, where plain localhost isn't reachable from the browser).
+  const requestOrigin = request.headers.origin || request.headers.referer?.replace(/\/[^/]*$/, '') || ''
+  const clientUrl = requestOrigin.startsWith('http') ? requestOrigin : (process.env.CLIENT_URL || 'http://localhost:5173')
+  const session = await stripe.checkout.sessions.create({
+    mode: 'payment',
+    customer_email: buyerEmail.trim(),
+    line_items: [{
+      quantity: qty,
+      price_data: {
+        currency: 'gbp',
+        unit_amount: unitAmount,
+        product_data: {
+          name: `${event.title} - ${tier.name}`,
+          ...(tierDescription ? { description: tierDescription } : {}),
+        },
+      },
+    }],
+    metadata: {
+      kind: 'event_ticket',
+      event_id: event.id,
+      tier_id: tier.id,
+      tier_name: tier.name,
+      quantity: String(qty),
+      bundle_size: String(bundleSize),
+      tickets: String(qty * bundleSize),
+      total_pence: String(unitAmount * qty),
+      buyer_name: buyerName.trim(),
+      buyer_email: buyerEmail.trim(),
+    },
+    success_url: `${clientUrl}?ticket=success&session_id={CHECKOUT_SESSION_ID}#event/${event.id}`,
+    cancel_url: `${clientUrl}#event/${event.id}`,
+  })
+  response.json({ url: session.url })
+})
+
+// Public order lookup for the post-payment success page. The Stripe session id acts as the secret.
+app.get('/api/stripe/event-order/:sessionId', async (request, response) => {
+  if (!supabase) return response.status(503).json({ error: 'Supabase server storage is not configured.' })
+  const { data: order, error } = await supabase.from('event_ticket_orders').select('*').eq('stripe_checkout_session_id', request.params.sessionId).maybeSingle()
+  if (error) return response.status(500).json({ error: 'Order could not be loaded.' })
+  if (!order) return response.status(404).json({ status: 'pending' })
+  const { data: orderEvent } = await supabase.from('events').select('title,event_date,location').eq('id', order.event_id).maybeSingle()
+  response.json({
+    status: order.payment_status,
+    order: {
+      eventTitle: orderEvent?.title || 'Event',
+      eventDate: orderEvent?.event_date || '',
+      location: orderEvent?.location || '',
+      tierName: order.tier_name,
+      tickets: order.tickets,
+      totalPence: order.total_pence,
+      buyerName: order.buyer_name,
+      buyerEmail: order.buyer_email,
+    },
+  })
+})
+
+// Downloadable .ics calendar file for a ticket order (linked from the confirmation email).
+app.get('/api/stripe/event-order/:sessionId/calendar.ics', async (request, response) => {
+  if (!supabase) return response.status(503).json({ error: 'Supabase server storage is not configured.' })
+  const { data: order } = await supabase.from('event_ticket_orders').select('*').eq('stripe_checkout_session_id', request.params.sessionId).maybeSingle()
+  if (!order) return response.status(404).json({ error: 'Order not found.' })
+  const { data: orderEvent } = await supabase.from('events').select('*').eq('id', order.event_id).maybeSingle()
+  if (!orderEvent?.event_date) return response.status(400).json({ error: 'Event date is not set.' })
+  const ics = buildIcs({ title: orderEvent.title, date: orderEvent.event_date, startTime: orderEvent.event_time, endTime: orderEvent.event_end_time, location: orderEvent.location, description: orderEvent.description, url: `${PUBLIC_BASE_URL}#event/${order.event_id}` })
+  response.type('text/calendar').set('Content-Disposition', 'attachment; filename="event.ics"').send(ics)
 })
 
 app.post('/api/parent/billing-portal', async (request, response) => {
@@ -378,7 +655,7 @@ app.post('/api/parent/billing-portal', async (request, response) => {
   if (!user) return response.status(401).json({ error: 'Authentication is required.' })
   const { data: family } = await supabase.from('parent_families').select('stripe_customer_id').eq('owner_user_id', user.id).maybeSingle()
   if (!family?.stripe_customer_id) return response.status(400).json({ error: 'No paid family subscription or customer record was found.' })
-  const portal = await stripe.billingPortal.sessions.create({ customer: family.stripe_customer_id, return_url: `${process.env.CLIENT_URL || 'http://localhost:5173'}#parent-dashboard` })
+  const portal = await stripe.billingPortal.sessions.create({ customer: family.stripe_customer_id, return_url: `${APP_URL}#parent-dashboard` })
   response.json({ url: portal.url })
 })
 
@@ -393,6 +670,42 @@ app.post('/api/parent/cancel-subscription', async (request, response) => {
   response.json({ cancelled: true })
 })
 
+// Admin subscription management from the Operations > Sales > Subscriptions table.
+// Actions: pause (void collection), resume, cancel — all applied to the real Stripe
+// subscription first, then mirrored onto parent_families.
+app.post('/api/admin/subscriptions/:familyId/:action', async (request, response) => {
+  if (!stripe || !supabase) return response.status(503).json({ error: 'Billing is not configured on the server.' })
+  const { action, familyId } = request.params
+  if (!['pause', 'resume', 'cancel'].includes(action)) return response.status(400).json({ error: 'Unknown subscription action.' })
+  const user = await authenticatedUser(request)
+  if (!user) return response.status(401).json({ error: 'Authentication is required.' })
+  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle()
+  if (profile?.role !== 'admin') return response.status(403).json({ error: 'Only admins can manage subscriptions.' })
+  const { data: family } = await supabase.from('parent_families').select('*').eq('id', familyId).maybeSingle()
+  if (!family) return response.status(404).json({ error: 'Family not found.' })
+  if (!family.stripe_subscription_id) return response.status(400).json({ error: 'This family has no Stripe subscription. Use the status menu to update it manually.' })
+
+  try {
+    const update = { updated_at: new Date().toISOString() }
+    if (action === 'pause') {
+      await stripe.subscriptions.update(family.stripe_subscription_id, { pause_collection: { behavior: 'void' } })
+      update.paused_at = new Date().toISOString()
+    } else if (action === 'resume') {
+      await stripe.subscriptions.update(family.stripe_subscription_id, { pause_collection: '' })
+      update.paused_at = null
+    } else {
+      await stripe.subscriptions.cancel(family.stripe_subscription_id)
+      update.membership_status = 'cancelled'
+      update.paused_at = null
+    }
+    const { data, error } = await supabase.from('parent_families').update(update).eq('id', familyId).select().single()
+    if (error) return response.status(500).json({ error: 'Stripe was updated, but the family record could not be saved.' })
+    response.json({ family: data })
+  } catch (error) {
+    response.status(502).json({ error: error.message || 'Stripe could not apply the subscription action.' })
+  }
+})
+
 app.post('/api/parent/cancel-booking', async (request, response) => {
   const user = await authenticatedUser(request)
   if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
@@ -404,4 +717,72 @@ app.post('/api/parent/cancel-booking', async (request, response) => {
   response.json({ cancelled: true })
 })
 
-app.listen(port, () => console.log(`Stripe checkout server listening on http://localhost:${port}`))
+/* ------------------------------------------------------------------ */
+/* Reminder scheduler — emails buyers 24h before their event with an   */
+/* .ics calendar attachment. Runs while the server is up.              */
+/* ------------------------------------------------------------------ */
+async function sendDueReminders() {
+  if (!supabase) return { checked: 0, sent: 0 }
+  const now = Date.now()
+  const { data: orders, error } = await supabase
+    .from('event_ticket_orders')
+    .select('*, events(*)')
+    .eq('payment_status', 'paid')
+    .is('reminder_sent_at', null)
+  if (error) { console.error('Reminder query failed:', error); return { checked: 0, sent: 0, error: error.message } }
+
+  let sent = 0
+  for (const order of orders || []) {
+    const eventRow = order.events
+    if (!eventRow?.event_date) continue
+    const eventStart = new Date(`${eventRow.event_date}T${(eventRow.event_time || '00:00').slice(0, 5)}:00`).getTime()
+    const hoursUntil = (eventStart - now) / 3600000
+    // Send when within the 24h window (and the event hasn't already started/passed by >2h).
+    if (hoursUntil > 24 || hoursUntil < -2) continue
+    const result = await sendEmail({
+      to: order.buyer_email,
+      subject: `Reminder: ${eventRow.title} is tomorrow`,
+      html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>See you soon! ⏰</h2><p>Hi ${(order.buyer_name || 'there').split(' ')[0]},</p><p>This is a reminder that <strong>${eventRow.title}</strong> is coming up.</p><p><strong>Date:</strong> ${formatDateGB(eventRow.event_date)}${eventRow.event_time ? ` · ${eventRow.event_time.slice(0, 5)}` : ''}${eventRow.event_end_time ? ` – ${eventRow.event_end_time.slice(0, 5)}` : ''}<br><strong>Venue:</strong> ${eventRow.location || 'To be confirmed'}<br><strong>Your tickets:</strong> ${order.tier_name} × ${order.tickets}</p><p>Add it to your calendar so you don't miss it — the attachment drops straight in.</p><p>See you there!</p></div>`,
+      attachments: [{ filename: 'event.ics', content: Buffer.from(buildIcs({ title: eventRow.title, date: eventRow.event_date, startTime: eventRow.event_time, endTime: eventRow.event_end_time, location: eventRow.location, description: eventRow.description, url: `${PUBLIC_BASE_URL}#event/${order.event_id}` })).toString('base64') }],
+    })
+    if (result.sent || !process.env.RESEND_API_KEY) {
+      await supabase.from('event_ticket_orders').update({ reminder_sent_at: new Date().toISOString() }).eq('id', order.id)
+      if (result.sent) sent += 1
+    }
+  }
+  return { checked: (orders || []).length, sent }
+}
+
+// Manual trigger for testing / admin.
+app.post('/api/admin/send-event-reminders', async (request, response) => {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
+  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle()
+  if (profile?.role !== 'admin') return response.status(403).json({ error: 'Only admins can trigger reminders.' })
+  const result = await sendDueReminders()
+  response.json(result)
+})
+
+const REMINDER_INTERVAL_MS = Number(process.env.REMINDER_INTERVAL_MS || 60000)
+setInterval(() => { sendDueReminders().catch((error) => console.error('Reminder scheduler error:', error)) }, REMINDER_INTERVAL_MS)
+
+/* ------------------------------------------------------------------ */
+/* Production: serve the built Vite app (dist/) and fall back to        */
+/* index.html for any non-API route so the React hash/SPA router works.  */
+/* Placed after the webhook (raw body) and all /api routes.              */
+/* ------------------------------------------------------------------ */
+const distPath = path.resolve(process.cwd(), 'dist')
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath))
+  // SPA fallback: any GET that isn't an API route and doesn't map to a real file
+  // returns index.html so the React hash/SPA router can take over.
+  app.use((request, response, next) => {
+    if (request.method !== 'GET' || request.path.startsWith('/api/')) return next()
+    response.sendFile(path.join(distPath, 'index.html'))
+  })
+  console.log('Serving built frontend from dist/')
+} else {
+  console.log('dist/ not found — API-only mode (run npm run build to serve the frontend)')
+}
+
+app.listen(port, '0.0.0.0', () => console.log(`KADA server listening on port ${port}`))

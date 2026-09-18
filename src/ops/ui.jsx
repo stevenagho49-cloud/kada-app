@@ -1,0 +1,260 @@
+import React, { useEffect, useRef, useState } from 'react'
+
+// Design tokens — mirrors the palette used across App.jsx.
+export const OPS_COLORS = {
+  emerald: '#0b3d2e',
+  emeraldLight: '#145c40',
+  gold: '#c9a227',
+  cream: '#f6f3ea',
+  ivory: '#fffdf8',
+  ink: '#232323',
+  muted: '#767066',
+  rule: '#e4ddc9',
+  warn: '#a3401f',
+  okGreen: '#2e6b47',
+}
+export const OPS_SERIF = "'Iowan Old Style', 'Georgia', 'Times New Roman', serif"
+export const OPS_SANS = "'Inter', -apple-system, 'Helvetica Neue', Arial, sans-serif"
+
+export const opsInputStyle = {
+  width: '100%', boxSizing: 'border-box', padding: '9px 11px', fontFamily: 'inherit', fontSize: 14,
+  color: OPS_COLORS.ink, border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 6, outline: 'none', background: OPS_COLORS.ivory,
+}
+
+const TONES = {
+  default: ['#f1eee2', OPS_COLORS.muted],
+  green: ['#e6f0e9', OPS_COLORS.okGreen],
+  gold: ['#faf1d9', '#8a6d10'],
+  red: ['#f7e9e4', OPS_COLORS.warn],
+}
+
+export function Pill({ text, tone = 'default' }) {
+  const colors = TONES[tone] || TONES.default
+  return <span style={{ background: colors[0], color: colors[1], borderRadius: 20, padding: '3px 9px', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{text}</span>
+}
+
+export function OpsButton({ children, onClick, type = 'button', disabled, variant = 'primary', small = false }) {
+  const styles = {
+    primary: { background: OPS_COLORS.emerald, color: OPS_COLORS.ivory },
+    gold: { background: OPS_COLORS.gold, color: OPS_COLORS.emeraldLight },
+    ghost: { background: 'transparent', color: OPS_COLORS.emerald, border: `1px solid ${OPS_COLORS.rule}` },
+    danger: { background: 'transparent', color: OPS_COLORS.warn, border: `1px solid ${OPS_COLORS.rule}` },
+  }
+  return <button type={type} disabled={disabled} onClick={onClick} style={{ ...styles[variant], borderRadius: 6, padding: small ? '6px 11px' : '9px 18px', fontFamily: 'inherit', fontSize: small ? 12 : 13.5, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1 }}>{children}</button>
+}
+
+/* ------------------------------------------------------------------ */
+/* Left sidebar — King's Ark branding, dark, collapsible nav groups.  */
+/* ------------------------------------------------------------------ */
+export function OpsSidebar({ caption = 'Operations', items, active, onSelect, openGroups, onToggleGroup }) {
+  return (
+    <aside className="ops-sidebar">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 10px 18px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+        <div style={{ width: 30, height: 30, borderRadius: 8, background: '#d5a443', display: 'grid', placeItems: 'center', color: '#1a1b29', fontWeight: 700 }}>K</div>
+        <div>
+          <div style={{ fontFamily: 'Fraunces, Georgia, serif', fontSize: 18, fontWeight: 700 }}>King's Ark</div>
+          <div style={{ color: '#b9b3c9', fontSize: 12 }}>Dance Academy</div>
+        </div>
+      </div>
+      <div style={{ padding: '18px 10px 10px' }}>
+        <div style={{ color: '#cbc2e2', fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 10 }}>{caption}</div>
+        <div style={{ display: 'grid', gap: 6 }}>
+          {items.map((item) => (
+            item.children ? (
+              <div key={item.label}>
+                <button type="button" onClick={() => onToggleGroup(item.label)} style={{ width: '100%', textAlign: 'left', borderRadius: 10, padding: '10px 12px', color: '#dfe3f7', background: 'transparent', border: '1px solid transparent', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>{item.label}</span>
+                  <span style={{ fontSize: 12 }}>{openGroups.has(item.label) ? '▾' : '▸'}</span>
+                </button>
+                {openGroups.has(item.label) && (
+                  <div style={{ display: 'grid', gap: 4, paddingLeft: 12, marginTop: 6 }}>
+                    {item.children.map((child) => (
+                      <button key={child.key} type="button" onClick={() => onSelect(child.key)} style={{ width: '100%', textAlign: 'left', borderRadius: 8, padding: '8px 10px', color: active === child.key || child.action ? (child.action && active !== child.key ? '#d5a443' : '#f7c76a') : '#dfe3f7', background: active === child.key ? 'rgba(255, 189, 75, 0.12)' : 'transparent', borderLeft: active === child.key ? '2px solid #f7c76a' : '2px solid transparent', fontWeight: active === child.key ? 700 : 500, cursor: 'pointer' }}>
+                        {child.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button key={item.key} type="button" onClick={() => onSelect(item.key)} style={{ width: '100%', textAlign: 'left', borderRadius: 10, padding: '10px 12px', color: active === item.key ? '#f7c76a' : '#dfe3f7', background: active === item.key ? 'rgba(255, 189, 75, 0.12)' : 'transparent', borderLeft: active === item.key ? '2px solid #f7c76a' : '2px solid transparent', fontWeight: active === item.key ? 700 : 500, cursor: 'pointer' }}>
+                {item.label}
+              </button>
+            )
+          ))}
+        </div>
+      </div>
+    </aside>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Empty state — icon, headline, one-line explanation, CTA button.    */
+/* ------------------------------------------------------------------ */
+export function EmptyState({ icon = '📭', title, body, ctaLabel, onCta }) {
+  return (
+    <div style={{ textAlign: 'center', padding: '46px 20px' }}>
+      <div aria-hidden="true" style={{ fontSize: 34, lineHeight: 1 }}>{icon}</div>
+      <h3 style={{ fontFamily: OPS_SERIF, color: OPS_COLORS.emerald, fontWeight: 400, margin: '12px 0 6px', fontSize: 20 }}>{title}</h3>
+      <p style={{ color: OPS_COLORS.muted, fontSize: 13.5, margin: '0 auto 18px', maxWidth: 400, lineHeight: 1.55 }}>{body}</p>
+      {ctaLabel && <OpsButton small variant="gold" onClick={onCta}>{ctaLabel}</OpsButton>}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* DataTable — real <table> with <thead>, show-N-then-expand, empty.  */
+/* ------------------------------------------------------------------ */
+export function DataTable({ columns, rows, rowKey = 'id', expanded, onToggleExpand, pageSize = 3, emptyState = null }) {
+  if (!rows.length && emptyState) return emptyState
+  const visible = expanded ? rows : rows.slice(0, pageSize)
+  return (
+    <div>
+      <div style={{ overflowX: 'auto' }}>
+        <table className="ops-table">
+          <thead>
+            <tr>{columns.map((column) => <th key={column.key} style={column.width ? { width: column.width } : undefined}>{column.label}</th>)}</tr>
+          </thead>
+          <tbody>
+            {visible.map((row) => (
+              <tr key={row[rowKey]}>
+                {columns.map((column) => <td key={column.key}>{column.render(row)}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {rows.length > pageSize && (
+        <button type="button" onClick={onToggleExpand} style={{ marginTop: 12, border: 0, background: 'none', color: OPS_COLORS.emerald, cursor: 'pointer', fontWeight: 700 }}>
+          {expanded ? 'Show less' : `Show more (${rows.length - pageSize})`}
+        </button>
+      )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Inline editing primitives.                                          */
+/* ------------------------------------------------------------------ */
+export function EditableText({ value, onSave, type = 'text', placeholder = 'Click to edit', disabled = false, small = false, align }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(value ?? '')
+
+  if (disabled) {
+    return <span style={{ fontSize: small ? 12 : 13.5, color: value ? OPS_COLORS.ink : OPS_COLORS.muted }}>{value || '—'}</span>
+  }
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className="ops-editable"
+        title="Click to edit"
+        onClick={() => { setDraft(value ?? ''); setEditing(true) }}
+        style={{ fontSize: small ? 12 : 13.5, color: value ? OPS_COLORS.ink : OPS_COLORS.muted, textAlign: align || 'left' }}
+      >
+        {type === 'number' && value !== '' && value !== null && value !== undefined ? String(value) : (value || placeholder)}
+      </button>
+    )
+  }
+  const commit = () => {
+    setEditing(false)
+    if (String(draft) !== String(value ?? '')) onSave(type === 'number' ? Number(draft) : draft)
+  }
+  return (
+    <input
+      autoFocus
+      type={type}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') event.currentTarget.blur()
+        if (event.key === 'Escape') { setDraft(value ?? ''); setEditing(false) }
+      }}
+      style={{ ...opsInputStyle, padding: '5px 8px', fontSize: small ? 12 : 13.5, minWidth: 90 }}
+    />
+  )
+}
+
+export function EditableSelect({ value, onSave, options, disabled = false, placeholder = '—' }) {
+  const [editing, setEditing] = useState(false)
+  const current = options.find((option) => option.value === (value ?? ''))
+  if (disabled) return <span style={{ fontSize: 13.5, color: value ? OPS_COLORS.ink : OPS_COLORS.muted }}>{current?.label || placeholder}</span>
+  if (!editing) {
+    return (
+      <button type="button" className="ops-editable" title="Click to edit" onClick={() => setEditing(true)} style={{ fontSize: 13.5, color: value ? OPS_COLORS.ink : OPS_COLORS.muted }}>
+        {current?.label || placeholder}
+      </button>
+    )
+  }
+  return (
+    <select
+      autoFocus
+      value={value ?? ''}
+      onChange={(event) => { setEditing(false); if (event.target.value !== (value ?? '')) onSave(event.target.value) }}
+      onBlur={() => setEditing(false)}
+      onKeyDown={(event) => { if (event.key === 'Escape') setEditing(false) }}
+      style={{ ...opsInputStyle, padding: '5px 8px', fontSize: 13.5, minWidth: 110 }}
+    >
+      {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+    </select>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Clickable status badge with a dropdown of options.                  */
+/* ------------------------------------------------------------------ */
+export function StatusMenu({ value, label, tone = 'default', options, onChange, disabled = false }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    if (!open) return undefined
+    const close = (event) => { if (!ref.current?.contains(event.target)) setOpen(false) }
+    document.addEventListener('pointerdown', close)
+    return () => document.removeEventListener('pointerdown', close)
+  }, [open])
+
+  if (disabled) return <Pill text={label || value} tone={tone} />
+  return (
+    <span ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
+      <button type="button" className="ops-status-btn" title="Click to change" onClick={() => setOpen((current) => !current)}>
+        <Pill text={label || value} tone={tone} />
+        <span style={{ fontSize: 9, color: OPS_COLORS.muted, marginLeft: 4 }}>▾</span>
+      </button>
+      {open && (
+        <div className="ops-menu">
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => { setOpen(false); if (option.value !== value) onChange(option.value) }}
+              style={{ fontWeight: option.value === value ? 700 : 400, color: option.danger ? OPS_COLORS.warn : OPS_COLORS.ink }}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Toggle switch (e.g. "Show on homepage").                            */
+/* ------------------------------------------------------------------ */
+export function Toggle({ checked, onChange, disabled = false, label }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label || 'Toggle'}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`ops-toggle ${checked ? 'on' : ''}`}
+    >
+      <span className="ops-toggle-knob" />
+    </button>
+  )
+}

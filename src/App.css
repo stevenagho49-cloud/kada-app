@@ -786,6 +786,202 @@ footer {
   padding: 50px 0 80px;
 }
 
+/* Operations sidebar layout (shared by admin/school/instructor/parent shells) */
+.ops-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  background: #1b1b2c;
+  border-radius: 16px;
+  padding: 14px;
+  color: #f7f3ea;
+  box-shadow: 0 12px 30px rgba(18, 15, 28, 0.14);
+  align-self: flex-start;
+  position: sticky;
+  top: 18px;
+}
+
+/* Operations data tables */
+.ops-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.ops-table th {
+  text-align: left;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #767066;
+  font-weight: 700;
+  padding: 0 12px 10px 0;
+  border-bottom: 1px solid #ddd3b3;
+  white-space: nowrap;
+}
+
+.ops-table td {
+  padding: 12px 12px 12px 0;
+  border-top: 1px solid #ece5d2;
+  vertical-align: top;
+  color: #232323;
+}
+
+.ops-table tbody tr:first-child td {
+  border-top: 0;
+}
+
+/* Inline editable cells */
+.ops-editable {
+  border: 1px dashed transparent;
+  background: transparent;
+  padding: 3px 6px;
+  margin: -3px -6px;
+  border-radius: 6px;
+  font-family: inherit;
+  cursor: text;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ops-editable:hover {
+  border-color: #c9bd97;
+  background: #faf6ea;
+}
+
+/* Clickable status badge + dropdown menu */
+.ops-status-btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  font-family: inherit;
+}
+
+.ops-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 170px;
+  background: #fffdf8;
+  border: 1px solid #e4ddc9;
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(17, 35, 30, 0.16);
+  padding: 6px;
+  display: grid;
+  gap: 2px;
+}
+
+.ops-menu button {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ops-menu button:hover {
+  background: #f1eee2;
+}
+
+/* Toggle switch */
+.ops-toggle {
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid #d8d0b8;
+  background: #ece5d2;
+  padding: 2px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  transition: background 0.15s ease;
+}
+
+.ops-toggle.on {
+  background: #0b3d2e;
+  border-color: #0b3d2e;
+  justify-content: flex-end;
+}
+
+.ops-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ops-toggle-knob {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fffdf8;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+/* Public site — events section */
+.events {
+  padding: 90px 0;
+  background: #f6f3ea;
+}
+
+.event-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 22px;
+  margin-top: 36px;
+}
+
+.event-card {
+  background: #fffdf8;
+  border: 1px solid #e4ddc9;
+  border-radius: 14px;
+  padding: 22px;
+  box-shadow: 0 12px 24px rgba(17, 35, 30, 0.04);
+}
+
+.event-card .event-date {
+  display: inline-block;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: #8a6d10;
+  background: #faf1d9;
+  border-radius: 20px;
+  padding: 4px 11px;
+  margin-bottom: 12px;
+}
+
+.event-card h3 {
+  margin: 0 0 8px;
+  font-size: 1.35rem;
+}
+
+.event-card p {
+  margin: 0 0 10px;
+  color: #767066;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.event-card .event-loc {
+  font-size: 12.5px;
+  color: #0b3d2e;
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .event-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .ops-header {
   display: flex;
   align-items: end;
@@ -1313,4 +1509,16 @@ footer {
   background-position: center;
   background-repeat: no-repeat;
   background-size: cover;
+}
+
+/* Ops layout responsive: stack the sidebar above the content on narrow screens. */
+@media (max-width: 900px) {
+  .ops-layout {
+    flex-direction: column;
+  }
+
+  .ops-sidebar {
+    width: 100%;
+    position: static;
+  }
 }
