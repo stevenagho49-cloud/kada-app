@@ -1033,7 +1033,9 @@ function App() {
     event.preventDefault()
     setCheckoutBusy(true)
     try {
-      const response = await fetch('/api/stripe/create-checkout-session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parentBooking) })
+      const headers = { 'Content-Type': 'application/json' }
+      if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`
+      const response = await fetch('/api/stripe/create-checkout-session', { method: 'POST', headers, body: JSON.stringify(parentBooking) })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Checkout could not be started.')
       window.location.assign(result.url)

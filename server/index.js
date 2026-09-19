@@ -307,8 +307,10 @@ app.post('/api/notify-admin', async (request, response) => {
 app.get('/api/parent/dashboard', async (request, response) => {
   const user = await authenticatedUser(request)
   if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
-  const { data: family, error: familyError } = await supabase.from('parent_families').select('*').or(`owner_user_id.eq.${user.id},guardian_email.eq.${user.email}`).maybeSingle()
+  const { data: families, error: familyError } = await supabase.from('parent_families').select('*').or(`owner_user_id.eq.${user.id},guardian_email.eq.${user.email}`)
   if (familyError) return response.status(500).json({ error: 'Family data could not be loaded.' })
+  // Prefer the family that owns this login; legacy guest-checkout families match by email only.
+  const family = (families || []).find((item) => item.owner_user_id === user.id) || families?.[0] || null
   if (!family) return response.json({ family: null, bookings: [], students: [] })
   const [{ data: bookings, error: bookingError }, { data: students, error: studentError }] = await Promise.all([
     supabase.from('bookings').select('*').eq('family_id', family.id).order('date'),
@@ -577,7 +579,6 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   }
 
   const bookingId = `parent-${crypto.randomUUID()}`
-  const familyId = `family-${crypto.randomUUID()}`
   if (!supabase) return response.status(503).json({ error: 'Supabase server storage is not configured.' })
 
   // The chosen date must be a real scheduled session for the chosen class: matching
@@ -602,8 +603,23 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   }
 
   const user = await authenticatedUser(request)
-  const { error: familyError } = await supabase.from('parent_families').insert({ id: familyId, owner_user_id: user?.id || null, guardian_name: parentName, guardian_email: parentEmail, plan_type: planType, membership_status: 'pending' })
-  if (familyError) return response.status(500).json({ error: 'Family record could not be created.' })
+
+  // Reuse the parent's existing family when we can find one (signed-in owner, or
+  // a previous booking under the same email) so repeat bookings land in one place
+  // instead of a duplicate family the parent dashboard can no longer resolve.
+  const familyMatch = [`guardian_email.eq.${parentEmail}`]
+  if (user?.id) familyMatch.push(`owner_user_id.eq.${user.id}`)
+  const { data: existingFamilies } = await supabase.from('parent_families').select('id,owner_user_id').or(familyMatch.join(',')).limit(1)
+  let familyId = existingFamilies?.[0]?.id || ''
+  if (familyId) {
+    if (user?.id && !existingFamilies[0].owner_user_id) {
+      await supabase.from('parent_families').update({ owner_user_id: user.id }).eq('id', familyId)
+    }
+  } else {
+    familyId = `family-${crypto.randomUUID()}`
+    const { error: familyError } = await supabase.from('parent_families').insert({ id: familyId, owner_user_id: user?.id || null, guardian_name: parentName, guardian_email: parentEmail, plan_type: planType, membership_status: 'pending' })
+    if (familyError) return response.status(500).json({ error: 'Family record could not be created.' })
+  }
   const { error: bookingError } = await supabase.from('bookings').insert({ id: bookingId, family_id: familyId, contact_name: parentName, contact_email: parentEmail, date: classDate, session_type: className, price: planType === 'monthly_membership' ? 25 : 10, student_count: students.length, status: 'Enquiry', invoice_status: 'Not sent', payment_status: 'pending' })
   if (bookingError) return response.status(500).json({ error: 'Booking record could not be created.' })
   const { error: studentsError } = await supabase.from('students').insert(students.map((student, index) => ({ id: `student-${bookingId}-${index + 1}`, booking_id: bookingId, family_id: familyId, parent_name: parentName, parent_email: parentEmail, name: student.name, date_of_birth: student.dateOfBirth, class_name: className, term: classDate, membership_status: 'inactive' })))
