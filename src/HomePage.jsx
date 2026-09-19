@@ -364,7 +364,7 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
               </div>
 
               <div className="video-row reveal">
-                {['A Parent’s Story', 'A Student’s Story'].map((label) => <div className="video-card" key={label}><div className="video-frame video-frame-placeholder"><span className="video-coming">Coming soon</span></div><div className="video-caption"><div className="who display">{label}</div><div className="what">Watch this space</div></div></div>)}
+                {[['A Parent’s Story', 'parent-review.mp4', 'parent-review-poster.jpg', 'landscape'], ['A Student’s Story', 'student-review.mp4', 'student-review-poster.jpg', 'portrait']].map(([label, file, poster, orientation]) => <div className="video-card" key={label}><div className={`video-frame video-frame-${orientation}`}><video controls preload="none" poster={`/images/videos/${poster}`}><source src={`/images/videos/${file}`} type="video/mp4" />Your browser cannot play this video.</video><span className="video-play" aria-hidden="true">▶</span></div><div className="video-caption"><div className="who display">{label}</div><div className="what">Watch the review</div></div></div>)}
               </div>
             </div>
           </section>

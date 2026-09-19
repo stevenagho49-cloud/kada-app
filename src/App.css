@@ -1454,10 +1454,11 @@ footer {
 .site-public .videos { background: var(--dim); padding: 140px 0; border-color: var(--rule); }
 .site-public .videos .section-head { text-align: center; margin-left: auto; margin-right: auto; }
 .site-public .video-row { display: grid; grid-template-columns: repeat(2, minmax(0, 380px)); justify-content: center; gap: 40px; }
-.site-public .video-frame { width: 100%; max-width: 380px; height: min(70vh, 507px); background: linear-gradient(160deg,#1a5142,#082820); box-shadow: 0 30px 60px rgba(13,59,46,.2); }
+.site-public .video-frame { position: relative; width: 100%; max-width: 380px; height: min(70vh, 507px); background: linear-gradient(160deg,#1a5142,#082820); box-shadow: 0 30px 60px rgba(13,59,46,.2); }
+.site-public .video-frame-landscape { height: auto; aspect-ratio: 3 / 2; }
 .site-public .video-frame video { width: 100%; height: 100%; object-fit: cover; display: block; }
-.site-public .video-frame-placeholder { display: grid; place-items: center; }
-.site-public .video-coming { color: rgba(250,246,236,.55); font-size: 11px; letter-spacing: .18em; text-transform: uppercase; border: 1px solid rgba(250,246,236,.28); border-radius: 999px; padding: 10px 18px; }
+.site-public .video-play { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(250,246,236,.9); font-size: 30px; text-shadow: 0 6px 22px rgba(0,0,0,.5); pointer-events: none; }
+.site-public .video-frame:focus-within .video-play, .site-public .video-frame:hover .video-play { opacity: 0; }
 .site-public .mobile-menu-toggle { display: none; }
 .site-public .nav-wrap { position: relative; }
 .site-header .nav-wrap { position: relative; }
@@ -1507,6 +1508,7 @@ footer {
   .site-public .team-card .photo { margin-left: 0; margin-right: 0; }
   .site-public .team-card .info { padding: 0; }
   .site-public .video-frame { height: min(65vh, 480px); }
+  .site-public .video-frame-landscape { height: auto; aspect-ratio: 3 / 2; }
   .site-public .partner-row { gap: 22px 36px; }
   .site-public .partner-row img { height: 32px; max-width: 108px; }
 }
