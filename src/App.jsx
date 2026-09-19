@@ -491,10 +491,16 @@ function MessagesView({ messages, myKind, myInstructorId, mySchoolId, schools, i
   const threadLabel = (key) => { const [kind, id] = key.split(':'); return kind === 'instructor' ? instructors.find((instructor) => instructor.id === id)?.name || 'Instructor' : kind === 'school' ? schools.find((school) => school.id === id)?.name || 'School' : 'KADA Admin' }
   const unreadInThread = (key) => threads[key].filter((message) => !message.readAt && !(message.senderKind === myKind && (myKind === 'admin' || message.senderInstructorId === myInstructorId || message.senderSchoolId === mySchoolId))).length
   const send = () => {
-    if (!draft.trim() || !active) return
-    const [kind, id] = active.split(':')
-    if (isAdmin) onSend({ senderKind: 'admin', recipientKind: kind, recipientInstructorId: kind === 'instructor' ? id : null, recipientSchoolId: kind === 'school' ? id : null, body: draft.trim() })
-    else onSend({ senderKind: myKind, senderInstructorId: myInstructorId || null, senderSchoolId: mySchoolId || null, recipientKind: 'admin', body: draft.trim() })
+    if (!draft.trim()) return
+    if (isAdmin) {
+      if (!active) return
+      const [kind, id] = active.split(':')
+      onSend({ senderKind: 'admin', recipientKind: kind, recipientInstructorId: kind === 'instructor' ? id : null, recipientSchoolId: kind === 'school' ? id : null, body: draft.trim() })
+    } else {
+      // Non-admin senders always message KADA admin — no existing thread required,
+      // otherwise a school's/instructor's first ever message is silently dropped.
+      onSend({ senderKind: myKind, senderInstructorId: myInstructorId || null, senderSchoolId: mySchoolId || null, recipientKind: 'admin', body: draft.trim() })
+    }
     setDraft('')
   }
   useEffect(() => {
@@ -1058,71 +1064,72 @@ function App() {
     }
     const priceData = buildPrice(schoolRequest)
     const needed = priceData.staffNeeded
-    const available = instructors.filter((instructor) => {
-      const assigned = bookings.some(
-        (booking) =>
-          booking.date === schoolRequest.date &&
-          booking.instructorId === instructor.id &&
-          booking.status !== 'Cancelled',
-      )
-      return !assigned
-    })
+    // RLS hides the instructors table from school accounts, so only staff roles
+    // can see real availability — schools always see 0 available here.
+    const canSeeInstructors = profile?.role === 'admin' || profile?.role === 'instructor'
+    const available = canSeeInstructors
+      ? instructors.filter((instructor) => {
+        const assigned = bookings.some(
+          (booking) =>
+            booking.date === schoolRequest.date &&
+            booking.instructorId === instructor.id &&
+            booking.status !== 'Cancelled',
+        )
+        return !assigned
+      })
+      : []
 
-    const fits = available.length >= needed
-    const nextQuote = {
+    const fits = canSeeInstructors ? available.length >= needed : null
+    setQuote({
       ...schoolRequest,
       price: priceData.price,
       staffNeeded: needed,
-      availableInstructors: available.length,
-      statusText: fits ? 'Ready to book' : 'Callback required',
-      canBook: fits,
+      availableInstructors: canSeeInstructors ? available.length : null,
+      statusText: fits === null ? 'Enquiry received' : fits ? 'Ready to book' : 'Callback required',
+      canBook: fits !== false,
+    })
+
+    // Every enquiry is filed — even when staffing needs a callback — so the
+    // request never vanishes and the admin is always notified.
+    const bookingId = `book-${Date.now()}`
+    const schoolId = profile?.school_id || `school-${Date.now()}`
+    const booking = {
+      id: bookingId,
+      schoolId,
+      contactName: schoolRequest.contactName || 'School contact',
+      contactEmail: schoolRequest.email || 'school@example.com',
+      date: schoolRequest.date,
+      sessionType: schoolRequest.sessionType,
+      price: priceData.price,
+      studentCount: Number(schoolRequest.studentCount || 0),
+      instructorId: canSeeInstructors ? available[0]?.id || '' : '',
+      status: 'Enquiry',
+      invoiceStatus: 'Not sent',
+      invoiceNumber: '',
+      notes: `${schoolRequest.notes || 'School enquiry received via website form'}${fits === false ? ' — needs instructor coverage review' : ''}`,
+      requestedBy: session.user.id,
     }
 
-    setQuote(nextQuote)
-
-    if (fits) {
-      const bookingId = `book-${Date.now()}`
-      const schoolId = profile?.school_id || `school-${Date.now()}`
-      const booking = {
-        id: bookingId,
-        schoolId,
-        contactName: schoolRequest.contactName || 'School contact',
-        contactEmail: schoolRequest.email || 'school@example.com',
-        date: schoolRequest.date,
-        sessionType: schoolRequest.sessionType,
-        price: priceData.price,
-        studentCount: Number(schoolRequest.studentCount || 0),
-        instructorId: available[0]?.id || '',
-        status: 'Enquiry',
-        invoiceStatus: 'Not sent',
-        invoiceNumber: '',
-        notes: schoolRequest.notes || 'School enquiry received via website form',
-        requestedBy: session.user.id,
-      }
-
-      const schoolRecord = {
-        id: schoolId,
-        name: schoolRequest.schoolName,
-        contactName: schoolRequest.contactName,
-        email: schoolRequest.email,
-        phone: '',
-        notes: 'Website enquiry',
-      }
-
-      const nextBookings = [booking, ...bookings]
-      const nextSchools = schools.some((school) => school.name === schoolRequest.schoolName)
-        ? schools
-        : [schoolRecord, ...schools]
-
-      setBookings(nextBookings)
-      setSchools(nextSchools)
-      void saveTable('bookings', nextBookings)
-      void saveTable('schools', nextSchools)
-      if (session) void fetch('/api/notify-admin', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'school-enquiry', detail: { schoolName: schoolRequest.schoolName, contactName: schoolRequest.contactName, email: schoolRequest.email, sessionType: schoolRequest.sessionType, date: schoolRequest.date, studentCount: schoolRequest.studentCount, schoolId } }) })
-      setToast('Booking sent to the operations system.')
-    } else {
-      setToast('This date needs more instructor coverage; callback requested.')
+    const schoolRecord = {
+      id: schoolId,
+      name: schoolRequest.schoolName,
+      contactName: schoolRequest.contactName,
+      email: schoolRequest.email,
+      phone: '',
+      notes: 'Website enquiry',
     }
+
+    const nextBookings = [booking, ...bookings]
+    const nextSchools = schools.some((school) => school.name === schoolRequest.schoolName)
+      ? schools
+      : [schoolRecord, ...schools]
+
+    setBookings(nextBookings)
+    setSchools(nextSchools)
+    void saveTable('bookings', nextBookings)
+    void saveTable('schools', nextSchools)
+    if (session) void fetch('/api/notify-admin', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'school-enquiry', detail: { schoolName: schoolRequest.schoolName, contactName: schoolRequest.contactName, email: schoolRequest.email, sessionType: schoolRequest.sessionType, date: schoolRequest.date, studentCount: schoolRequest.studentCount, schoolId } }) })
+    setToast(fits === false ? 'Booking sent — our team will confirm instructor coverage for this date.' : 'Booking sent to the operations system.')
   }
 
   const quotePrice = quote ? quote.price : buildPrice(schoolRequest).price
