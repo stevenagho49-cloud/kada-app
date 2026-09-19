@@ -394,8 +394,8 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
               <h2 className="display">Let's <em>talk.</em></h2>
               <p>Whether you're a parent, a school, or an organisation looking to partner with us, we'd love to hear from you.</p>
               <div className="contact-details">
-                <div><span className="k">Email</span>bookings@kingsarkdance.com</div>
-                <div><span className="k">Phone</span>+44 7535 897732</div>
+                <div><span className="k">Email</span><a href="mailto:bookings@kingsarkdance.com" style={{ color: 'inherit' }}>bookings@kingsarkdance.com</a></div>
+                <div><span className="k">Phone</span><a href="tel:+447535897732" style={{ color: 'inherit' }}>+44 7535 897732</a></div>
                 <div><span className="k">Address</span>395 College Rd, Birmingham B44 0HF</div>
               </div>
             </div>
@@ -425,9 +425,9 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
             </div>
           </div>
           <div className="f-links">
-            <a href="#">Terms &amp; Conditions</a>
-            <a href="#">Privacy Policy</a>
-            <a href="#">Accessibility</a>
+            <a href="#terms">Terms &amp; Conditions</a>
+            <a href="#privacy">Privacy Policy</a>
+            <a href="#accessibility">Accessibility</a>
           </div>
         </div>
 

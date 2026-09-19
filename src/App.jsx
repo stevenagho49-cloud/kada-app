@@ -9,6 +9,7 @@ import { EventTicketPage } from './EventTicketPage'
 import { SiteLayoutPage } from './ops/SiteLayoutPage'
 import { ClassSchedulePage } from './ops/ClassSchedulePage'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
+import { LegalPage } from './LegalPages'
 
 const emerald = '#0b3d2e'
 const emeraldLight = '#145c40'
@@ -124,6 +125,8 @@ function normalizeBooking(row = {}) {
     instructorPay: Number(row.instructor_pay ?? row.instructorPay ?? 0),
     needsAdminAttention: Boolean(row.needs_admin_attention ?? row.needsAdminAttention),
     completedAt: row.completed_at ?? row.completedAt ?? '',
+    // 'pending' = checkout started but never paid — excluded from stats and notifications.
+    paymentStatus: row.payment_status ?? row.paymentStatus ?? '',
   }
 }
 
@@ -458,7 +461,7 @@ function NeedsAttention({ jobs, bookings, instructors, messages, schools, isAdmi
   const notifications = [
     ...jobs.filter((job) => job.status === 'pending').map((job) => ({ id: `claim:${job.id}:${job.claimedAt || ''}`, label: `Job claim pending approval · ${job.date} · ${instructors.find((instructor) => instructor.id === job.claimedBy)?.name || 'Instructor'}`, onOpen: onOpenJobs })),
     ...bookings.filter((booking) => booking.needsAdminAttention).map((booking) => ({ id: `completed:${booking.id}:${booking.completedAt || ''}`, label: `Session delivered · payment review needed · ${booking.date}`, onOpen: onOpenBookings })),
-    ...bookings.filter((booking) => booking.familyId && booking.status !== 'Cancelled').map((booking) => ({ id: `parent-booking:${booking.id}`, label: `New parent booking · ${booking.date} · ${booking.sessionType}`, onOpen: onOpenBookings })),
+    ...bookings.filter((booking) => booking.familyId && booking.status !== 'Cancelled' && booking.paymentStatus !== 'pending').map((booking) => ({ id: `parent-booking:${booking.id}`, label: `New parent booking · ${booking.date} · ${booking.sessionType}`, onOpen: onOpenBookings })),
     ...bookings.filter((booking) => booking.status === 'Enquiry' && !booking.familyId).map((booking) => ({ id: `school-enquiry:${booking.id}`, label: `New school enquiry · ${booking.contactName || 'School contact'} · ${booking.date || 'Date to confirm'}`, onOpen: onOpenBookings })),
     ...(isAdmin ? instructors.filter((instructor) => instructor.dbsStatus === 'Pending').map((instructor) => ({ id: `dbs:${instructor.id}:${instructor.dbsUploadedAt || ''}`, label: `DBS certificate uploaded · review required · ${instructor.name}`, onOpen: onOpenInstructors })) : []),
     ...(isAdmin ? messages.filter((message) => !message.readAt && message.recipientKind === 'admin').map((message) => ({ id: `message:${message.id}`, label: `New message · ${message.senderKind === 'instructor' ? instructors.find((instructor) => instructor.id === message.senderInstructorId)?.name || 'Instructor' : schools.find((school) => school.id === message.senderSchoolId)?.name || 'School'} · ${message.body.slice(0, 60)}${message.body.length > 60 ? '…' : ''}`, onOpen: onOpenMessages })) : []),
@@ -686,7 +689,6 @@ function App() {
   const [dbsUploading, setDbsUploading] = useState(false)
   const [invoiceSettings, setInvoiceSettings] = useState({ accountName: '', sortCode: '', accountNumber: '' })
   const [invoiceSettingsSaving, setInvoiceSettingsSaving] = useState(false)
-  const [invoicePermissionIds, setInvoicePermissionIds] = useState([])
   const [quote, setQuote] = useState(null)
   const [toast, setToast] = useState('')
   const [dismissedNotifications, setDismissedNotifications] = useState(() => parseStored('kada-dismissed-notifications', []))
@@ -696,7 +698,7 @@ function App() {
     email: '',
     studentCount: 45,
     sessionType: 'Full day (£490)',
-    date: '2026-09-18',
+    date: new Date().toISOString().slice(0, 10),
     notes: '',
   })
 
@@ -717,6 +719,7 @@ function App() {
   const [events, setEvents] = useState([])
   const [eventModal, setEventModal] = useState(null)
   const [eventPageId, setEventPageId] = useState(() => window.location.hash.match(/^#event\/([\w-]+)/)?.[1] || null)
+  const [legalPageId, setLegalPageId] = useState(() => window.location.hash.match(/^#(privacy|terms|accessibility)$/)?.[1] || null)
   const [siteEvents, setSiteEvents] = useState([])
   const [sectionLayout, setSectionLayout] = useState([])
   const [classSessions, setClassSessions] = useState([])
@@ -742,9 +745,13 @@ function App() {
     return () => document.removeEventListener('pointerdown', closeOnOutsideTap)
   }, [publicMenuOpen])
 
-  // Public ticketed-event pages live at #event/<id> and are reachable by guests (no sign-in).
+  // Public pages live at #event/<id> (ticketed events) and #privacy / #terms /
+  // #accessibility (legal pages) — all reachable by guests without sign-in.
   useEffect(() => {
-    const onHashChange = () => setEventPageId(window.location.hash.match(/^#event\/([\w-]+)/)?.[1] || null)
+    const onHashChange = () => {
+      setEventPageId(window.location.hash.match(/^#event\/([\w-]+)/)?.[1] || null)
+      setLegalPageId(window.location.hash.match(/^#(privacy|terms|accessibility)$/)?.[1] || null)
+    }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
@@ -877,29 +884,11 @@ function App() {
   }, [profile?.role])
 
   useEffect(() => {
-    if (!session || profile?.role !== 'admin') return undefined
-    fetch('/api/admin/invoice-permissions', { headers: { Authorization: `Bearer ${session.access_token}` } }).then((response) => response.ok ? response.json() : null).then((result) => { if (result) setInvoicePermissionIds(result.users.map((user) => user.email.toLowerCase())) })
-    return undefined
-  }, [session, profile?.role])
-
-  useEffect(() => {
     if (!supabaseReady || view !== 'site') return undefined
     const today = new Date().toISOString().slice(0, 10)
     let mounted = true
     supabase.from('events').select('*').eq('status', 'published').eq('show_on_homepage', true).gte('event_date', today).order('event_date', { ascending: true }).limit(6).then(({ data, error }) => {
       if (mounted && !error && data) setSiteEvents(data.map(normalizeEvent))
-    })
-    return () => { mounted = false }
-  }, [view])
-
-  // Homepage section layout (visible + order) — read by guests and by the Site Layout admin page.
-  useEffect(() => {
-    if (!supabaseReady) return undefined
-    let mounted = true
-    supabase.from('site_sections').select('*').order('sort_order').then(({ data, error }) => {
-      if (mounted && !error && data?.length) {
-        setSectionLayout(data.map((row) => ({ sectionKey: row.section_key, label: row.label, visible: row.visible, sortOrder: row.sort_order })))
-      }
     })
     return () => { mounted = false }
   }, [view])
@@ -958,15 +947,9 @@ function App() {
   useEffect(() => {
     if (view !== 'site' || !authReady) return undefined
     const revealItems = document.querySelectorAll('.site-public .reveal')
-    console.log('[KADA reveal] observing', revealItems.length, 'elements')
     const observer = new IntersectionObserver((entries) => {
       entries.forEach((entry) => {
         if (!entry.isIntersecting) return
-        console.log('[KADA reveal]', {
-          target: entry.target.className,
-          section: entry.target.closest('section')?.id || entry.target.closest('section')?.className,
-          intersectionRatio: entry.intersectionRatio,
-        })
         entry.target.classList.add('in')
         observer.unobserve(entry.target)
       })
@@ -1005,12 +988,12 @@ function App() {
   }, [bookings])
 
   const stats = useMemo(() => {
-    const upcomingCount = bookings.filter((booking) => booking.status !== 'Cancelled').length
-    const confirmedRevenue = bookings.reduce((sum, booking) => {
-      if (booking.status === 'Cancelled') return sum
-      return sum + Number(booking.price || 0)
-    }, 0)
-    const unpaidInvoices = bookings.filter((booking) => booking.invoiceStatus !== 'Paid' && booking.status !== 'Cancelled').length
+    // Abandoned checkouts sit at paymentStatus 'pending' — they are not real
+    // bookings, so keep them out of the dashboard numbers entirely.
+    const live = bookings.filter((booking) => booking.status !== 'Cancelled' && booking.paymentStatus !== 'pending')
+    const upcomingCount = live.length
+    const confirmedRevenue = live.reduce((sum, booking) => sum + Number(booking.price || 0), 0)
+    const unpaidInvoices = live.filter((booking) => booking.invoiceStatus !== 'Paid').length
     return { upcomingCount, confirmedRevenue, unpaidInvoices }
   }, [bookings])
 
@@ -1146,7 +1129,6 @@ function App() {
   }
 
   const persistRows = (tableName, rows, setter) => { setter(rows); void saveTable(tableName, rows) }
-  const _saveStudent = (student) => { const next = students.some((item) => item.id === student.id) ? students.map((item) => item.id === student.id ? student : item) : [student, ...students]; persistRows('students', next, setStudents) }
   const sendInvoice = async (booking) => {
     const school = schools.find((item) => item.id === booking.schoolId)
     setInvoiceSending(true)
@@ -1303,7 +1285,6 @@ function App() {
   const openDbsFile = async (instructorId) => { const response = await fetch(`/api/dbs/file/${encodeURIComponent(instructorId)}`, { headers: { Authorization: `Bearer ${session.access_token}` } }); const result = await response.json(); if (response.ok) window.open(result.url, '_blank', 'noopener,noreferrer'); else setToast(result.error || 'DBS certificate could not be opened.') }
   const reviewDbs = async (instructor, decision, rejectionReason = '') => { const response = await fetch('/api/dbs/review', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ instructorId: instructor.id, decision, rejectionReason }) }); if (response.ok) { const updated = { ...instructor, dbsStatus: decision, dbsDecidedAt: new Date().toISOString(), dbsRejectionReason: decision === 'Rejected' ? rejectionReason : '' }; persistRows('instructors', instructors.map((item) => item.id === instructor.id ? updated : item), setInstructors) } setToast(response.ok ? `DBS ${decision.toLowerCase()}.` : 'DBS decision could not be saved.') }
   const downloadInvoice = async (booking) => { const params = new URLSearchParams({ description: booking.invoiceDescription ?? '', rate: String(booking.invoiceRate ?? booking.price ?? 0), amount: String(booking.invoiceAmount ?? booking.price ?? 0), discountPercent: String(booking.discountPercent ?? 0) }); const response = await fetch(`/api/invoices/pdf/${encodeURIComponent(booking.id)}?${params}`, { headers: { Authorization: `Bearer ${session.access_token}` } }); if (!response.ok) { setToast('Invoice PDF could not be generated.'); return } const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${booking.invoiceNumber || booking.id}.pdf`; document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000) }
-  const _toggleInvoicePermission = async (instructor) => { const enabled = !invoicePermissionIds.includes((instructor.email || '').toLowerCase()); const response = await fetch('/api/admin/invoice-permissions', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ instructorId: instructor.id, enabled }) }); const result = await response.json(); if (!response.ok) { setToast(result.error || 'Invoice permission could not be saved.'); return } setInvoicePermissionIds((current) => enabled ? [...current, instructor.email.toLowerCase()] : current.filter((email) => email !== instructor.email.toLowerCase())); setToast(enabled ? `${instructor.name} can now send invoices.` : `${instructor.name} invoice access removed.`) }
   const sendMessage = async (draft) => {
     const row = { id: crypto.randomUUID(), sender_kind: draft.senderKind, sender_instructor_id: draft.senderInstructorId || null, sender_school_id: draft.senderSchoolId || null, recipient_kind: draft.recipientKind, recipient_instructor_id: draft.recipientInstructorId || null, recipient_school_id: draft.recipientSchoolId || null, body: draft.body }
     const { data, error } = await supabase.from('messages').insert(row).select().single()
@@ -1393,6 +1374,7 @@ function App() {
 
   if (!authReady) return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', fontFamily: 'sans-serif' }}>Loading...</div>
   if (eventPageId) return <EventTicketPage eventId={eventPageId} onBack={() => { window.location.hash = '' }} />
+  if (legalPageId) return <LegalPage page={legalPageId} onBack={() => { window.location.hash = '' }} />
   if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
   if (view === 'ops' && profile?.role === 'parent') return <ParentDashboard session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} />
 

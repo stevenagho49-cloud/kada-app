@@ -2,12 +2,16 @@ import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
 import Stripe from 'stripe'
+import { rateLimit } from 'express-rate-limit'
 import { createClient } from '@supabase/supabase-js'
 import PDFDocument from 'pdfkit'
 import fs from 'node:fs'
 import path from 'node:path'
 
 const app = express()
+// Render (and most hosts) sit behind a single proxy — trust one hop so req.ip
+// is the real client IP, which the rate limiters below depend on.
+app.set('trust proxy', 1)
 const port = Number(process.env.PORT || 4242)
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
@@ -22,7 +26,7 @@ const allowedOrigins = (process.env.CLIENT_URLS || process.env.CLIENT_URL || 'ht
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) return callback(null, true) // same-origin / server-to-server / whitelisted
-    return callback(null, true) // permissive fallback — tighten by setting CLIENT_URLS if the API is exposed cross-origin
+    return callback(null, false) // no CORS headers for other origins — cross-origin browser reads are blocked
   },
   credentials: true,
 }))
@@ -186,7 +190,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       guardian_name: metadata.parent_name,
       guardian_email: session.customer_details?.email || metadata.parent_email,
       plan_type: planType,
-      membership_status: planType === 'monthly_membership' ? 'active' : 'active',
+      membership_status: 'active',
       stripe_customer_id: session.customer || null,
       stripe_subscription_id: session.subscription || null,
       updated_at: new Date().toISOString(),
@@ -257,12 +261,28 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     const subscription = event.data.object
     const membershipStatus = event.type.endsWith('deleted') ? 'cancelled' : ['active', 'trialing'].includes(subscription.status) ? 'active' : 'inactive'
     await supabase.from('parent_families').update({ membership_status: membershipStatus, updated_at: new Date().toISOString() }).eq('stripe_subscription_id', subscription.id)
+    // Keep the children's roster status in step with the subscription — a cancelled
+    // membership must not leave students showing as active in Operations.
+    if (event.type === 'customer.subscription.deleted') {
+      const { data: cancelledFamilies } = await supabase.from('parent_families').select('id').eq('stripe_subscription_id', subscription.id)
+      const familyIds = (cancelledFamilies || []).map((family) => family.id)
+      if (familyIds.length) await supabase.from('students').update({ membership_status: 'cancelled' }).in('family_id', familyIds)
+    }
   }
 
   response.json({ received: true })
 })
 
 app.use(express.json())
+
+// Basic abuse protection on the unauthenticated endpoints: the two public
+// checkout creators and the post-payment lookups (which anyone can poll).
+// Authenticated admin/parent endpoints sit behind Supabase JWT verification.
+const tooMany = { error: 'Too many attempts — please wait a few minutes, then try again.' }
+const checkoutLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
+const lookupLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
+app.use(['/api/stripe/create-checkout-session', '/api/stripe/create-event-checkout'], checkoutLimiter)
+app.use(['/api/stripe/event-order', '/api/stripe/class-booking'], lookupLimiter)
 
 // Health check for Render's uptime monitor — confirms the server is up and can
 // reach Supabase (the critical dependency for auth, data, and ticketing).
@@ -624,13 +644,17 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   if (bookingError) return response.status(500).json({ error: 'Booking record could not be created.' })
   const { error: studentsError } = await supabase.from('students').insert(students.map((student, index) => ({ id: `student-${bookingId}-${index + 1}`, booking_id: bookingId, family_id: familyId, parent_name: parentName, parent_email: parentEmail, name: student.name, date_of_birth: student.dateOfBirth, class_name: className, term: classDate, membership_status: 'inactive' })))
   if (studentsError) return response.status(500).json({ error: 'Student records could not be created.' })
+  // Return to the host the parent actually used (same pattern as event checkout) —
+  // so dev/localhost sessions redirect back to dev, not to the live site.
+  const requestOrigin = request.headers.origin || request.headers.referer?.replace(/\/[^/]*$/, '') || ''
+  const clientUrl = requestOrigin.startsWith('http') ? requestOrigin : (process.env.CLIENT_URL || 'http://localhost:5173')
   const session = await stripe.checkout.sessions.create({
     mode: planType === 'monthly_membership' ? 'subscription' : 'payment',
     customer_email: parentEmail,
     line_items: [{ price: priceId, quantity: 1 }],
     metadata: { booking_id: bookingId, family_id: familyId, plan_type: planType, class_name: className, class_date: classDate, amount_pence: planType === 'monthly_membership' ? '2500' : '1000', parent_name: parentName, parent_email: parentEmail },
-    success_url: `${APP_URL}?payment=success&session_id={CHECKOUT_SESSION_ID}#classes`,
-    cancel_url: `${APP_URL}#classes`,
+    success_url: `${clientUrl}?payment=success&session_id={CHECKOUT_SESSION_ID}#classes`,
+    cancel_url: `${clientUrl}#classes`,
   })
 
   response.json({ url: session.url })
@@ -771,10 +795,11 @@ app.post('/api/parent/cancel-subscription', async (request, response) => {
   if (!stripe || !supabase) return response.status(503).json({ error: 'Billing is not configured on the server.' })
   const user = await authenticatedUser(request)
   if (!user) return response.status(401).json({ error: 'Authentication is required.' })
-  const { data: family } = await supabase.from('parent_families').select('stripe_subscription_id').eq('owner_user_id', user.id).maybeSingle()
+  const { data: family } = await supabase.from('parent_families').select('id,stripe_subscription_id').eq('owner_user_id', user.id).maybeSingle()
   if (!family?.stripe_subscription_id) return response.status(400).json({ error: 'No active subscription was found.' })
   await stripe.subscriptions.cancel(family.stripe_subscription_id)
   await supabase.from('parent_families').update({ membership_status: 'cancelled', updated_at: new Date().toISOString() }).eq('owner_user_id', user.id)
+  await supabase.from('students').update({ membership_status: 'cancelled' }).eq('family_id', family.id)
   response.json({ cancelled: true })
 })
 
@@ -808,6 +833,7 @@ app.post('/api/admin/subscriptions/:familyId/:action', async (request, response)
     }
     const { data, error } = await supabase.from('parent_families').update(update).eq('id', familyId).select().single()
     if (error) return response.status(500).json({ error: 'Stripe was updated, but the family record could not be saved.' })
+    if (action === 'cancel') await supabase.from('students').update({ membership_status: 'cancelled' }).eq('family_id', familyId)
     response.json({ family: data })
   } catch (error) {
     response.status(502).json({ error: error.message || 'Stripe could not apply the subscription action.' })
@@ -821,6 +847,9 @@ app.post('/api/admin/subscriptions/:familyId/:action', async (request, response)
 // is untouched, and no Stripe objects are modified — refunds are handled
 // separately in the Stripe dashboard.
 app.post('/api/admin/reset-test-data', async (request, response) => {
+  // This endpoint deletes real customer records (bookings, students, families,
+  // ticket orders) — it must be explicitly enabled per environment.
+  if (process.env.ALLOW_TEST_DATA_RESET !== 'true') return response.status(403).json({ error: 'Test data reset is disabled on this server. Set ALLOW_TEST_DATA_RESET=true to enable it temporarily.' })
   if (!supabase) return response.status(503).json({ error: 'Supabase server storage is not configured.' })
   const user = await authenticatedUser(request)
   if (!user) return response.status(401).json({ error: 'Authentication is required.' })
@@ -864,7 +893,12 @@ app.post('/api/parent/cancel-booking', async (request, response) => {
   const user = await authenticatedUser(request)
   if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
   const { bookingId } = request.body || {}
-  const { data: booking } = await supabase.from('bookings').select('id').eq('id', bookingId).in('family_id', (await supabase.from('parent_families').select('id').eq('owner_user_id', user.id)).data?.map((family) => family.id) || []).maybeSingle()
+  // Legacy guest-checkout families have no owner_user_id — match by guardian email
+  // too, mirroring /api/parent/dashboard, so parents can cancel what they can see.
+  const { data: ownedFamilies } = await supabase.from('parent_families').select('id').or(`owner_user_id.eq.${user.id},guardian_email.eq.${user.email}`)
+  const familyIds = (ownedFamilies || []).map((family) => family.id)
+  if (!familyIds.length) return response.status(404).json({ error: 'Booking not found for this parent.' })
+  const { data: booking } = await supabase.from('bookings').select('id').eq('id', bookingId).in('family_id', familyIds).maybeSingle()
   if (!booking) return response.status(404).json({ error: 'Booking not found for this parent.' })
   const { error } = await supabase.from('bookings').update({ status: 'Cancelled' }).eq('id', bookingId)
   if (error) return response.status(500).json({ error: 'Booking could not be cancelled.' })

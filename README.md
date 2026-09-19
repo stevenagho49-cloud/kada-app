@@ -62,3 +62,7 @@ Confirmed school bookings are sent through Resend by `server/index.js`. Add `RES
 npm run lint
 npm run build
 ```
+
+## Resetting test data
+
+Operations > Dashboard > "Review & reset test data" deletes all bookings, students, family accounts, and ticket orders after a typed confirmation. The endpoint only runs when `ALLOW_TEST_DATA_RESET=true` is set in the server environment — keep it set locally and unset (or set it temporarily) on production.
