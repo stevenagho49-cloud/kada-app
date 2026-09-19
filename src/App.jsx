@@ -1349,7 +1349,7 @@ function App() {
       <header ref={headerRef} className="site-header">
         <div className="wrap nav-wrap">
           <div className="brand" aria-label="King's Ark Dance Academy home">
-                <img className="brand-logo" src="/images/logo.jpg" alt="King's Ark Dance Academy logo" />
+                <img className="brand-logo" src="/images/logo.jpg?v=2" alt="King's Ark Dance Academy logo" />
             <div className="brand-text">
               <span className="name">King's Ark</span>
               <span className="sub">Dance Academy</span>
