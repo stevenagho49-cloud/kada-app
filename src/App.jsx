@@ -7,6 +7,7 @@ import SubscriptionsPage from './ops/SubscriptionsPage'
 import { EventsPage, EventForm, emptyEvent, normalizeEvent, toDbEvent } from './ops/EventsPage'
 import { SiteLayoutPage } from './ops/SiteLayoutPage'
 import { SiteContentPage } from './ops/SiteContentPage'
+import { CalendarPage } from './ops/CalendarPage'
 import { ClassSchedulePage } from './ops/ClassSchedulePage'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
 
@@ -992,6 +993,22 @@ function App() {
     }
   }
 
+  // Parent dashboard checkout — same endpoint, but the form data comes from the
+  // parent portal rather than the public homepage modal.
+  const startParentCheckout = async (booking) => {
+    setCheckoutBusy(true)
+    try {
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` }
+      const response = await fetch('/api/stripe/create-checkout-session', { method: 'POST', headers, body: JSON.stringify(booking) })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Checkout could not be started.')
+      window.location.assign(result.url)
+    } catch (error) {
+      setToast(error.message)
+      setCheckoutBusy(false)
+    }
+  }
+
   const handleQuoteSubmit = (event) => {
     event.preventDefault()
     if (!session) {
@@ -1297,6 +1314,7 @@ function App() {
     {
       label: 'Operations',
       children: [
+        { key: 'calendar', label: 'Calendar' },
         { key: 'bookings', label: 'Bookings' },
         ...(isAdmin ? [{ key: 'schools', label: 'Schools' }, { key: 'instructors', label: 'Instructors' }, { key: 'students', label: 'Students' }, { key: 'class-schedule', label: 'Class schedule' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'jobs', label: 'Job board' }] : []),
@@ -1342,14 +1360,14 @@ function App() {
   if (eventPageId) return <Suspense fallback={routeFallback}><EventTicketPage eventId={eventPageId} onBack={() => { window.location.hash = '' }} /></Suspense>
   if (legalPageId) return <Suspense fallback={routeFallback}><LegalPage page={legalPageId} onBack={() => { window.location.hash = '' }} /></Suspense>
   if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
-  if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
+  if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
 
   return (
     <div className="app-shell">
       <header ref={headerRef} className="site-header">
         <div className="wrap nav-wrap">
           <div className="brand" aria-label="King's Ark Dance Academy home">
-                <img className="brand-logo" src="/images/logo.jpg?v=2" alt="King's Ark Dance Academy logo" />
+                <img className="brand-logo" src="/images/logo-v2.jpg" alt="King's Ark Dance Academy logo" />
             <div className="brand-text">
               <span className="name">King's Ark</span>
               <span className="sub">Dance Academy</span>
@@ -1445,6 +1463,7 @@ function App() {
           {tab === 'invoice-settings' && isAdmin && <InvoiceSettings settings={invoiceSettings} onSave={saveInvoiceSettings} saving={invoiceSettingsSaving} />}
           {tab === 'jobs' && (isAdmin || isInstructor) && <JobBoardView jobs={isInstructor ? jobs.filter((job) => job.status === 'open' || job.claimedBy === profile.instructor_id) : jobs} bookings={bookings} schools={schools} instructors={instructors} isAdmin={isAdmin} onClaim={claimJob} onDecision={decideJob} onGoToBookings={() => setTab('bookings')} />}
 
+          {tab === 'calendar' && (isAdmin || isInstructor) && <CalendarPage bookings={isInstructor ? bookings.filter((booking) => booking.instructorId === profile?.instructor_id) : bookings} events={events} instructors={instructors} onOpenBooking={(booking) => setBookingModal(booking)} onAddEvent={(date) => setEventModal({ ...emptyEvent(), eventDate: date })} />}
           {tab === 'bookings' && <div className="panel">
             <div className="panel-head">
               <h3>Bookings</h3>

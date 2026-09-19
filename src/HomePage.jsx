@@ -390,13 +390,16 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
           </React.Fragment>
         )
       case 'events':
-        return siteEvents.length > 0 ? (
+        return (
           <section className="events" id="events" key="events">
             <div className="wrap">
               <div className="section-head">
                 <span className="eyebrow">What's On</span>
                 <h2 className="display">Upcoming <em>events.</em></h2>
               </div>
+              {siteEvents.length === 0 ? (
+                <p style={{ color: '#767066', fontSize: 14, marginTop: 20 }}>New events are announced here soon.</p>
+              ) : (
               <div className="event-row reveal">
                 {siteEvents.map((siteEvent) => (
                   <div className="event-card" key={siteEvent.id}>
@@ -414,9 +417,10 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
                   </div>
                 ))}
               </div>
+              )}
             </div>
           </section>
-        ) : null
+        )
       case 'team':
         return (
           <section className="team" id="team" key="team">

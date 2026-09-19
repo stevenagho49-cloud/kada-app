@@ -546,7 +546,7 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
   document.rect(0, 0, pageWidth, 130.39).fill(emerald)
   document.rect(0, 130.39, pageWidth, 3.4).fill(gold)
   document.circle(margin + 28.35, 65.2, 31.75).fill(ivory)
-  const logoPath = ['public/images/logo.jpg', 'dist/images/logo.jpg'].map((candidate) => path.resolve(process.cwd(), candidate)).find((candidate) => fs.existsSync(candidate))
+  const logoPath = ['public/images/logo-v2.jpg', 'dist/images/logo-v2.jpg', 'public/images/logo.jpg', 'dist/images/logo.jpg'].map((candidate) => path.resolve(process.cwd(), candidate)).find((candidate) => fs.existsSync(candidate))
   if (logoPath) document.image(logoPath, margin + 5.67, 42.52, { fit: [45.36, 45.36], align: 'center', valign: 'center' })
   document.font('Times-Bold').fontSize(17).fillColor(ivory).text("King's Ark Dance Academy", margin + 68.03, 56.69)
   document.font('Helvetica').fontSize(8.5).fillColor(gold).text('GOSPEL AFROBEATS  ·  BIRMINGHAM', margin + 68.03, 72.28)
