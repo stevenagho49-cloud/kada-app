@@ -1456,10 +1456,16 @@ footer {
 .site-public .video-row { display: grid; grid-template-columns: repeat(2, minmax(0, 380px)); justify-content: center; gap: 40px; }
 .site-public .video-frame { width: 100%; max-width: 380px; height: min(70vh, 507px); background: linear-gradient(160deg,#1a5142,#082820); box-shadow: 0 30px 60px rgba(13,59,46,.2); }
 .site-public .video-frame video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.site-public .video-frame-placeholder { display: grid; place-items: center; }
+.site-public .video-coming { color: rgba(250,246,236,.55); font-size: 11px; letter-spacing: .18em; text-transform: uppercase; border: 1px solid rgba(250,246,236,.28); border-radius: 999px; padding: 10px 18px; }
 .site-public .mobile-menu-toggle { display: none; }
 .site-public .nav-wrap { position: relative; }
 .site-header .nav-wrap { position: relative; }
 .site-public .sponsors { padding: 70px 0; }
+.site-public .partners .eyebrow { margin-bottom: 34px; }
+.site-public .partner-row { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 28px 56px; }
+.site-public .partner-row img { height: 44px; width: auto; max-width: 150px; object-fit: contain; filter: grayscale(1); mix-blend-mode: multiply; opacity: .68; transition: opacity .25s ease; }
+.site-public .partner-row img:hover { opacity: 1; }
 .site-public .contact { background: var(--emerald); padding: 150px 0; }
 .site-public .reveal { opacity: 0; transform: translateY(36px); transition: opacity .9s cubic-bezier(.16,.84,.44,1), transform .9s cubic-bezier(.16,.84,.44,1); }
 .site-public .reveal.in { opacity: 1; transform: translateY(0); }
@@ -1501,6 +1507,8 @@ footer {
   .site-public .team-card .photo { margin-left: 0; margin-right: 0; }
   .site-public .team-card .info { padding: 0; }
   .site-public .video-frame { height: min(65vh, 480px); }
+  .site-public .partner-row { gap: 22px 36px; }
+  .site-public .partner-row img { height: 32px; max-width: 108px; }
 }
 
 

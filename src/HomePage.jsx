@@ -364,18 +364,24 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
               </div>
 
               <div className="video-row reveal">
-                {[['A Parent’s Story', 'parent-review.mp4'], ['A Student’s Story', 'student-review.mp4']].map(([label, file]) => <div className="video-card" key={label}><div className="video-frame"><video controls preload="metadata"><source src={`/images/videos/${file}`} type="video/mp4" />Your browser cannot play this video.</video></div><div className="video-caption"><div className="who display">{label}</div><div className="what">Watch the review</div></div></div>)}
+                {['A Parent’s Story', 'A Student’s Story'].map((label) => <div className="video-card" key={label}><div className="video-frame video-frame-placeholder"><span className="video-coming">Coming soon</span></div><div className="video-caption"><div className="who display">{label}</div><div className="what">Watch this space</div></div></div>)}
               </div>
             </div>
           </section>
         )
       case 'sponsors':
         return (
-          <section className="sponsors" key="sponsors">
+          <section className="sponsors partners" key="sponsors">
             <div className="wrap">
-              <span className="eyebrow">Sponsors &amp; Partners</span>
-              <div className="sponsor-row">
-                <span className="mark">Partner logos coming soon</span>
+              <span className="eyebrow">As seen on</span>
+              <div className="partner-row reveal">
+                {[
+                  ['BBC', '/images/partners/bbc.png'],
+                  ['ITV', '/images/partners/itv.jpeg'],
+                  ['Commonwealth Games Birmingham 2022', '/images/partners/commonwealth-games-birmingham-2022.jpeg'],
+                  ['NHS', '/images/partners/nhs.png'],
+                  ["Britain's Got Talent", '/images/partners/britains-got-talent.jpeg'],
+                ].map(([name, src]) => <img key={name} src={src} alt={name} title={name} loading="lazy" />)}
               </div>
             </div>
           </section>
