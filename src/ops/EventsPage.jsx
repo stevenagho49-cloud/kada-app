@@ -239,7 +239,7 @@ export function EventBuyersModal({ event, onClose }) {
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(20,16,8,0.45)', display: 'grid', placeItems: 'center', zIndex: 1000, padding: 20 }}>
       <div onClick={(clickEvent) => clickEvent.stopPropagation()} style={{ background: OPS_COLORS.ivory, borderRadius: 12, border: `1px solid ${OPS_COLORS.rule}`, width: '100%', maxWidth: 640, maxHeight: '80vh', overflow: 'auto', padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-          <h3 style={{ margin: 0, fontFamily: "'Iowan Old Style', Georgia, serif", color: OPS_COLORS.emerald }}>{event.title} — buyers</h3>
+          <h3 style={{ margin: 0, fontFamily: "'Iowan Old Style', Georgia, serif", color: OPS_COLORS.emerald }}>{event.title}: buyers</h3>
           <button type="button" onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: OPS_COLORS.muted }}>×</button>
         </div>
         {orders && orders.length > 0 && (
@@ -361,7 +361,7 @@ export function EventForm({ event, onSave, onUploadFlyer }) {
       </label>
       {form.ticketingEnabled && (
         <div style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: 12, marginBottom: 12, background: OPS_COLORS.cream }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: OPS_COLORS.emerald, marginBottom: 10 }}>Ticket tiers — add as many as you like, like Eventbrite</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: OPS_COLORS.emerald, marginBottom: 10 }}>Ticket tiers: add as many as you like, like Eventbrite</div>
           {form.ticketTiers.map((tier) => (
             <div key={tier.id} style={{ display: 'grid', gridTemplateColumns: '1fr 110px 150px 30px', gap: 8, marginBottom: 10, alignItems: 'end' }}>
               <label>

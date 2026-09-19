@@ -30,7 +30,7 @@ export default function SubscriptionsPage({ families, busyId, onAction, onSaveFa
     { key: 'plan', label: 'Plan', render: (family) => <span style={{ color: OPS_COLORS.ink }}>{planLabel(family.plan_type)}</span> },
     {
       key: 'since', label: 'Since', render: (family) => (
-        <span style={{ color: OPS_COLORS.muted, fontSize: 12.5 }}>{family.created_at ? new Date(family.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}</span>
+        <span style={{ color: OPS_COLORS.muted, fontSize: 12.5 }}>{family.created_at ? new Date(family.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not set'}</span>
       ),
     },
     {

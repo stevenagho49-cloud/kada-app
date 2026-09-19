@@ -87,7 +87,7 @@ function ClassDatePicker({ session, value, onChange }) {
       </div>
       <p className="class-date-hint">
         {session
-          ? `${session.name} runs every ${DAY_NAMES[Number(session.day_of_week)]}${session.start_time ? `, ${String(session.start_time).slice(0, 5)}${session.end_time ? `–${String(session.end_time).slice(0, 5)}` : ''}` : ''} — only class days are selectable.${todayIsEndedClassDay ? " Today's class has already finished, so today is no longer bookable." : ''}`
+          ? `${session.name} runs every ${DAY_NAMES[Number(session.day_of_week)]}${session.start_time ? `, ${String(session.start_time).slice(0, 5)}${session.end_time ? `–${String(session.end_time).slice(0, 5)}` : ''}` : ''}. Only class days are selectable.${todayIsEndedClassDay ? " Today's class has already finished, so today is no longer bookable." : ''}`
           : 'Choose a class to see its available dates.'}
       </p>
     </div>
@@ -152,7 +152,7 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
           <section className="stats-strip" key="stats">
             <div className="wrap stats-grid">
               <div className="stat-inline"><div className="num display">1,000+</div><div className="label">Children<br />Empowered</div></div>
-              <div className="stat-inline"><div className="num display">50+</div><div className="label">Schools<br />Partnered</div></div>
+              <div className="stat-inline"><div className="num display">1,000+</div><div className="label">Schools<br />Reached</div></div>
               <div className="stat-inline"><div className="num display">10+</div><div className="label">Years of<br />Impact</div></div>
             </div>
           </section>
@@ -166,7 +166,7 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
                 <div className="eyebrow wine">About KADA</div>
                 <h2 className="display section-title">More than dance. <em>It's a movement.</em></h2>
                 <p>King's Ark Dance Academy, formerly Dance With Stago, is a faith inspired dance school rooted in Gospel Afrobeats. We work with children and young people aged 5–16, using dance to build confidence, teamwork, creativity and cultural awareness.</p>
-                <p>We've delivered workshops to over a thousand UK schools, with moments alongside ITV, BBC and the Commonwealth Games. The heart of what we do happens in the room: a shy child finding their voice, a group of strangers becoming a team in under an hour.</p>
+                <p>We've delivered workshops in over a thousand UK schools, with moments alongside ITV, BBC and the Commonwealth Games. The heart of what we do happens in the room: a shy child finding their voice, a group of strangers becoming a team in under an hour.</p>
                 <a href="#contact" className="btn btn-dark-outline">Learn More About Us</a>
               </div>
             </div>
@@ -224,7 +224,7 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
                 <form className="quote-form" onSubmit={startClassCheckout}>
                   <label><span>Plan</span><select value={parentBooking.planType} onChange={(event) => setParentBooking({ ...parentBooking, planType: event.target.value })}><option value="monthly_membership">Monthly Membership (£25/month)</option><option value="day_pass">Day Pass (£10)</option></select></label>
                   {classSessions.length === 0 ? (
-                    <p className="class-date-hint">Class times are being finalised — please check back shortly.</p>
+                    <p className="class-date-hint">Class times are being finalised. Please check back shortly.</p>
                   ) : (
                     <>
                       <label><span>Class</span><select value={parentBooking.className} onChange={(event) => setParentBooking({ ...parentBooking, className: event.target.value })}>{classSessions.map((session) => <option key={session.id} value={session.name}>{session.name} · {DAY_NAMES[Number(session.day_of_week)]}s {String(session.start_time).slice(0, 5)}</option>)}</select></label>

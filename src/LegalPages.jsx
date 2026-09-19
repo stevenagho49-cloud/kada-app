@@ -35,7 +35,7 @@ const LEGAL_CONTENT = {
           "Children: first name and date of birth, provided by a parent or guardian at checkout. We use this only to manage the class register, group children appropriately by age, and acknowledge birthdays. Children's details are never published or shared publicly.",
           'Schools: contact name, email, phone number, and booking history for your school.',
           'Instructors: contact details, work areas, rates, and DBS certificates uploaded for safeguarding review.',
-          'Payments: processed entirely by Stripe. We never see or store your card number — only the payment status and amount.',
+          'Payments: processed entirely by Stripe. We never see or store your card number, only the payment status and amount.',
         ],
       },
       {
@@ -43,7 +43,7 @@ const LEGAL_CONTENT = {
         paragraphs: [
           'To take and manage bookings, memberships, and event tickets (performing our contract with you).',
           'To send booking confirmations, receipts, event reminders, and service updates by email.',
-          'To run our operations dashboard — scheduling, staffing, invoicing, and safeguarding checks (our legitimate interests).',
+          'To run our operations dashboard: scheduling, staffing, invoicing, and safeguarding checks (our legitimate interests).',
           'To meet legal and safeguarding obligations, including DBS verification for instructors working with children.',
         ],
       },
@@ -69,7 +69,7 @@ const LEGAL_CONTENT = {
       {
         heading: 'Cookies and storage',
         paragraphs: [
-          'This site does not use advertising or tracking cookies. Your browser stores only what the site needs to function — your sign-in session and display preferences (for example, dismissed notifications) — via local storage.',
+          'This site does not use advertising or tracking cookies. Your browser stores only what the site needs to function, such as your sign-in session and display preferences (for example, dismissed notifications), via local storage.',
         ],
       },
     ],
@@ -81,7 +81,7 @@ const LEGAL_CONTENT = {
       {
         heading: 'Classes and memberships',
         paragraphs: [
-          'Monthly membership (£25/month) is a rolling subscription paid through Stripe. You can cancel at any time from your parent dashboard or the Stripe billing portal — cancellation stops future payments and your child\u2019s place remains active until the end of the paid period.',
+          'Monthly membership (£25/month) is a rolling subscription paid through Stripe. You can cancel at any time from your parent dashboard or the Stripe billing portal. Cancellation stops future payments and your child\u2019s place remains active until the end of the paid period.',
           'A Day Pass (£10) covers one scheduled class date for the children named at checkout.',
           'Class places are confirmed only after payment completes. If a class is full or cancelled by us, we will offer an alternative date or a full refund.',
         ],
@@ -112,7 +112,7 @@ const LEGAL_CONTENT = {
       {
         heading: 'Photos and media',
         paragraphs: [
-          'We sometimes photograph or film sessions for our website and social channels. We will always ask for consent first — verbally or in writing — and you can decline or withdraw consent at any time.',
+          'We sometimes photograph or film sessions for our website and social channels. We will always ask for consent first, verbally or in writing, and you can decline or withdraw consent at any time.',
         ],
       },
       {
@@ -144,7 +144,7 @@ const LEGAL_CONTENT = {
       {
         heading: 'In the studio',
         paragraphs: [
-          'Our classes are designed to be inclusive. If your child has additional needs, tell us when you book — we will adapt the session so they can take part fully and safely.',
+          'Our classes are designed to be inclusive. If your child has additional needs, tell us when you book and we will adapt the session so they can take part fully and safely.',
         ],
       },
       {
@@ -191,7 +191,7 @@ export function LegalPage({ page, onBack }) {
           </p>
         </div>
         <p style={{ textAlign: 'center', fontSize: 12, color: muted, marginTop: 18 }}>
-          <span style={{ color: gold }}>Faith · Culture · Movement</span> — King's Ark Dance Academy, Birmingham
+          <span style={{ color: gold }}>Faith · Culture · Movement</span> at King's Ark Dance Academy, Birmingham
         </p>
       </main>
     </div>

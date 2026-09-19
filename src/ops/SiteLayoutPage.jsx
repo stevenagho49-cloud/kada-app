@@ -36,7 +36,7 @@ export function SiteLayoutPage({ sections, onSave }) {
         <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>{saving ? 'Saving…' : 'Saved to Supabase'}</span>
       </div>
       <p style={{ color: OPS_COLORS.muted, fontSize: 13, margin: '0 0 14px' }}>
-        Toggle sections on or off and reorder them — the live homepage reads this configuration on every visit.
+        Toggle sections on or off and reorder them. The live homepage reads this configuration on every visit.
         Changes apply immediately to the public site. The page footer is always shown.
       </p>
       <div style={{ display: 'grid', gap: 8 }}>

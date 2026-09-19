@@ -344,7 +344,7 @@ function ResetPreview({ preview, counts, confirmText, onConfirmTextChange, onCon
   return (
     <div style={{ display: 'grid', gap: 14, fontFamily: sans }}>
       <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6, color: ink }}>
-        The following <strong>{total} record{total === 1 ? '' : 's'}</strong> will be permanently deleted. Site content (events, schools, instructors, class schedule, messages) is not touched, and nothing in Stripe is modified — process any refunds separately in the Stripe dashboard.
+        The following <strong>{total} record{total === 1 ? '' : 's'}</strong> will be permanently deleted. Site content (events, schools, instructors, class schedule, messages) is not touched, and nothing in Stripe is modified. Process any refunds separately in the Stripe dashboard.
       </p>
       {groups.map((group) => (
         <div key={group.key} style={{ border: `1px solid ${rule}`, borderRadius: 8, padding: '10px 12px', background: ivory }}>
@@ -361,7 +361,7 @@ function ResetPreview({ preview, counts, confirmText, onConfirmTextChange, onCon
           <Field label="Type DELETE to confirm"><input style={inputStyle} value={confirmText} onChange={(event) => onConfirmTextChange(event.target.value)} placeholder="DELETE" autoComplete="off" /></Field>
           <div><Button variant="danger" disabled={!confirmed || busy} onClick={onConfirm}>{busy ? 'Deleting…' : `Permanently delete ${total} record${total === 1 ? '' : 's'}`}</Button></div>
         </>
-      ) : <p style={{ margin: 0, fontSize: 13, color: okGreen }}>Nothing to delete — the tables are already empty.</p>}
+      ) : <p style={{ margin: 0, fontSize: 13, color: okGreen }}>Nothing to delete. The tables are already empty.</p>}
     </div>
   )
 }
@@ -548,7 +548,7 @@ function ParentDashboard({ session, family, bookings, students, onCancelBooking,
     { key: 'name', label: 'Child', render: (student) => <strong style={{ color: emerald }}>{student.name}</strong> },
     { key: 'dob', label: 'Date of birth', render: (student) => student.dateOfBirth },
     { key: 'age', label: 'Age', render: (student) => ageFromDob(student.dateOfBirth) },
-    { key: 'class', label: 'Class', render: (student) => student.className || '—' },
+    { key: 'class', label: 'Class', render: (student) => student.className || 'Not set' },
     { key: 'status', label: 'Status', render: (student) => <Pill text={student.membershipStatus} tone={student.membershipStatus === 'active' ? 'green' : student.membershipStatus === 'cancelled' ? 'red' : 'gold'} /> },
   ]
 
@@ -1089,7 +1089,7 @@ function App() {
       status: 'Enquiry',
       invoiceStatus: 'Not sent',
       invoiceNumber: '',
-      notes: `${schoolRequest.notes || 'School enquiry received via website form'}${fits === false ? ' — needs instructor coverage review' : ''}`,
+      notes: `${schoolRequest.notes || 'School enquiry received via website form'}${fits === false ? '. Needs instructor coverage review' : ''}`,
       requestedBy: session.user.id,
     }
 
@@ -1112,7 +1112,7 @@ function App() {
     void saveTable('bookings', nextBookings)
     void saveTable('schools', nextSchools)
     if (session) void fetch('/api/notify-admin', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'school-enquiry', detail: { schoolName: schoolRequest.schoolName, contactName: schoolRequest.contactName, email: schoolRequest.email, sessionType: schoolRequest.sessionType, date: schoolRequest.date, studentCount: schoolRequest.studentCount, schoolId } }) })
-    setToast(fits === false ? 'Booking sent — our team will confirm instructor coverage for this date.' : 'Booking sent to the operations system.')
+    setToast(fits === false ? 'Booking sent. Our team will confirm instructor coverage for this date.' : 'Booking sent to the operations system.')
   }
 
   const quotePrice = quote ? quote.price : buildPrice(schoolRequest).price
@@ -1245,7 +1245,7 @@ function App() {
       if (!response.ok) throw new Error(result.error || 'Reset failed.')
       const total = Object.values(result.deleted || {}).reduce((sum, count) => sum + count, 0)
       setResetPreview(null)
-      setToast(`Test data reset — ${total} record${total === 1 ? '' : 's'} removed.`)
+      setToast(`Test data reset. ${total} record${total === 1 ? '' : 's'} removed.`)
       window.setTimeout(() => window.location.reload(), 900)
     } catch (error) {
       setToast(error.message)
@@ -1519,7 +1519,7 @@ function App() {
           {instructorModal && <Modal title="Instructor" onClose={() => setInstructorModal(null)}><InstructorForm instructor={instructorModal} onSave={saveInstructor} /></Modal>}
           {eventModal && <Modal title={eventModal.title ? 'Edit event' : 'New event'} onClose={() => setEventModal(null)}><EventForm event={eventModal} onSave={saveEvent} onUploadFlyer={uploadEventFlyer} /></Modal>}
           {invoiceBooking && <InvoicePreview booking={invoiceBooking} onUpdate={(changes) => setInvoiceBooking((current) => ({ ...current, ...changes }))} onSave={(booking) => { saveBooking(booking); setInvoiceBooking(null) }} onSend={sendInvoice} onDownload={downloadInvoice} sending={invoiceSending} pdfUrl={invoicePdfUrl} onClose={() => { setInvoiceBooking(null); setInvoicePdfUrl('') }} />}
-          {resetPreview && <Modal title="Reset test data — review before deleting" onClose={() => setResetPreview(null)} wide><ResetPreview preview={resetPreview.preview} counts={resetPreview.counts} confirmText={resetConfirmText} onConfirmTextChange={setResetConfirmText} onConfirm={runResetTestData} busy={resetBusy} /></Modal>}
+          {resetPreview && <Modal title="Reset test data: review before deleting" onClose={() => setResetPreview(null)} wide><ResetPreview preview={resetPreview.preview} counts={resetPreview.counts} confirmText={resetConfirmText} onConfirmTextChange={setResetConfirmText} onConfirm={runResetTestData} busy={resetBusy} /></Modal>}
           {messageTarget && <Modal title={`Message ${messageTarget.name}`} onClose={() => { setMessageTarget(null); setMessageDraft('') }}><Field label="Message"><textarea style={{ ...inputStyle, minHeight: 90 }} value={messageDraft} onChange={(event) => setMessageDraft(event.target.value)} /></Field><Button disabled={!messageDraft.trim()} onClick={() => { sendMessage({ senderKind: 'admin', recipientKind: messageTarget.kind, recipientInstructorId: messageTarget.kind === 'instructor' ? messageTarget.id : null, recipientSchoolId: messageTarget.kind === 'school' ? messageTarget.id : null, body: messageDraft.trim() }); setMessageTarget(null); setMessageDraft(''); setTab('messages') }}>Send message</Button></Modal>}
           </div>
         </main>
@@ -1527,15 +1527,15 @@ function App() {
 
       {classBookingSuccess && (
         <Modal title={classBookingSuccess === 'loading' ? 'Confirming your booking…' : classBookingSuccess === 'pending' ? 'Almost there…' : 'Booking confirmed'} onClose={() => setClassBookingSuccess(null)}>
-          {classBookingSuccess === 'loading' && <p style={{ margin: 0, fontFamily: sans, fontSize: 14, color: muted, lineHeight: 1.6 }}>Confirming your payment with Stripe — this takes a moment…</p>}
-          {classBookingSuccess === 'pending' && <p style={{ margin: 0, fontFamily: sans, fontSize: 14, color: ink, lineHeight: 1.6 }}>Your payment was received and your booking is being processed. A confirmation email will arrive shortly — contact bookings@kingsarkdance.com if it doesn't.</p>}
+          {classBookingSuccess === 'loading' && <p style={{ margin: 0, fontFamily: sans, fontSize: 14, color: muted, lineHeight: 1.6 }}>Confirming your payment with Stripe. This takes a moment…</p>}
+          {classBookingSuccess === 'pending' && <p style={{ margin: 0, fontFamily: sans, fontSize: 14, color: ink, lineHeight: 1.6 }}>Your payment was received and your booking is being processed. A confirmation email will arrive shortly. Contact bookings@kingsarkdance.com if it doesn't.</p>}
           {classBookingSuccess && classBookingSuccess !== 'loading' && classBookingSuccess !== 'pending' && (
             <div style={{ fontFamily: sans, color: ink, lineHeight: 1.6 }}>
               <p style={{ fontSize: 16, margin: '0 0 10px' }}><strong>You're booked in! 🎉</strong></p>
               <p style={{ margin: '0 0 12px', fontSize: 14 }}>
                 <strong>Class:</strong> {classBookingSuccess.className}<br />
-                <strong>Date:</strong> {classBookingSuccess.classDate ? new Date(`${classBookingSuccess.classDate}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '—'}{classBookingSuccess.startTime ? ` · ${classBookingSuccess.startTime}${classBookingSuccess.endTime ? `–${classBookingSuccess.endTime}` : ''}` : ''}<br />
-                <strong>Children:</strong> {classBookingSuccess.students.length ? classBookingSuccess.students.join(', ') : '—'}<br />
+                <strong>Date:</strong> {classBookingSuccess.classDate ? new Date(`${classBookingSuccess.classDate}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : 'To be confirmed'}{classBookingSuccess.startTime ? ` · ${classBookingSuccess.startTime}${classBookingSuccess.endTime ? `–${classBookingSuccess.endTime}` : ''}` : ''}<br />
+                <strong>Children:</strong> {classBookingSuccess.students.length ? classBookingSuccess.students.join(', ') : 'Not listed'}<br />
                 <strong>Plan:</strong> {classBookingSuccess.planType === 'monthly_membership' ? 'Monthly Membership (£25/month)' : 'Day Pass (£10)'}<br />
                 <strong>Total paid:</strong> £{(classBookingSuccess.pricePence / 100).toFixed(2)}
               </p>

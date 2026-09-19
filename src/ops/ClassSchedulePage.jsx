@@ -57,7 +57,7 @@ export function ClassSchedulePage({ sessions, onSave, onAdd, onDelete }) {
         <span style={{ color: OPS_COLORS.ink, whiteSpace: 'nowrap' }}>
           <EditableText type="time" value={timeLabel(session.start_time)} onSave={(value) => onSave(session, { start_time: value })} />
           {' – '}
-          <EditableText type="time" small value={timeLabel(session.end_time)} placeholder="—" onSave={(value) => onSave(session, { end_time: value || null })} />
+          <EditableText type="time" small value={timeLabel(session.end_time)} placeholder="Not set" onSave={(value) => onSave(session, { end_time: value || null })} />
         </span>
       ),
     },
@@ -68,8 +68,8 @@ export function ClassSchedulePage({ sessions, onSave, onAdd, onDelete }) {
           label={session.active ? 'Bookable' : 'Hidden'}
           tone={session.active ? 'green' : 'default'}
           options={[
-            { value: 'active', label: 'Bookable — shown on the site' },
-            { value: 'hidden', label: 'Hidden — not bookable' },
+            { value: 'active', label: 'Bookable: shown on the site' },
+            { value: 'hidden', label: 'Hidden: not bookable' },
           ]}
           onChange={(value) => onSave(session, { active: value === 'active' })}
         />
@@ -94,7 +94,7 @@ export function ClassSchedulePage({ sessions, onSave, onAdd, onDelete }) {
         expanded
         onToggleExpand={() => {}}
         pageSize={1000}
-        emptyState={<EmptyState icon="🗓" title="No classes scheduled" body="Add your first weekly class below — it appears on the booking form as soon as it is marked bookable." />}
+        emptyState={<EmptyState icon="🗓" title="No classes scheduled" body="Add your first weekly class below. It appears on the booking form as soon as it is marked bookable." />}
       />
       <div style={{ marginTop: 20, borderTop: `1px solid ${OPS_COLORS.rule}`, paddingTop: 16 }}>
         <h4 style={{ margin: '0 0 12px', fontSize: 14, color: OPS_COLORS.emerald }}>Add a weekly class</h4>

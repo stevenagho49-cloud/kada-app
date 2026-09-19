@@ -147,7 +147,7 @@ export function EditableText({ value, onSave, type = 'text', placeholder = 'Clic
   const [draft, setDraft] = useState(value ?? '')
 
   if (disabled) {
-    return <span style={{ fontSize: small ? 12 : 13.5, color: value ? OPS_COLORS.ink : OPS_COLORS.muted }}>{value || '—'}</span>
+    return <span style={{ fontSize: small ? 12 : 13.5, color: value ? OPS_COLORS.ink : OPS_COLORS.muted }}>{value || 'Not set'}</span>
   }
   if (!editing) {
     return (
@@ -182,7 +182,7 @@ export function EditableText({ value, onSave, type = 'text', placeholder = 'Clic
   )
 }
 
-export function EditableSelect({ value, onSave, options, disabled = false, placeholder = '—' }) {
+export function EditableSelect({ value, onSave, options, disabled = false, placeholder = 'Not set' }) {
   const [editing, setEditing] = useState(false)
   const current = options.find((option) => option.value === (value ?? ''))
   if (disabled) return <span style={{ fontSize: 13.5, color: value ? OPS_COLORS.ink : OPS_COLORS.muted }}>{current?.label || placeholder}</span>

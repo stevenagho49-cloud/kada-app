@@ -141,7 +141,7 @@ export function EventTicketPage({ eventId, onBack }) {
         <h1 style={{ fontFamily: serif, fontSize: 30, margin: '0 0 10px', textAlign: 'center', color: emerald }}>You're booked in!</h1>
         {successState === 'loading' && <p style={{ color: muted, textAlign: 'center' }}>Confirming your payment…</p>}
         {successState === 'pending' && (
-          <p style={{ color: muted, textAlign: 'center' }}>Payment received — your confirmation is being finalised. A receipt will arrive by email from Stripe.</p>
+          <p style={{ color: muted, textAlign: 'center' }}>Payment received. Your confirmation is being finalised. A receipt will arrive by email from Stripe.</p>
         )}
         {successState === 'found' && successOrder && (
           <div>
@@ -190,7 +190,7 @@ export function EventTicketPage({ eventId, onBack }) {
       <div style={{ background: ivory, border: `1px solid ${rule}`, borderRadius: 14, padding: 22, position: 'sticky', top: 20 }}>
         <h2 style={{ fontFamily: serif, fontSize: 22, margin: '0 0 4px', color: emerald }}>Tickets</h2>
         {!event.ticketingEnabled || event.ticketTiers.length === 0 ? (
-          <p style={{ color: muted, margin: '8px 0 0' }}>Tickets for this event are not on sale yet — check back soon.</p>
+          <p style={{ color: muted, margin: '8px 0 0' }}>Tickets for this event are not on sale yet. Check back soon.</p>
         ) : (
           <form onSubmit={startTicketCheckout}>
             <div style={{ display: 'grid', gap: 10, margin: '14px 0' }} role="radiogroup" aria-label="Ticket types">
