@@ -31,6 +31,19 @@ app.use(cors({
   credentials: true,
 }))
 
+// Security headers — small, standard hardening. Render terminates TLS in front
+// of us; HSTS tells browsers to keep using it. frame-ancestors blocks clickjacking.
+app.use((_request, response, next) => {
+  response.set({
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'SAMEORIGIN',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  })
+  next()
+})
+
 /* ------------------------------------------------------------------ */
 /* Email via Resend — ticket confirmations, reminders, and admin       */
 /* notifications. No-ops (returns {sent:false}) when not configured.   */
