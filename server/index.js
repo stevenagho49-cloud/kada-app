@@ -278,11 +278,13 @@ app.use(express.json())
 // Basic abuse protection on the unauthenticated endpoints: the two public
 // checkout creators and the post-payment lookups (which anyone can poll).
 // Authenticated admin/parent endpoints sit behind Supabase JWT verification.
-const tooMany = { error: 'Too many attempts — please wait a few minutes, then try again.' }
+const tooMany = { error: 'Too many attempts. Please wait a few minutes, then try again.' }
 const checkoutLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 const lookupLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
+const contactLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 app.use(['/api/stripe/create-checkout-session', '/api/stripe/create-event-checkout'], checkoutLimiter)
 app.use(['/api/stripe/event-order', '/api/stripe/class-booking'], lookupLimiter)
+app.use('/api/public/contact', contactLimiter)
 
 // Health check for Render's uptime monitor — confirms the server is up and can
 // reach Supabase (the critical dependency for auth, data, and ticketing).
@@ -308,6 +310,27 @@ app.get('/api/health', async (_request, response) => {
 
 // Admin notification relay — the dashboard calls this after client-side actions that
 // need an admin email (job claim pending review, DBS uploaded, school enquiry received).
+// Public contact form — no account needed. Validates + relays to the admin inbox.
+// Rate limited (5/hour/IP) since it is unauthenticated.
+app.post('/api/public/contact', async (request, response) => {
+  const { name, email, topic, message } = request.body || {}
+  const cleanName = String(name || '').trim().slice(0, 120)
+  const cleanEmail = String(email || '').trim().slice(0, 200)
+  const cleanTopic = ['parent', 'school', 'partnership', 'other'].includes(topic) ? topic : 'other'
+  const cleanMessage = String(message || '').trim().slice(0, 3000)
+  if (!cleanName || !/.+@.+\..+/.test(cleanEmail) || cleanMessage.length < 10) {
+    return response.status(400).json({ error: 'Please add your name, a valid email, and a message of at least 10 characters.' })
+  }
+  const topicLabel = { parent: 'Parent', school: 'School', partnership: 'Partnership', other: 'General' }[cleanTopic]
+  const esc = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const result = await notifyAdmin(
+    `Website contact: ${topicLabel}`,
+    `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New website message</h2><p><strong>From:</strong> ${esc(cleanName)} &lt;${esc(cleanEmail)}&gt;<br><strong>Topic:</strong> ${topicLabel}</p><p style="white-space:pre-wrap">${esc(cleanMessage)}</p><p style="color:#767066;font-size:12px">Reply directly to this email to respond to the sender.</p></div>`,
+  )
+  if (!result.sent) return response.status(503).json({ error: 'Messages cannot be sent right now. Please email bookings@kingsarkdance.com directly.' })
+  response.json({ sent: true })
+})
+
 app.post('/api/notify-admin', async (request, response) => {
   const user = await authenticatedUser(request)
   if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })

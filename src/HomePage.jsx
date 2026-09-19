@@ -109,6 +109,62 @@ export const HOME_SECTIONS = [
 ]
 export const DEFAULT_SECTION_ORDER = HOME_SECTIONS.map((section, index) => ({ sectionKey: section.key, label: section.label, visible: true, sortOrder: (index + 1) * 10 }))
 
+/* Public contact form. Posts to /api/public/contact, which emails the admin
+   inbox. Kept inside HomePage so it inherits the public site's fonts/colours. */
+function ContactForm() {
+  const [form, setForm] = useState({ name: '', email: '', topic: 'parent', message: '' })
+  const [status, setStatus] = useState('idle') // idle | sending | sent | error
+  const [errorText, setErrorText] = useState('')
+
+  const set = (field) => (event) => setForm({ ...form, [field]: event.target.value })
+
+  const submit = async (event) => {
+    event.preventDefault()
+    setStatus('sending')
+    setErrorText('')
+    try {
+      const response = await fetch('/api/public/contact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Your message could not be sent.')
+      setStatus('sent')
+    } catch (error) {
+      setErrorText(error.message)
+      setStatus('error')
+    }
+  }
+
+  if (status === 'sent') {
+    return (
+      <div className="contact-form contact-form-sent">
+        <strong>Thank you, {form.name.split(' ')[0]}.</strong>
+        <p>Your message is on its way. We usually reply within one working day.</p>
+      </div>
+    )
+  }
+
+  return (
+    <form className="contact-form" onSubmit={submit}>
+      <div className="contact-form-row">
+        <input aria-label="Your name" placeholder="Your name" value={form.name} onChange={set('name')} required maxLength={120} />
+        <input aria-label="Your email" type="email" placeholder="Your email" value={form.email} onChange={set('email')} required maxLength={200} />
+      </div>
+      <select aria-label="I am a" value={form.topic} onChange={set('topic')}>
+        <option value="parent">I'm a parent</option>
+        <option value="school">I'm contacting from a school</option>
+        <option value="partnership">Partnership or media</option>
+        <option value="other">Something else</option>
+      </select>
+      <textarea aria-label="Your message" placeholder="How can we help?" value={form.message} onChange={set('message')} required minLength={10} maxLength={3000} rows={4} />
+      {status === 'error' && <p className="contact-form-error">{errorText}</p>}
+      <button type="submit" className="btn btn-gold" disabled={status === 'sending'}>{status === 'sending' ? 'Sending…' : 'Send message'}</button>
+    </form>
+  )
+}
+
 export default function HomePage({ siteEvents, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, valueItems, Modal }) {
   const selectedSession = classSessions.find((session) => session.name === parentBooking.className) || classSessions[0] || null
 
@@ -393,6 +449,7 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
               <div className="eyebrow">Get In Touch</div>
               <h2 className="display">Let's <em>talk.</em></h2>
               <p>Whether you're a parent, a school, or an organisation looking to partner with us, we'd love to hear from you.</p>
+              <ContactForm />
               <div className="contact-details">
                 <div><span className="k">Email</span><a href="mailto:bookings@kingsarkdance.com" style={{ color: 'inherit' }}>bookings@kingsarkdance.com</a></div>
                 <div><span className="k">Phone</span><a href="tel:+447535897732" style={{ color: 'inherit' }}>+44 7535 897732</a></div>
@@ -413,15 +470,12 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
   return (
     <div className="site-public">
       {orderedVisibleSections.map((section) => renderSection(section.sectionKey))}
-
       <footer>
         <div className="wrap footer-row">
           <div>
             <div className="f-brand">King's Ark Dance Academy</div>
             <div className="f-links">
-              <a href="#">TikTok</a>
               <a href="https://www.instagram.com/kingsarkdance" target="_blank" rel="noreferrer">Instagram</a>
-              <a href="#">YouTube</a>
             </div>
           </div>
           <div className="f-links">
