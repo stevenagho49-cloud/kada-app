@@ -1,6 +1,11 @@
 import React, { useEffect, useState } from 'react'
 import { flyerPublicUrl, formatEventTimeRange } from './ops/EventsPage'
 
+// Testimonial videos + posters live in Supabase Storage (public bucket) instead
+// of the repo — keeps the git history and page payload small.
+const SITE_MEDIA_URL = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/public/site-media`
+const videoAsset = (file) => `${SITE_MEDIA_URL}/videos/${file}`
+
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const BOOKING_WINDOW_DAYS = 84 // parents can book up to 12 weeks ahead
 
@@ -420,7 +425,7 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
               </div>
 
               <div className="video-row reveal">
-                {[['A Parent’s Story', 'parent-review.mp4', 'parent-review-poster.jpg', 'landscape'], ['A Student’s Story', 'student-review.mp4', 'student-review-poster.jpg', 'portrait']].map(([label, file, poster, orientation]) => <div className="video-card" key={label}><div className={`video-frame video-frame-${orientation}`}><video controls preload="none" poster={`/images/videos/${poster}`}><source src={`/images/videos/${file}`} type="video/mp4" />Your browser cannot play this video.</video><span className="video-play" aria-hidden="true">▶</span></div><div className="video-caption"><div className="who display">{label}</div><div className="what">Watch the review</div></div></div>)}
+                {[['A Parent’s Story', 'parent-review.mp4', 'parent-review-poster.jpg', 'landscape'], ['A Student’s Story', 'student-review.mp4', 'student-review-poster.jpg', 'portrait']].map(([label, file, poster, orientation]) => <div className="video-card" key={label}><div className={`video-frame video-frame-${orientation}`}><video controls preload="none" poster={videoAsset(poster)}><source src={videoAsset(file)} type="video/mp4" />Your browser cannot play this video.</video><span className="video-play" aria-hidden="true">▶</span></div><div className="video-caption"><div className="who display">{label}</div><div className="what">Watch the review</div></div></div>)}
               </div>
             </div>
           </section>

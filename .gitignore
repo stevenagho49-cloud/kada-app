@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+# Testimonial videos stream from Supabase Storage (site-media bucket) — no
+# need to keep 55MB of media in git. Posters + videos live in the bucket.
+public/images/videos/
 .env
 .env.*
 !.env.example
