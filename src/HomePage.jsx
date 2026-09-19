@@ -15,13 +15,28 @@ function toLocalIso(date) {
   return `${date.getFullYear()}-${month}-${day}`
 }
 
-// Nearest date (today or later) on which the given class session actually runs.
+// True when `date` is today and this class's end time has already passed —
+// a finished class must not remain bookable for the rest of the day.
+function classEndedOnDate(session, date) {
+  if (!session || !date) return false
+  const endTime = session.end_time || session.start_time
+  if (!endTime) return false
+  const todayStart = startOfToday()
+  if (date.getTime() !== todayStart.getTime()) return false
+  const [hours, minutes] = String(endTime).split(':').map(Number)
+  const endedAt = new Date(todayStart)
+  endedAt.setHours(hours || 0, minutes || 0, 0, 0)
+  return new Date() >= endedAt
+}
+
+// Nearest date (today or later) on which the given class session actually runs
+// and has not already finished.
 function nextClassDate(session, from = startOfToday()) {
   if (!session) return ''
   for (let offset = 0; offset <= BOOKING_WINDOW_DAYS; offset += 1) {
     const candidate = new Date(from)
     candidate.setDate(from.getDate() + offset)
-    if (candidate.getDay() === Number(session.day_of_week)) return toLocalIso(candidate)
+    if (candidate.getDay() === Number(session.day_of_week) && !classEndedOnDate(session, candidate)) return toLocalIso(candidate)
   }
   return ''
 }
@@ -33,6 +48,7 @@ function ClassDatePicker({ session, value, onChange }) {
   const todayStart = startOfToday()
   const maxDate = new Date(todayStart)
   maxDate.setDate(maxDate.getDate() + BOOKING_WINDOW_DAYS)
+  const todayIsEndedClassDay = Boolean(session) && todayStart.getDay() === Number(session?.day_of_week) && classEndedOnDate(session, todayStart)
   const selected = value ? new Date(`${value}T00:00:00`) : null
   const [month, setMonth] = useState(() => {
     const base = selected && !Number.isNaN(selected.getTime()) && selected > todayStart ? selected : todayStart
@@ -60,7 +76,7 @@ function ClassDatePicker({ session, value, onChange }) {
         {cells.map((date, index) => {
           if (!date) return <span key={`blank-${index}`} className="class-date-cell empty" aria-hidden="true" />
           const iso = toLocalIso(date)
-          const enabled = Boolean(session) && date >= todayStart && date <= maxDate && date.getDay() === Number(session.day_of_week)
+          const enabled = Boolean(session) && date >= todayStart && date <= maxDate && date.getDay() === Number(session.day_of_week) && !classEndedOnDate(session, date)
           const isSelected = value === iso
           return (
             <button key={iso} type="button" className={`class-date-cell${isSelected ? ' selected' : ''}`} disabled={!enabled} aria-pressed={isSelected} aria-label={date.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} onClick={() => onChange(iso)}>
@@ -71,7 +87,7 @@ function ClassDatePicker({ session, value, onChange }) {
       </div>
       <p className="class-date-hint">
         {session
-          ? `${session.name} runs every ${DAY_NAMES[Number(session.day_of_week)]}${session.start_time ? `, ${String(session.start_time).slice(0, 5)}${session.end_time ? `–${String(session.end_time).slice(0, 5)}` : ''}` : ''} — only class days are selectable.`
+          ? `${session.name} runs every ${DAY_NAMES[Number(session.day_of_week)]}${session.start_time ? `, ${String(session.start_time).slice(0, 5)}${session.end_time ? `–${String(session.end_time).slice(0, 5)}` : ''}` : ''} — only class days are selectable.${todayIsEndedClassDay ? " Today's class has already finished, so today is no longer bookable." : ''}`
           : 'Choose a class to see its available dates.'}
       </p>
     </div>
@@ -102,7 +118,7 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
     if (publicForm !== 'class' || !classSessions.length) return
     const session = classSessions.find((item) => item.name === parentBooking.className) || classSessions[0]
     const picked = parentBooking.classDate ? new Date(`${parentBooking.classDate}T00:00:00`) : null
-    const dateValid = picked && !Number.isNaN(picked.getTime()) && picked >= startOfToday() && picked.getDay() === Number(session.day_of_week)
+    const dateValid = picked && !Number.isNaN(picked.getTime()) && picked >= startOfToday() && picked.getDay() === Number(session.day_of_week) && !classEndedOnDate(session, picked)
     if (session.name !== parentBooking.className || !dateValid) {
       setParentBooking({ ...parentBooking, className: session.name, classDate: nextClassDate(session) })
     }
@@ -196,7 +212,7 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
               <div className="service-bg" style={{ backgroundImage: "url('/images/u.dance saturday20.JPG')" }}></div>
               <div className="wrap"><div className="service-card reveal">
                 <span className="eyebrow">For Families</span>
-                <h2 className="display">Saturday classes, ages 5–16.</h2>
+                <h2 className="display">Saturday classes, ages 5–15.</h2>
                 <p>Confidence, creativity and skill, term by term, in a joyful and faith rooted environment.</p>
                 <a href="#class-booking" className="btn btn-solid" onClick={(event) => openPublicForm(event, 'class')}>Book a Saturday class</a>
               </div></div>
@@ -350,7 +366,6 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
               <div className="video-row reveal">
                 {[['A Parent’s Story', 'parent-review.mp4'], ['A Student’s Story', 'student-review.mp4']].map(([label, file]) => <div className="video-card" key={label}><div className="video-frame"><video controls preload="metadata"><source src={`/images/videos/${file}`} type="video/mp4" />Your browser cannot play this video.</video></div><div className="video-caption"><div className="who display">{label}</div><div className="what">Watch the review</div></div></div>)}
               </div>
-              <p className="note">Note: these reflect general class experience. Swap in parent and student quotes once gathered.</p>
             </div>
           </section>
         )

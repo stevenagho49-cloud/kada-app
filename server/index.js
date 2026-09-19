@@ -560,6 +560,13 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
   return Buffer.concat(chunks)
 }
 
+// Current date and wall-clock minutes in Europe/London — class times are UK local.
+function londonNow() {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date())
+  const get = (type) => parts.find((part) => part.type === type)?.value || ''
+  return { date: `${get('year')}-${get('month')}-${get('day')}`, minutes: Number(get('hour')) * 60 + Number(get('minute')) }
+}
+
 app.post('/api/stripe/create-checkout-session', async (request, response) => {
   if (!stripe) return response.status(503).json({ error: 'Stripe is not configured on the server.' })
 
@@ -575,13 +582,23 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
 
   // The chosen date must be a real scheduled session for the chosen class: matching
   // day of week, not in the past, and within the booking window the form offers.
-  const { data: classSession } = await supabase.from('class_sessions').select('id,day_of_week').eq('name', className).eq('active', true).maybeSingle()
+  const { data: classSession } = await supabase.from('class_sessions').select('id,day_of_week,start_time,end_time').eq('name', className).eq('active', true).maybeSingle()
   if (!classSession) return response.status(400).json({ error: 'That class is not currently scheduled. Please pick an available class and date.' })
   const requestedDate = new Date(`${classDate}T00:00:00Z`)
   const todayUtc = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`)
   const daysAhead = (requestedDate - todayUtc) / 86400000
   if (Number.isNaN(requestedDate.getTime()) || requestedDate.getUTCDay() !== Number(classSession.day_of_week) || daysAhead < 0 || daysAhead > 180) {
     return response.status(400).json({ error: 'That date is not available for this class. Please pick a highlighted class date.' })
+  }
+  // Same-day bookings close once the class has finished (UK local time).
+  if (classDate === londonNow().date) {
+    const endTime = classSession.end_time || classSession.start_time
+    if (endTime) {
+      const [endHour, endMinute] = String(endTime).split(':').map(Number)
+      if (londonNow().minutes >= (endHour || 0) * 60 + (endMinute || 0)) {
+        return response.status(400).json({ error: "Today's class has already finished — please pick a future class date." })
+      }
+    }
   }
 
   const user = await authenticatedUser(request)
