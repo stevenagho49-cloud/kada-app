@@ -420,7 +420,7 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
             <div className="f-brand">King's Ark Dance Academy</div>
             <div className="f-links">
               <a href="#">TikTok</a>
-              <a href="#">Instagram</a>
+              <a href="https://www.instagram.com/kingsarkdance" target="_blank" rel="noreferrer">Instagram</a>
               <a href="#">YouTube</a>
             </div>
           </div>
