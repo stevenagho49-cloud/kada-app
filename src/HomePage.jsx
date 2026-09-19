@@ -170,7 +170,7 @@ function ContactForm() {
   )
 }
 
-export default function HomePage({ siteEvents, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, valueItems, Modal }) {
+export default function HomePage({ SectionError, siteEvents, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, valueItems, Modal }) {
   const selectedSession = classSessions.find((session) => session.name === parentBooking.className) || classSessions[0] || null
 
   // Pre-select the nearest upcoming real class date whenever the booking form
@@ -474,7 +474,11 @@ export default function HomePage({ siteEvents, sectionLayout, navigatePublicSect
 
   return (
     <div className="site-public">
-      {orderedVisibleSections.map((section) => renderSection(section.sectionKey))}
+      {orderedVisibleSections.map((section) => {
+        const rendered = renderSection(section.sectionKey)
+        if (!rendered) return null
+        return SectionError ? <SectionError key={section.sectionKey}>{rendered}</SectionError> : rendered
+      })}
       <footer>
         <div className="wrap footer-row">
           <div>

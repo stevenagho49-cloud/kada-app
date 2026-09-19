@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react'
+import { useEffect, useMemo, useRef, useState, lazy, Suspense, Component } from 'react'
 import { supabase } from './lib/supabase'
 import './App.css'
 import { OpsSidebar, DataTable, Pill, OpsButton, EmptyState } from './ops/ui'
@@ -310,6 +310,20 @@ function buildPrice({ studentCount, sessionType }) {
 
 function Card({ children, style }) {
   return <div style={{ background: ivory, color: ink, border: `1px solid ${rule}`, borderRadius: 10, ...style }}>{children}</div>
+}
+
+// If a single homepage section throws during render, React would normally unmount
+// the whole page. This boundary keeps the failure contained to that one section.
+class SectionError extends Component {
+  constructor(props) { super(props); this.state = { failed: false } }
+  static getDerivedStateFromError() { return { failed: true } }
+  componentDidCatch(error) { console.error(`Homepage section failed:`, error) }
+  render() {
+    if (this.state.failed) {
+      return <section style={{ padding: '60px 20px', textAlign: 'center', fontFamily: sans, color: muted }}>This section could not load. Please refresh the page.</section>
+    }
+    return this.props.children
+  }
 }
 
 function Field({ label, children }) {
@@ -816,6 +830,7 @@ function App() {
     const today = new Date().toISOString().slice(0, 10)
     let mounted = true
     supabase.from('events').select('*').eq('status', 'published').eq('show_on_homepage', true).gte('event_date', today).order('event_date', { ascending: true }).limit(6).then(({ data, error }) => {
+      if (error) console.error('Homepage events failed to load:', error)
       if (mounted && !error && data) setSiteEvents(data.map(normalizeEvent))
     })
     return () => { mounted = false }
@@ -1335,6 +1350,7 @@ function App() {
 
       {view === 'site' ? (
         <HomePage
+          SectionError={SectionError}
           siteEvents={siteEvents}
           sectionLayout={sectionLayout}
           navigatePublicSection={navigatePublicSection}
