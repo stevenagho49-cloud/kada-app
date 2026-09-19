@@ -170,8 +170,26 @@ function ContactForm() {
   )
 }
 
-export default function HomePage({ SectionError, siteEvents, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, valueItems, Modal }) {
+export default function HomePage({ SectionError, siteEvents, siteContent = {}, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, valueItems, Modal }) {
   const selectedSession = classSessions.find((session) => session.name === parentBooking.className) || classSessions[0] || null
+
+  // Homepage copy comes from the site_content table (editable in Ops). Every
+  // value falls back to the original hardcoded text when a row is missing.
+  const hero = siteContent.hero || {}
+  const stats = siteContent.stats || {}
+  const about = siteContent.about || {}
+  const workshops = siteContent.workshops || {}
+  const classes = siteContent.classes || {}
+  const team = siteContent.team || {}
+  const contact = siteContent.contact || {}
+  const prices = siteContent.prices || {}
+  const membershipPounds = (prices.membershipPence ?? 2500) / 100
+  const dayPassPounds = (prices.dayPassPence ?? 1000) / 100
+  const teamMembers = Array.isArray(team.members) && team.members.length ? team.members : [
+    { name: 'Steven', role: 'Founder & Lead Instructor', photo: '/images/team-steven.jpg' },
+    { name: 'Temilade', role: 'Programme Coordinator', photo: '' },
+    { name: 'Annedrea', role: 'School Partnerships', photo: '/images/team-annedrea.jpg' },
+  ]
 
   // Pre-select the nearest upcoming real class date whenever the booking form
   // opens, the chosen class changes, or the schedule finishes loading.
@@ -196,8 +214,8 @@ export default function HomePage({ SectionError, siteEvents, sectionLayout, navi
               <div className="hero-grid hero-row">
               <div className="hero-copy">
                 <div className="hero-eyebrow eyebrow">Faith · Culture · Movement</div>
-                <h1 className="display reveal in">Inspiring, uplifting.<span className="line2">Transforming lives.</span></h1>
-                <p className="lede">Faith inspired Gospel Afrobeats for the next generation, building confidence and character in children aged 5–16.</p>
+                <h1 className="display reveal in">{hero.title || 'Inspiring, uplifting.'}<span className="line2">{hero.titleLine2 || 'Transforming lives.'}</span></h1>
+                <p className="lede">{hero.lede || 'Faith inspired Gospel Afrobeats for the next generation, building confidence and character in children aged 5 to 16.'}</p>
                 <div className="hero-ctas">
                   <a href="#classes" className="btn btn-gold" onClick={(event) => navigatePublicSection(event, '#classes')}>Our Classes</a>
                   <a href="#workshops" className="btn btn-outline">School Workshops</a>
@@ -212,9 +230,9 @@ export default function HomePage({ SectionError, siteEvents, sectionLayout, navi
         return (
           <section className="stats-strip" key="stats">
             <div className="wrap stats-grid">
-              <div className="stat-inline"><div className="num display">1,000+</div><div className="label">Children<br />Empowered</div></div>
-              <div className="stat-inline"><div className="num display">1,000+</div><div className="label">Schools<br />Reached</div></div>
-              <div className="stat-inline"><div className="num display">10+</div><div className="label">Years of<br />Impact</div></div>
+              <div className="stat-inline"><div className="num display">{stats.childrenEmpowered || '1,000+'}</div><div className="label">Children<br />Empowered</div></div>
+              <div className="stat-inline"><div className="num display">{stats.schoolsReached || '1,000+'}</div><div className="label">Schools<br />Reached</div></div>
+              <div className="stat-inline"><div className="num display">{stats.yearsImpact || '10+'}</div><div className="label">Years of<br />Impact</div></div>
             </div>
           </section>
         )
@@ -225,10 +243,10 @@ export default function HomePage({ SectionError, siteEvents, sectionLayout, navi
               <div className="about-img reveal" style={{ backgroundImage: "url('/images/about-kada.jpeg')" }}></div>
               <div className="about-copy reveal reveal-delay-1">
                 <div className="eyebrow wine">About KADA</div>
-                <h2 className="display section-title">More than dance. <em>It's a movement.</em></h2>
-                <p>King's Ark Dance Academy, formerly Dance With Stago, is a faith inspired dance school rooted in Gospel Afrobeats. We work with children and young people aged 5–16, using dance to build confidence, teamwork, creativity and cultural awareness.</p>
-                <p>We've delivered workshops in over a thousand UK schools, with moments alongside ITV, BBC and the Commonwealth Games. The heart of what we do happens in the room: a shy child finding their voice, a group of strangers becoming a team in under an hour.</p>
-                <a href="#contact" className="btn btn-dark-outline">Learn More About Us</a>
+                <h2 className="display section-title">{about.title || 'More than dance.'} <em>{about.titleEmphasis || "It's a movement."}</em></h2>
+                <p>{about.paragraph1 || "King's Ark Dance Academy, formerly Dance With Stago, is a faith inspired dance school rooted in Gospel Afrobeats. We work with children and young people aged 5 to 16, using dance to build confidence, teamwork, creativity and cultural awareness."}</p>
+                <p>{about.paragraph2 || "We've delivered workshops in over a thousand UK schools, with moments alongside ITV, BBC and the Commonwealth Games. The heart of what we do happens in the room: a shy child finding their voice, a group of strangers becoming a team in under an hour."}</p>
+                <a href="#contact" className="btn btn-dark-outline">{about.ctaLabel || 'Learn More About Us'}</a>
               </div>
             </div>
           </section>
@@ -259,10 +277,10 @@ export default function HomePage({ SectionError, siteEvents, sectionLayout, navi
           <section className="service dark" id="workshops" key="workshops">
             <div className="service-bg" style={{ backgroundImage: "url('/images/u.dance sunday warm up2.JPG')" }}></div>
             <div className="wrap"><div className="service-card reveal">
-              <span className="eyebrow">For Schools</span>
-              <h2 className="display">Bring your school to life through Afrobeats.</h2>
-              <p>High energy, fully interactive workshops built for enrichment days, Culture Days and Black History Month. No dance experience needed, only enthusiasm.</p>
-              <a href="#school-quote" className="btn btn-solid" onClick={(event) => openPublicForm(event, 'school')}>Get a Quote</a>
+              <span className="eyebrow">{workshops.eyebrow || 'For Schools'}</span>
+              <h2 className="display">{workshops.title || 'Bring your school to life through Afrobeats.'}</h2>
+              <p>{workshops.body || 'High energy, fully interactive workshops built for enrichment days, Culture Days and Black History Month. No dance experience needed, only enthusiasm.'}</p>
+              <a href="#school-quote" className="btn btn-solid" onClick={(event) => openPublicForm(event, 'school')}>{workshops.ctaLabel || 'Get a Quote'}</a>
             </div></div>
           </section>
         )
@@ -272,10 +290,10 @@ export default function HomePage({ SectionError, siteEvents, sectionLayout, navi
             <section className="service light" id="classes">
               <div className="service-bg" style={{ backgroundImage: "url('/images/u.dance saturday20.JPG')" }}></div>
               <div className="wrap"><div className="service-card reveal">
-                <span className="eyebrow">For Families</span>
-                <h2 className="display">Saturday classes, ages 5–15.</h2>
-                <p>Confidence, creativity and skill, term by term, in a joyful and faith rooted environment.</p>
-                <a href="#class-booking" className="btn btn-solid" onClick={(event) => openPublicForm(event, 'class')}>Book a Saturday class</a>
+                <span className="eyebrow">{classes.eyebrow || 'For Families'}</span>
+                <h2 className="display">{classes.title || 'Saturday classes, ages 5 to 15.'}</h2>
+                <p>{classes.body || 'Confidence, creativity and skill, term by term, in a joyful and faith rooted environment.'}</p>
+                <a href="#class-booking" className="btn btn-solid" onClick={(event) => openPublicForm(event, 'class')}>{classes.ctaLabel || 'Book a Saturday class'}</a>
               </div></div>
             </section>
 
@@ -283,7 +301,7 @@ export default function HomePage({ SectionError, siteEvents, sectionLayout, navi
               <div className="wrap quote-wrap">
                 <div className="section-head left-align"><span className="eyebrow">Saturday Classes</span><h2 className="display">Reserve a place.</h2><p>Secure your child's place through secure checkout. The booking is confirmed after payment is completed.</p></div>
                 <form className="quote-form" onSubmit={startClassCheckout}>
-                  <label><span>Plan</span><select value={parentBooking.planType} onChange={(event) => setParentBooking({ ...parentBooking, planType: event.target.value })}><option value="monthly_membership">Monthly Membership (£25/month)</option><option value="day_pass">Day Pass (£10)</option></select></label>
+                  <label><span>Plan</span><select value={parentBooking.planType} onChange={(event) => setParentBooking({ ...parentBooking, planType: event.target.value })}><option value="monthly_membership">Monthly Membership (£{membershipPounds}/month)</option><option value="day_pass">Day Pass (£{dayPassPounds})</option></select></label>
                   {classSessions.length === 0 ? (
                     <p className="class-date-hint">Class times are being finalised. Please check back shortly.</p>
                   ) : (
@@ -295,7 +313,7 @@ export default function HomePage({ SectionError, siteEvents, sectionLayout, navi
                   <label><span>Parent / guardian name</span><input value={parentBooking.parentName} onChange={(event) => setParentBooking({ ...parentBooking, parentName: event.target.value })} required /></label>
                   <label><span>Parent / guardian email</span><input type="email" value={parentBooking.parentEmail} onChange={(event) => setParentBooking({ ...parentBooking, parentEmail: event.target.value })} required /></label>
                   <div><span className="label">Children</span>{parentBooking.students.map((student, index) => <div key={index} className="student-row"><input aria-label={`Child ${index + 1} name`} placeholder="Child name" value={student.name} onChange={(event) => { const students = [...parentBooking.students]; students[index] = { ...student, name: event.target.value }; setParentBooking({ ...parentBooking, students }) }} required /><input aria-label={`Child ${index + 1} date of birth`} type="date" value={student.dateOfBirth} onChange={(event) => { const students = [...parentBooking.students]; students[index] = { ...student, dateOfBirth: event.target.value }; setParentBooking({ ...parentBooking, students }) }} required />{index > 0 && <button type="button" className="remove-child" onClick={() => setParentBooking({ ...parentBooking, students: parentBooking.students.filter((_, childIndex) => childIndex !== index) })}>Remove</button>}</div>)}<button type="button" className="add-child" onClick={() => setParentBooking({ ...parentBooking, students: [...parentBooking.students, { name: '', dateOfBirth: '' }] })}>+ Add another child</button></div>
-                  <div className="quote-summary"><div><span className="label">Price</span><strong>{parentBooking.planType === 'monthly_membership' ? '£25 / month' : '£10'}</strong></div><div><span className="label">Payment</span><strong>{parentBooking.planType === 'monthly_membership' ? 'Recurring' : 'One-time'}</strong></div></div>
+                  <div className="quote-summary"><div><span className="label">Price</span><strong>{parentBooking.planType === 'monthly_membership' ? `£${membershipPounds} / month` : `£${dayPassPounds}`}</strong></div><div><span className="label">Payment</span><strong>{parentBooking.planType === 'monthly_membership' ? 'Recurring' : 'One-time'}</strong></div></div>
                   <button type="submit" className="btn btn-gold submit-btn" disabled={checkoutBusy || !parentBooking.classDate || !classSessions.length}>{checkoutBusy ? 'Opening checkout…' : 'Continue to payment'}</button>
                 </form>
               </div>
@@ -404,13 +422,18 @@ export default function HomePage({ SectionError, siteEvents, sectionLayout, navi
           <section className="team" id="team" key="team">
             <div className="wrap">
               <div className="section-head">
-                <span className="eyebrow">The People Behind KADA</span>
-                <h2 className="display">Meet the team.</h2>
+                <span className="eyebrow">{team.eyebrow || 'The People Behind KADA'}</span>
+                <h2 className="display">{team.title || 'Meet the team.'}</h2>
               </div>
               <div className="team-row reveal">
-                <div className="team-card"><div className="photo" style={{ backgroundImage: "url('/images/team-steven.jpg')" }}></div><div className="info"><div className="name display">Steven</div><div className="role">Founder &amp; Lead Instructor</div></div></div>
-                <div className="team-card"><div className="photo placeholder-photo"><span>Photo coming soon</span></div><div className="info"><div className="name display">Temilade</div><div className="role">Programme Coordinator</div></div></div>
-                <div className="team-card"><div className="photo" style={{ backgroundImage: "url('/images/team-annedrea.jpg')" }}></div><div className="info"><div className="name display">Annedrea</div><div className="role">School Partnerships</div></div></div>
+                {teamMembers.map((member) => (
+                  <div className="team-card" key={member.name}>
+                    {member.photo
+                      ? <div className="photo" style={{ backgroundImage: `url('${member.photo}')` }}></div>
+                      : <div className="photo placeholder-photo"><span>Photo coming soon</span></div>}
+                    <div className="info"><div className="name display">{member.name}</div><div className="role">{member.role}</div></div>
+                  </div>
+                ))}
               </div>
             </div>
           </section>
@@ -452,13 +475,13 @@ export default function HomePage({ SectionError, siteEvents, sectionLayout, navi
           <section className="contact" id="contact" key="contact">
             <div className="wrap">
               <div className="eyebrow">Get In Touch</div>
-              <h2 className="display">Let's <em>talk.</em></h2>
-              <p>Whether you're a parent, a school, or an organisation looking to partner with us, we'd love to hear from you.</p>
+              <h2 className="display">{contact.heading || "Let's talk."}</h2>
+              <p>{contact.intro || "Whether you're a parent, a school, or an organisation looking to partner with us, we'd love to hear from you."}</p>
               <ContactForm />
               <div className="contact-details">
-                <div><span className="k">Email</span><a href="mailto:bookings@kingsarkdance.com" style={{ color: 'inherit' }}>bookings@kingsarkdance.com</a></div>
-                <div><span className="k">Phone</span><a href="tel:+447535897732" style={{ color: 'inherit' }}>+44 7535 897732</a></div>
-                <div><span className="k">Address</span>395 College Rd, Birmingham B44 0HF</div>
+                <div><span className="k">Email</span><a href={`mailto:${contact.email || 'bookings@kingsarkdance.com'}`} style={{ color: 'inherit' }}>{contact.email || 'bookings@kingsarkdance.com'}</a></div>
+                <div><span className="k">Phone</span><a href={`tel:${(contact.phone || '+44 7535 897732').replace(/\s/g, '')}`} style={{ color: 'inherit' }}>{contact.phone || '+44 7535 897732'}</a></div>
+                <div><span className="k">Address</span>{contact.address || '395 College Rd, Birmingham B44 0HF'}</div>
               </div>
             </div>
           </section>

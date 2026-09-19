@@ -105,6 +105,18 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
   const filtered = events.filter((event) => (view === 'published' ? event.status === 'published' : event.status === 'draft'))
   const [expanded, setExpanded] = useState(false)
   const [salesEvent, setSalesEvent] = useState(null)
+  const [copiedId, setCopiedId] = useState('')
+
+  const copyShareLink = async (event) => {
+    const link = `${window.location.origin}/#event/${event.id}`
+    try {
+      await navigator.clipboard.writeText(link)
+    } catch {
+      window.prompt('Copy this link:', link)
+    }
+    setCopiedId(event.id)
+    window.setTimeout(() => setCopiedId(''), 2000)
+  }
 
   const columns = [
     {
@@ -146,7 +158,12 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
               </div>
             )}
             {event.status === 'published' && (
-              <a href={`#event/${event.id}`} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 4, fontSize: 11.5, color: OPS_COLORS.emerald, fontWeight: 600 }}>View ticket page ↗</a>
+              <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center' }}>
+                <a href={`#event/${event.id}`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: OPS_COLORS.emerald, fontWeight: 600 }}>View ticket page ↗</a>
+                <button type="button" onClick={() => copyShareLink(event)} style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', fontSize: 11.5, color: OPS_COLORS.muted, fontWeight: 600 }}>
+                  {copiedId === event.id ? '✓ Link copied' : '🔗 Copy share link'}
+                </button>
+              </div>
             )}
           </div>
         ) : <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>Not on sale</span>

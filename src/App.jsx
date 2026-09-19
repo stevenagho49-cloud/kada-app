@@ -6,6 +6,7 @@ import { BookingsTable, SchoolsTable, InstructorsTable } from './ops/tables'
 import SubscriptionsPage from './ops/SubscriptionsPage'
 import { EventsPage, EventForm, emptyEvent, normalizeEvent, toDbEvent } from './ops/EventsPage'
 import { SiteLayoutPage } from './ops/SiteLayoutPage'
+import { SiteContentPage } from './ops/SiteContentPage'
 import { ClassSchedulePage } from './ops/ClassSchedulePage'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
 
@@ -664,6 +665,7 @@ function App() {
   const [legalPageId, setLegalPageId] = useState(() => window.location.hash.match(/^#(privacy|terms|accessibility)$/)?.[1] || null)
   const [siteEvents, setSiteEvents] = useState([])
   const [sectionLayout, setSectionLayout] = useState([])
+  const [siteContent, setSiteContent] = useState({})
   const [classSessions, setClassSessions] = useState([])
   const [classSessionsVersion, setClassSessionsVersion] = useState(0)
   const [subscriptionBusyId, setSubscriptionBusyId] = useState('')
@@ -843,6 +845,19 @@ function App() {
     supabase.from('site_sections').select('*').order('sort_order').then(({ data, error }) => {
       if (mounted && !error && data?.length) {
         setSectionLayout(data.map((row) => ({ sectionKey: row.section_key, label: row.label, visible: row.visible, sortOrder: row.sort_order })))
+      }
+    })
+    return () => { mounted = false }
+  }, [view])
+
+  // Homepage copy/team/contact/prices — key/value rows from site_content,
+  // editable from Operations > Site > Site content. Public read, admin write.
+  useEffect(() => {
+    if (!supabaseReady) return undefined
+    let mounted = true
+    supabase.from('site_content').select('key,value').then(({ data, error }) => {
+      if (mounted && !error && data?.length) {
+        setSiteContent(Object.fromEntries(data.map((row) => [row.key, row.value])))
       }
     })
     return () => { mounted = false }
@@ -1127,6 +1142,11 @@ function App() {
     const { error } = await supabase.from('site_sections').upsert(next.map((section) => ({ section_key: section.sectionKey, label: section.label, visible: section.visible, sort_order: section.sortOrder })))
     setToast(error ? `Layout could not be saved: ${error.message}` : 'Homepage layout updated.')
   }
+  const saveSiteContent = async (key, value) => {
+    setSiteContent((current) => ({ ...current, [key]: value }))
+    const { error } = await supabase.from('site_content').upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+    setToast(error ? `Content could not be saved: ${error.message}` : 'Site content updated. Live on the homepage now.')
+  }
   const saveClassSession = async (sessionRow, changes) => {
     const payload = { ...changes }
     if (payload.day_of_week !== undefined) payload.day_of_week = Number(payload.day_of_week)
@@ -1295,6 +1315,7 @@ function App() {
       label: 'Site',
       children: [
         { key: 'site-layout', label: 'Homepage layout' },
+        { key: 'site-content', label: 'Site content' },
       ],
     }] : []),
     ...(isAdmin ? [{
@@ -1352,6 +1373,7 @@ function App() {
         <HomePage
           SectionError={SectionError}
           siteEvents={siteEvents}
+          siteContent={siteContent}
           sectionLayout={sectionLayout}
           navigatePublicSection={navigatePublicSection}
           openPublicForm={openPublicForm}
@@ -1454,6 +1476,7 @@ function App() {
           {isAdmin && tab === 'instructors' && <div className="panel"><div className="panel-head"><h3>Instructors and assignments</h3><Button small onClick={() => setInstructorModal({ id: crypto.randomUUID(), name: '', email: '', phone: '', rate: 100, locationAreas: '', gender: '', dbsStatus: 'Missing' })}>Add instructor</Button></div><div style={{ display: 'grid', gridTemplateColumns: '1fr 180px', gap: 8, marginBottom: 12 }}><input style={inputStyle} placeholder="Search by name, location, gender" value={instructorSearch} onChange={(event) => setInstructorSearch(event.target.value)} /><select style={inputStyle} value={instructorSort} onChange={(event) => setInstructorSort(event.target.value)}><option value="name">Sort by name</option><option value="location">Sort by location</option><option value="gender">Sort by gender</option><option value="completed">Sort by completed</option></select></div><InstructorsTable instructors={visibleInstructors} expanded={showAllInstructors} onToggleExpand={() => setShowAllInstructors(!showAllInstructors)} completedBy={completedByInstructor} onSaveInstructor={saveInstructor} onMessage={(instructor) => setMessageTarget({ kind: 'instructor', id: instructor.id, name: instructor.name })} onEdit={setInstructorModal} onOpenDbs={openDbsFile} onReviewDbs={reviewDbs} /></div>}
           {isAdmin && (tab === 'events-published' || tab === 'events-drafts') && <EventsPage view={tab === 'events-published' ? 'published' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} />}
           {isAdmin && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} />}
+          {isAdmin && tab === 'site-content' && <SiteContentPage content={siteContent} onSave={saveSiteContent} />}
           {isAdmin && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
           {isAdmin && tab === 'class-schedule' && <ClassSchedulePage sessions={classSessions} onSave={saveClassSession} onAdd={addClassSession} onDelete={deleteClassSession} />}
           {tab === 'template' && <TemplateView template={template} onSave={saveTemplate} />}
