@@ -13,6 +13,7 @@ import { ContactsPage } from './ops/ContactsPage'
 import { TeamPage } from './ops/TeamPage'
 import { SettingsPage } from './ops/SettingsPage'
 import { CampaignsPage } from './ops/CampaignsPage'
+import { SiteAnalytics } from './ops/SiteAnalytics'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
 import { applySiteFavicon } from './lib/useSiteLogo'
 
@@ -699,6 +700,24 @@ function App() {
     document.addEventListener('pointerdown', closeOnOutsideTap)
     return () => document.removeEventListener('pointerdown', closeOnOutsideTap)
   }, [publicMenuOpen])
+
+  // Anonymous site analytics: record each public navigation (path + referrer
+  // only, no personal data). Skips the admin/ops dashboard itself.
+  useEffect(() => {
+    if (view !== 'site' && !eventPageId && !legalPageId) return undefined
+    const track = () => {
+      fetch('/api/track/pageview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: window.location.hash || '/', referrer: document.referrer || '' }),
+        keepalive: true,
+      }).catch(() => {})
+    }
+    track()
+    window.addEventListener('hashchange', track)
+    return () => window.removeEventListener('hashchange', track)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, eventPageId, legalPageId])
 
   // Public pages live at #event/<id> (ticketed events) and #privacy / #terms /
   // #accessibility (legal pages) ,  all reachable by guests without sign-in.
@@ -1506,6 +1525,7 @@ function App() {
               {isInstructor && <DbsUpload instructor={instructorRecord} onUpload={uploadDbs} uploading={dbsUploading} />}
               <NeedsAttention jobs={jobs} bookings={bookings} instructors={instructors} schools={schools} messages={messages} isAdmin={isAdmin} dismissed={dismissedNotifications} onDismiss={(id) => setDismissedNotifications((current) => [...current, id])} onOpenJobs={() => setTab('jobs')} onOpenBookings={() => setTab('bookings')} onOpenInstructors={() => setTab('instructors')} onOpenMessages={() => setTab('messages')} />
               <BirthdayNotice students={students} />
+              {isAdmin && session && <SiteAnalytics session={session} />}
               {isAdmin && (
                 <div className="panel" style={{ borderColor: '#e0b4a6' }}>
                   <div className="panel-head"><h3>Test data</h3></div>

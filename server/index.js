@@ -753,10 +753,20 @@ async function runDueCampaigns() {
     const isOneOff = Boolean(markerMatch)
     const list = (campaign.custom_emails && campaign.custom_emails.length) ? campaign.custom_emails : (isOneOff ? cleanEmailList(markerMatch[1]) : [])
     const recipients = isOneOff ? list.map((email) => ({ id: null, name: email.split('@')[0].replace(/[._-]+/g, ' '), email })) : await campaignRecipients(campaign.audience, list)
+    // Pre-create send rows so each email gets a tracking id, then send with the
+    // open pixel and click-redirect links keyed to that row (only when the
+    // analytics schema is present; otherwise send plain).
+    const track = await hasAnalytics()
     const rows = []
     for (const recipient of recipients) {
-      const result = await sendEmail({ to: recipient.email, subject: campaign.subject, html: campaign.body_html.replace(/{{name}}/g, recipient.name || 'there') })
-      rows.push({ campaign_id: campaign.id, contact_id: recipient.id, email: recipient.email, status: result.sent ? 'sent' : 'failed', error: result.sent ? null : result.reason, sent_at: result.sent ? new Date().toISOString() : null })
+      const { data: sendRow } = await supabase.from('campaign_sends').insert({ campaign_id: campaign.id, contact_id: recipient.id, email: recipient.email, status: 'queued' }).select('id').maybeSingle() // eslint-disable-line no-await-in-loop
+      const trackedHtml = track && sendRow ? instrumentCampaignHtml(campaign.body_html.replace(/{{name}}/g, recipient.name || 'there'), sendRow.id) : campaign.body_html.replace(/{{name}}/g, recipient.name || 'there')
+      const result = await sendEmail({ to: recipient.email, subject: campaign.subject, html: trackedHtml }) // eslint-disable-line no-await-in-loop
+      if (sendRow) {
+        await supabase.from('campaign_sends').update({ status: result.sent ? 'sent' : 'failed', error: result.sent ? null : result.reason, sent_at: result.sent ? new Date().toISOString() : null }).eq('id', sendRow.id) // eslint-disable-line no-await-in-loop
+      } else {
+        rows.push({ campaign_id: campaign.id, contact_id: recipient.id, email: recipient.email, status: result.sent ? 'sent' : 'failed', error: result.sent ? null : result.reason, sent_at: result.sent ? new Date().toISOString() : null })
+      }
       if (result.sent) sent += 1
     }
     if (rows.length) await supabase.from('campaign_sends').insert(rows)
@@ -850,6 +860,102 @@ app.post('/api/admin/campaigns/:id/delete', async (request, response) => {
   const { error } = await supabase.from('campaigns').delete().eq('id', request.params.id)
   if (error) return response.status(500).json({ error: 'Campaign could not be deleted.' })
   response.json({ deleted: true })
+})
+
+/* ------------------------------------------------------------------ */
+/* Analytics: campaign open/click tracking + site page views.          */
+/* ------------------------------------------------------------------ */
+
+/* Track whether the analytics schema is in place (cached, probed once). */
+let analyticsSupported = null
+async function hasAnalytics() {
+  if (analyticsSupported !== null) return analyticsSupported
+  const { error } = await supabase.from('page_views').select('id').limit(0)
+  analyticsSupported = !(error && /page_views/.test(error.message))
+  return analyticsSupported
+}
+
+/* Instrument an email body: append a 1px open pixel and rewrite links through */
+/* the click redirect, both keyed to the recipient's send row.                */
+function instrumentCampaignHtml(html, sendId) {
+  const pixel = `<img src="${APP_URL}/api/t/open/${sendId}.gif" width="1" height="1" alt="" style="display:block;border:0" />`
+  const withClicks = String(html).replace(/href="(https?:\/\/[^"]+)"/g, (match, url) => `href="${APP_URL}/api/t/click/${sendId}?u=${encodeURIComponent(url)}"`)
+  return withClicks + pixel
+}
+
+/* 1px transparent GIF for open tracking. */
+const PIXEL_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
+
+app.get('/api/t/open/:sendId.gif', async (request, response) => {
+  response.set({ 'Content-Type': 'image/gif', 'Cache-Control': 'no-store, no-cache, must-revalidate' })
+  response.send(PIXEL_GIF)
+  if (!supabase || !(await hasAnalytics())) return
+  const { data: send } = await supabase.from('campaign_sends').select('id,opens').eq('id', request.params.sendId).maybeSingle()
+  if (send) {
+    await supabase.from('campaign_sends').update({ opens: (send.opens || 0) + 1, first_opened_at: send.opens ? undefined : new Date().toISOString() }).eq('id', send.id)
+  }
+})
+
+app.get('/api/t/click/:sendId', async (request, response) => {
+  const target = String(request.query.u || APP_URL)
+  response.redirect(target)
+  if (!supabase || !(await hasAnalytics())) return
+  const { data: send } = await supabase.from('campaign_sends').select('id,clicks').eq('id', request.params.sendId).maybeSingle()
+  if (send) {
+    await supabase.from('campaign_sends').update({ clicks: (send.clicks || 0) + 1, last_clicked_at: new Date().toISOString() }).eq('id', send.id)
+  }
+})
+
+/* Public page-view recording: the site posts here on each navigation. */
+app.post('/api/track/pageview', async (request, response) => {
+  response.json({ ok: true })
+  if (!supabase || !(await hasAnalytics())) return
+  const pathName = String(request.body?.path || '/').slice(0, 200)
+  const referrer = String(request.body?.referrer || '').slice(0, 300)
+  const userAgent = String(request.headers['user-agent'] || '').slice(0, 300)
+  await supabase.from('page_views').insert({ path: pathName, referrer, user_agent: userAgent })
+})
+
+/* Admin analytics: per-campaign engagement. */
+app.get('/api/admin/campaigns/:id/analytics', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { data: sends, error } = await supabase.from('campaign_sends').select('id,email,status,opens,clicks,first_opened_at,last_clicked_at,sent_at').eq('campaign_id', request.params.id).order('sent_at', { ascending: false })
+  if (error) return response.status(500).json({ error: 'Analytics could not be loaded.' })
+  const list = sends || []
+  const delivered = list.filter((row) => row.status === 'sent')
+  response.json({
+    total: list.length,
+    sent: delivered.length,
+    failed: list.filter((row) => row.status === 'failed').length,
+    opened: delivered.filter((row) => row.opens > 0).length,
+    clicked: delivered.filter((row) => row.clicks > 0).length,
+    recipients: list,
+  })
+})
+
+/* Admin site analytics: traffic over the last 30 days. */
+app.get('/api/admin/site-analytics', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const since = new Date(Date.now() - 30 * 86400000).toISOString()
+  const { data: views, error } = await supabase.from('page_views').select('path,referrer,created_at').gte('created_at', since)
+  if (error) return response.status(500).json({ error: 'Site analytics could not be loaded.' })
+  const list = views || []
+  const byDay = {}
+  const byPage = {}
+  const byReferrer = {}
+  list.forEach((view) => {
+    const day = view.created_at.slice(0, 10)
+    byDay[day] = (byDay[day] || 0) + 1
+    byPage[view.path] = (byPage[view.path] || 0) + 1
+    const source = view.referrer ? (() => { try { return new URL(view.referrer).hostname } catch { return view.referrer } })() : 'Direct'
+    if (source) byReferrer[source] = (byReferrer[source] || 0) + 1
+  })
+  const days = Object.keys(byDay).sort().map((day) => ({ day, views: byDay[day] }))
+  const topPages = Object.entries(byPage).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([pathName, count]) => ({ path: pathName, views: count }))
+  const topReferrers = Object.entries(byReferrer).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([source, count]) => ({ source, views: count }))
+  response.json({ totalViews: list.length, days, topPages, topReferrers })
 })
 
 /* AI email design ,  Anthropic (Claude). Set ANTHROPIC_API_KEY in the server  */

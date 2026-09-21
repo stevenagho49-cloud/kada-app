@@ -44,6 +44,7 @@ export function CampaignsPage({ session }) {
   const [aiBusy, setAiBusy] = useState(false)
   const [preview, setPreview] = useState(false)
   const [previewTemplate, setPreviewTemplate] = useState(null)
+  const [analyticsFor, setAnalyticsFor] = useState(null)
 
   const authedFetch = async (path, options = {}) => {
     const response = await fetch(path, {
@@ -239,12 +240,17 @@ export function CampaignsPage({ session }) {
                 </div>
               </div>
               <Pill text={campaign.status} tone={STATUS_TONES[campaign.status]} />
+              {campaign.sentCount > 0 && <OpsButton small variant="ghost" onClick={() => setAnalyticsFor(campaign)}>Stats</OpsButton>}
               {(campaign.status === 'scheduled' || campaign.status === 'active') && <OpsButton small variant="ghost" onClick={() => pause(campaign)}>Pause</OpsButton>}
               <OpsButton small variant="danger" onClick={() => remove(campaign)}>Delete</OpsButton>
             </div>
           ))}
         </div>
       </div>
+
+      {analyticsFor && (
+        <CampaignAnalytics session={session} campaign={analyticsFor} onClose={() => setAnalyticsFor(null)} />
+      )}
 
       {previewTemplate && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(35,35,35,0.55)', zIndex: 60, display: 'grid', placeItems: 'center', padding: 20 }} onClick={(event) => { if (event.target === event.currentTarget) setPreviewTemplate(null) }}>
@@ -261,6 +267,72 @@ export function CampaignsPage({ session }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+/* Per-campaign analytics: delivery, open and click engagement, plus a        */
+/* per-recipient table showing who opened and who clicked.                    */
+function CampaignAnalytics({ session, campaign, onClose }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let mounted = true
+    fetch(`/api/admin/campaigns/${campaign.id}/analytics`, { headers: { Authorization: `Bearer ${session.access_token}` } })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(result.error || 'Could not load')
+        if (mounted) setData(result)
+      })
+      .catch((err) => { if (mounted) setError(err.message) })
+    return () => { mounted = false }
+  }, [campaign.id, session])
+
+  const pct = (part, whole) => (whole ? `${Math.round((part / whole) * 100)}%` : '0%')
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(35,35,35,0.55)', zIndex: 60, display: 'grid', placeItems: 'center', padding: 20 }} onClick={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <div style={{ background: OPS_COLORS.cream, borderRadius: 12, padding: 22, width: '100%', maxWidth: 680, maxHeight: '88vh', overflowY: 'auto', boxShadow: '0 18px 60px rgba(0,0,0,0.3)' }}>
+        <h3 style={{ margin: '0 0 2px', fontFamily: "'Iowan Old Style', Georgia, serif", color: OPS_COLORS.emerald, fontWeight: 400 }}>{campaign.name}</h3>
+        <p style={{ margin: '0 0 16px', fontSize: 13, color: OPS_COLORS.muted }}>Subject: {campaign.subject}</p>
+        {error && <p style={{ color: OPS_COLORS.warn, fontSize: 13 }}>{error}</p>}
+        {!error && !data && <p style={{ color: OPS_COLORS.muted, fontSize: 13 }}>Loading…</p>}
+        {data && (
+          <>
+            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
+              {[
+                ['Sent', data.sent],
+                ['Failed', data.failed],
+                ['Opened', `${data.opened} (${pct(data.opened, data.sent)})`],
+                ['Clicked', `${data.clicked} (${pct(data.clicked, data.sent)})`],
+              ].map(([label, value]) => (
+                <div key={label} style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: '10px 14px', background: OPS_COLORS.ivory, minWidth: 110 }}>
+                  <div style={{ fontSize: 11, color: OPS_COLORS.muted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
+                  <strong style={{ fontSize: 20, color: OPS_COLORS.emerald }}>{value}</strong>
+                </div>
+              ))}
+            </div>
+            <div style={{ maxHeight: 320, overflowY: 'auto', border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8 }}>
+              <table className="ops-table">
+                <thead><tr><th>Recipient</th><th>Status</th><th>Opened</th><th>Clicked</th></tr></thead>
+                <tbody>
+                  {data.recipients.map((recipient) => (
+                    <tr key={recipient.id}>
+                      <td style={{ fontSize: 12.5 }}>{recipient.email}</td>
+                      <td><Pill text={recipient.status} tone={recipient.status === 'sent' ? 'green' : recipient.status === 'failed' ? 'red' : 'default'} /></td>
+                      <td style={{ fontSize: 12.5 }}>{recipient.opens > 0 ? `Yes (${recipient.opens}×)` : 'Not yet'}</td>
+                      <td style={{ fontSize: 12.5 }}>{recipient.clicks > 0 ? `Yes (${recipient.clicks}×)` : 'Not yet'}</td>
+                    </tr>
+                  ))}
+                  {!data.recipients.length && <tr><td colSpan="4" style={{ color: OPS_COLORS.muted, fontSize: 13 }}>No recipients recorded.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}><OpsButton onClick={onClose}>Close</OpsButton></div>
+      </div>
     </div>
   )
 }
