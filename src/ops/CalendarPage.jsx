@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { OPS_COLORS, Pill } from './ui'
 
 /* ------------------------------------------------------------------ */
-/* Operations > Calendar — weekly/monthly view of bookings + events.   */
+/* Operations > Calendar ,  weekly/monthly view of bookings + events.   */
 /* Clicking a booking opens it in the booking modal; clicking a day    */
 /* with no items offers to create an event on that date.               */
 /* ------------------------------------------------------------------ */
@@ -91,7 +91,7 @@ export function CalendarPage({ bookings, events, instructors, onOpenBooking, onA
   }
 
   const heading = mode === 'week'
-    ? `${weekDays[0].getDate()} ${MONTH_NAMES[weekDays[0].getMonth()].slice(0, 3)} – ${weekDays[6].getDate()} ${MONTH_NAMES[weekDays[6].getMonth()].slice(0, 3)} ${weekDays[6].getFullYear()}`
+    ? `${weekDays[0].getDate()} ${MONTH_NAMES[weekDays[0].getMonth()].slice(0, 3)}  to  ${weekDays[6].getDate()} ${MONTH_NAMES[weekDays[6].getMonth()].slice(0, 3)} ${weekDays[6].getFullYear()}`
     : `${MONTH_NAMES[cursor.getMonth()]} ${cursor.getFullYear()}`
 
   const cellStyle = (iso, inMonth = true) => ({

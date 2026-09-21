@@ -3,7 +3,7 @@ import { flyerPublicUrl, formatEventTimeRange } from './ops/EventsPage'
 import { ClassDatePicker, DAY_NAMES, classEndedOnDate, nextClassDate, startOfToday } from './lib/classDates'
 
 // Testimonial videos + posters live in Supabase Storage (public bucket) instead
-// of the repo — keeps the git history and page payload small.
+// of the repo ,  keeps the git history and page payload small.
 const SITE_MEDIA_URL = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/public/site-media`
 const videoAsset = (file) => `${SITE_MEDIA_URL}/videos/${file}`
 

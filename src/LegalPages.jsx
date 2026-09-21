@@ -1,7 +1,7 @@
-// Public legal pages — reachable by guests at #privacy, #terms and #accessibility
+// Public legal pages ,  reachable by guests at #privacy, #terms and #accessibility
 // (hash-routed from App.jsx, same pattern as the event ticket pages).
 //
-// These are practical starter documents, not legal advice — have them reviewed
+// These are practical starter documents, not legal advice ,  have them reviewed
 // before relying on them formally.
 
 import { useSiteLogo } from './lib/useSiteLogo'

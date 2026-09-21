@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { OpsButton, Pill, OPS_COLORS, opsInputStyle } from './ui'
 import { TEMPLATES, TEMPLATE_CATEGORIES } from './emailTemplates'
+import { VisualEmailEditor } from './VisualEmailEditor'
 
 /* ------------------------------------------------------------------ */
-/* Operations > Marketing > Campaigns — design emails from 50 brand    */
+/* Operations > Marketing > Campaigns ,  design emails from 50 brand    */
 /* templates (or AI), pick an audience, send now or schedule one-off / */
 /* recurring, and track sent/failed per campaign. Admins only.         */
 /* ------------------------------------------------------------------ */
@@ -67,17 +68,17 @@ export function CampaignsPage({ session }) {
 
   const applyTemplate = (template) => {
     setDraft((current) => ({ ...current, name: template.name, subject: template.subject, bodyHtml: template.body }))
-    setNotice(`Template "${template.name}" loaded into the composer below — edit it freely.`)
+    setNotice(`Template "${template.name}" loaded into the composer below ,  edit it freely.`)
   }
 
   const designWithAi = async () => {
-    if (!aiPrompt.trim()) { setError('Describe the email you want — e.g. "Invite schools to book a Black History Month workshop, energetic tone".'); return }
+    if (!aiPrompt.trim()) { setError('Describe the email you want ,  e.g. "Invite schools to book a Black History Month workshop, energetic tone".'); return }
     setAiBusy(true)
     setError('')
     try {
       const designed = await authedFetch('/api/admin/campaigns/ai-design', { method: 'POST', body: JSON.stringify({ prompt: aiPrompt, tone: aiTone }) })
       setDraft((current) => ({ ...current, name: designed.name || current.name, subject: designed.subject || current.subject, previewText: designed.previewText || '', bodyHtml: designed.bodyHtml || current.bodyHtml }))
-      setNotice('AI design loaded into the composer — review and edit before sending.')
+      setNotice('AI design loaded into the composer ,  review and edit before sending.')
     } catch (aiErr) {
       setError(aiErr.message)
     }
@@ -104,10 +105,10 @@ export function CampaignsPage({ session }) {
       })
       if (sendNow) {
         const result = await authedFetch(`/api/admin/campaigns/${campaign.id}/send-now`, { method: 'POST' })
-        setNotice(`Campaign sent — ${result.sent} email${result.sent === 1 ? '' : 's'} delivered.`)
+        setNotice(`Campaign sent ,  ${result.sent} email${result.sent === 1 ? '' : 's'} delivered.`)
       } else {
         await authedFetch(`/api/admin/campaigns/${campaign.id}/schedule`, { method: 'POST', body: JSON.stringify({ scheduledAt: draft.scheduledAt, recurrence: draft.recurrence }) })
-        setNotice(draft.recurrence === 'none' ? `Scheduled for ${new Date(draft.scheduledAt).toLocaleString('en-GB')}.` : `Scheduled — repeats ${draft.recurrence} starting ${new Date(draft.scheduledAt).toLocaleString('en-GB')}.`)
+        setNotice(draft.recurrence === 'none' ? `Scheduled for ${new Date(draft.scheduledAt).toLocaleString('en-GB')}.` : `Scheduled ,  repeats ${draft.recurrence} starting ${new Date(draft.scheduledAt).toLocaleString('en-GB')}.`)
       }
       setDraft(emptyDraft)
       await load()
@@ -181,7 +182,7 @@ export function CampaignsPage({ session }) {
       <div style={sectionStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
           <h4 style={{ margin: '0 0 10px', fontSize: 15, color: OPS_COLORS.emerald }}>3 · Compose & schedule</h4>
-          <OpsButton small variant="ghost" onClick={() => setPreview((current) => !current)}>{preview ? 'Edit code' : 'Preview'}</OpsButton>
+          <OpsButton small variant="ghost" onClick={() => setPreview((current) => !current)}>{preview ? 'Back to editing' : 'Preview'}</OpsButton>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <label style={{ display: 'block' }}><span style={labelStyle}>Campaign name (internal)</span><input style={opsInputStyle} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
@@ -194,10 +195,10 @@ export function CampaignsPage({ session }) {
           <label style={{ display: 'block' }}><span style={labelStyle}>Inbox preview text</span><input style={opsInputStyle} value={draft.previewText} onChange={(event) => setDraft({ ...draft, previewText: event.target.value })} /></label>
         </div>
         <div style={{ marginTop: 10 }}>
-          <span style={labelStyle}>Email body (HTML — {'{{name}}'} inserts the recipient's name)</span>
+          <span style={labelStyle}>Email content ,  edit it like a document ({'{{name}}'} inserts the recipient's name). Use Preview to see the finished email.</span>
           {preview
             ? <div style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, overflow: 'hidden' }} dangerouslySetInnerHTML={{ __html: draft.bodyHtml.replace(/{{name}}/g, 'Sarah') }} />
-            : <textarea style={{ ...opsInputStyle, minHeight: 190, fontFamily: 'monospace', fontSize: 12 }} value={draft.bodyHtml} onChange={(event) => setDraft({ ...draft, bodyHtml: event.target.value })} />}
+            : <VisualEmailEditor key={draft.name + draft.subject} value={draft.bodyHtml} onChange={(html) => setDraft((current) => ({ ...current, bodyHtml: html }))} />}
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
           <label style={{ display: 'block' }}><span style={labelStyle}>Schedule</span>
@@ -216,7 +217,7 @@ export function CampaignsPage({ session }) {
       <div style={sectionStyle}>
         <h4 style={{ margin: '0 0 10px', fontSize: 15, color: OPS_COLORS.emerald }}>Campaigns</h4>
         {loading && <p style={{ color: OPS_COLORS.muted, fontSize: 13 }}>Loading…</p>}
-        {!loading && !campaigns.length && <p style={{ color: OPS_COLORS.muted, fontSize: 13 }}>No campaigns yet — design your first one above.</p>}
+        {!loading && !campaigns.length && <p style={{ color: OPS_COLORS.muted, fontSize: 13 }}>No campaigns yet ,  design your first one above.</p>}
         <div style={{ display: 'grid', gap: 8 }}>
           {campaigns.map((campaign) => (
             <div key={campaign.id} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', borderTop: `1px solid ${OPS_COLORS.rule}`, paddingTop: 10 }}>

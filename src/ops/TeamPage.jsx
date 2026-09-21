@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase'
 import { OpsButton, Pill, OPS_COLORS, opsInputStyle } from './ui'
 
 /* ------------------------------------------------------------------ */
-/* Operations > Administration > Team & access — invite staff, give    */
+/* Operations > Administration > Team & access ,  invite staff, give    */
 /* them a job title, and choose exactly which parts of Operations      */
 /* they can see. Backed by /api/admin/team (service role on the        */
 /* server); admins only.                                               */
@@ -75,7 +75,7 @@ export function TeamPage({ session }) {
   }
   useEffect(() => { void load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Realtime invitation progress — flips sent → accepted → account created
+  // Realtime invitation progress ,  flips sent → accepted → account created
   // live as invitees act, with a polling fallback if realtime isn't enabled.
   useEffect(() => {
     let channel
@@ -101,7 +101,7 @@ export function TeamPage({ session }) {
     setError('')
     try {
       await authedFetch('/api/admin/team/invite', { method: 'POST', body: JSON.stringify(invite) })
-      setNotice(`Invite emailed to ${invite.email} — one branded email with a "Set my password" link inside.`)
+      setNotice(`Invite emailed to ${invite.email} ,  one branded email with a "Set my password" link inside.`)
       setInvite({ name: '', email: '', role: 'staff', jobTitle: '', permissions: [] })
       await load()
     } catch (inviteErr) {
@@ -220,7 +220,7 @@ export function TeamPage({ session }) {
                 <span style={{ color: OPS_COLORS.muted, fontSize: 12.5, marginLeft: 8 }}>{member.email}</span>
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <Pill text={member.role === 'admin' ? 'Admin — full access' : 'Staff'} tone={member.role === 'admin' ? 'green' : 'default'} />
+                <Pill text={member.role === 'admin' ? 'Admin ,  full access' : 'Staff'} tone={member.role === 'admin' ? 'green' : 'default'} />
                 {!isSelf && (
                   <select style={{ ...opsInputStyle, width: 'auto', padding: '5px 8px', fontSize: 12.5 }} value={draft.role} onChange={(event) => editDraft(member, { role: event.target.value })}>
                     <option value="staff">Staff</option>
@@ -244,7 +244,7 @@ export function TeamPage({ session }) {
       })}
 
       {!loading && !members.length && !error && (
-        <p style={{ color: OPS_COLORS.muted, fontSize: 13 }}>No team members yet — send your first invite above.</p>
+        <p style={{ color: OPS_COLORS.muted, fontSize: 13 }}>No team members yet ,  send your first invite above.</p>
       )}
     </div>
   )

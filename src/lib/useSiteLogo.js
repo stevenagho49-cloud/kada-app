@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from './supabase'
 
-/* Shared site logo — the admin can replace every logo at once from           */
+/* Shared site logo ,  the admin can replace every logo at once from           */
 /* Operations > Administration > Settings > Branding (stored as a data URL    */
 /* in site_content 'branding'.logoUrl). This hook reads it on pages that      */
 /* don't otherwise load site_content (ticket page, legal pages) and caches    */

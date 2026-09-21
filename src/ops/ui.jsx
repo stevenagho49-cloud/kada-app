@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 
-// Design tokens — mirrors the palette used across App.jsx.
+// Design tokens ,  mirrors the palette used across App.jsx.
 export const OPS_COLORS = {
   emerald: '#0b3d2e',
   emeraldLight: '#145c40',
@@ -44,12 +44,12 @@ export function OpsButton({ children, onClick, type = 'button', disabled, varian
 }
 
 /* ------------------------------------------------------------------ */
-/* Left sidebar — dark, collapsible nav groups; a tap-to-open drawer   */
+/* Left sidebar ,  dark, collapsible nav groups; a tap-to-open drawer   */
 /* on mobile (branding lives in the site header, not duplicated here). */
 /* ------------------------------------------------------------------ */
 export function OpsSidebar({ caption = 'Operations', items, active, onSelect, openGroups, onToggleGroup }) {
   // Mobile: the sidebar collapses into a tap-to-open drawer (no duplicated
-  // branding — the site header already carries it). Selecting an item navigates
+  // branding ,  the site header already carries it). Selecting an item navigates
   // and closes the drawer in one action.
   const [mobileOpen, setMobileOpen] = useState(false)
   const handleSelect = (key) => { setMobileOpen(false); onSelect(key) }
@@ -95,7 +95,7 @@ export function OpsSidebar({ caption = 'Operations', items, active, onSelect, op
 }
 
 /* ------------------------------------------------------------------ */
-/* Empty state — icon, headline, one-line explanation, CTA button.    */
+/* Empty state ,  icon, headline, one-line explanation, CTA button.    */
 /* ------------------------------------------------------------------ */
 export function EmptyState({ icon = '📭', title, body, ctaLabel, onCta }) {
   return (
@@ -109,7 +109,7 @@ export function EmptyState({ icon = '📭', title, body, ctaLabel, onCta }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* DataTable — real <table> with <thead>, show-N-then-expand, empty.  */
+/* DataTable ,  real <table> with <thead>, show-N-then-expand, empty.  */
 /* ------------------------------------------------------------------ */
 export function DataTable({ columns, rows, rowKey = 'id', expanded, onToggleExpand, pageSize = 3, emptyState = null }) {
   if (!rows.length && emptyState) return emptyState
@@ -266,8 +266,8 @@ export function Toggle({ checked, onChange, disabled = false, label }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* ImageField — pick a photo/file, resize it in the browser, and hand  */
-/* back a data URL (stored in site_content/app_settings jsonb — no     */
+/* ImageField ,  pick a photo/file, resize it in the browser, and hand  */
+/* back a data URL (stored in site_content/app_settings jsonb ,  no     */
 /* extra storage bucket needed). JPEG for photos, PNG for logos so     */
 /* transparency survives.                                              */
 /* ------------------------------------------------------------------ */

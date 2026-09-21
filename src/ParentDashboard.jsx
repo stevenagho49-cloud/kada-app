@@ -1,4 +1,4 @@
-/* Parent dashboard — lazy-loaded from App.jsx so the public site bundle
+/* Parent dashboard ,  lazy-loaded from App.jsx so the public site bundle
    doesn't carry it. All data/actions arrive via props from App. */
 import { useEffect, useState } from 'react'
 import { OpsSidebar, DataTable, Pill, OpsButton, EmptyState } from './ops/ui'
@@ -109,7 +109,7 @@ function ParentDashboard({ session, family, bookings, students, classSessions = 
     </main>
   )
 }
-/* Book-a-class form for signed-in parents — pre-fills from their family
+/* Book-a-class form for signed-in parents ,  pre-fills from their family
    record and existing children, then hands off to Stripe checkout. */
 function ParentBookingForm({ family, students, classSessions, session, onBookClass, checkoutBusy }) {
   const [form, setForm] = useState({
@@ -123,7 +123,7 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
   const knownChildren = students.filter((student) => student.name)
   const selectedSession = classSessions.find((session) => session.name === form.className) || classSessions[0] || null
 
-  // Keep the chosen date on a real class day — switching class jumps to the
+  // Keep the chosen date on a real class day ,  switching class jumps to the
   // nearest date that class actually runs; only scheduled days are selectable.
   useEffect(() => {
     if (!selectedSession) return
@@ -207,7 +207,7 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
   )
 }
 
-/* Parent portal > Settings — everything a parent can keep up to date
+/* Parent portal > Settings ,  everything a parent can keep up to date
    themselves: contact details, emergency contact, communication preferences
    and per-child welfare notes. Saved via the server (ownership checked). */
 function ParentSettingsView({ family, students, onSave }) {
@@ -260,7 +260,7 @@ function ParentSettingsView({ family, students, onSave }) {
           <div><span style={label}>Phone</span><input style={input} value={form.guardian_phone} onChange={(event) => setForm({ ...form, guardian_phone: event.target.value })} /></div>
         </div>
         <div style={{ marginTop: 10 }}><span style={label}>Home address</span><input style={input} value={form.address} onChange={(event) => setForm({ ...form, address: event.target.value })} /></div>
-        <p style={{ fontSize: 12, color: muted, margin: '8px 0 0' }}>Your email is your sign-in address — contact us if it changes.</p>
+        <p style={{ fontSize: 12, color: muted, margin: '8px 0 0' }}>Your email is your sign-in address ,  contact us if it changes.</p>
       </div>
 
       <div style={section}>
@@ -297,7 +297,7 @@ function ParentSettingsView({ family, students, onSave }) {
                     </select>
                   </div>
                 </div>
-                <div style={{ marginTop: 10 }}><span style={label}>Allergies & medical notes</span><textarea style={{ ...input, minHeight: 56 }} placeholder="Anything instructors should know — asthma, injuries, additional needs…" value={notes.medical_notes} onChange={(event) => update({ medical_notes: event.target.value })} /></div>
+                <div style={{ marginTop: 10 }}><span style={label}>Allergies & medical notes</span><textarea style={{ ...input, minHeight: 56 }} placeholder="Anything instructors should know ,  asthma, injuries, additional needs…" value={notes.medical_notes} onChange={(event) => update({ medical_notes: event.target.value })} /></div>
               </div>
             )
           })}

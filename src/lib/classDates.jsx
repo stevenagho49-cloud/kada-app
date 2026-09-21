@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-/* Shared class-date picker — only days the admin has actually scheduled a    */
+/* Shared class-date picker ,  only days the admin has actually scheduled a    */
 /* class (its day_of_week) are selectable, today through +12 weeks, and a     */
 /* class that has already finished today stops being bookable. Used by both   */
 /* the public homepage booking form and the parent portal booking form.       */
@@ -19,7 +19,7 @@ function toLocalIso(date) {
   return `${date.getFullYear()}-${month}-${day}`
 }
 
-// True when `date` is today and this class's end time has already passed —
+// True when `date` is today and this class's end time has already passed , 
 // a finished class must not remain bookable for the rest of the day.
 export function classEndedOnDate(session, date) {
   if (!session || !date) return false
@@ -90,7 +90,7 @@ export function ClassDatePicker({ session, value, onChange }) {
       </div>
       <p className="class-date-hint">
         {session
-          ? `${session.name} runs every ${DAY_NAMES[Number(session.day_of_week)]}${session.start_time ? `, ${String(session.start_time).slice(0, 5)}${session.end_time ? `–${String(session.end_time).slice(0, 5)}` : ''}` : ''}. Only class days are selectable.${todayIsEndedClassDay ? " Today's class has already finished, so today is no longer bookable." : ''}`
+          ? `${session.name} runs every ${DAY_NAMES[Number(session.day_of_week)]}${session.start_time ? `, ${String(session.start_time).slice(0, 5)}${session.end_time ? ` to ${String(session.end_time).slice(0, 5)}` : ''}` : ''}. Only class days are selectable.${todayIsEndedClassDay ? " Today's class has already finished, so today is no longer bookable." : ''}`
           : 'Choose a class to see its available dates.'}
       </p>
     </div>

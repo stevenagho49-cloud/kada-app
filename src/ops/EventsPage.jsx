@@ -79,7 +79,7 @@ export function formatEventTime(value) {
 export function formatEventTimeRange(start, end) {
   const startText = formatEventTime(start)
   const endText = formatEventTime(end)
-  if (startText && endText) return `${startText} – ${endText}`
+  if (startText && endText) return `${startText}  to  ${endText}`
   return startText || endText
 }
 

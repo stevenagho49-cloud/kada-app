@@ -16,7 +16,7 @@ import { CampaignsPage } from './ops/CampaignsPage'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
 import { applySiteFavicon } from './lib/useSiteLogo'
 
-// Routable screens loaded on demand — the public homepage bundle doesn't pay for them.
+// Routable screens loaded on demand ,  the public homepage bundle doesn't pay for them.
 const EventTicketPage = lazy(() => import('./EventTicketPage').then((module) => ({ default: module.EventTicketPage })))
 const LegalPage = lazy(() => import('./LegalPages').then((module) => ({ default: module.LegalPage })))
 const ParentDashboard = lazy(() => import('./ParentDashboard').then((module) => ({ default: module.ParentDashboard })))
@@ -135,7 +135,7 @@ function normalizeBooking(row = {}) {
     instructorPay: Number(row.instructor_pay ?? row.instructorPay ?? 0),
     needsAdminAttention: Boolean(row.needs_admin_attention ?? row.needsAdminAttention),
     completedAt: row.completed_at ?? row.completedAt ?? '',
-    // 'pending' = checkout started but never paid — excluded from stats and notifications.
+    // 'pending' = checkout started but never paid ,  excluded from stats and notifications.
     paymentStatus: row.payment_status ?? row.paymentStatus ?? '',
   }
 }
@@ -524,7 +524,7 @@ function MessagesView({ messages, myKind, myInstructorId, mySchoolId, schools, i
       const [kind, id] = active.split(':')
       onSend({ senderKind: 'admin', recipientKind: kind, recipientInstructorId: kind === 'instructor' ? id : null, recipientSchoolId: kind === 'school' ? id : null, body: draft.trim() })
     } else {
-      // Non-admin senders always message KADA admin — no existing thread required,
+      // Non-admin senders always message KADA admin ,  no existing thread required,
       // otherwise a school's/instructor's first ever message is silently dropped.
       onSend({ senderKind: myKind, senderInstructorId: myInstructorId || null, senderSchoolId: mySchoolId || null, recipientKind: 'admin', body: draft.trim() })
     }
@@ -548,8 +548,8 @@ function JobBoardView({ jobs, bookings, schools, instructors, isAdmin, onClaim, 
 
 
 
-function AuthScreen({ onAuthenticated }) {
-  const [mode, setMode] = useState('signin')
+function AuthScreen({ onAuthenticated, requirePasswordSetup = false }) {
+  const [mode, setMode] = useState(requirePasswordSetup ? 'setup' : 'signin')
   const [role, setRole] = useState('school')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -563,7 +563,11 @@ function AuthScreen({ onAuthenticated }) {
     setBusy(true)
     setMessage('')
 
-    if (mode === 'signin') {
+    if (mode === 'setup') {
+      const { error } = await supabase.auth.updateUser({ password })
+      if (error) setMessage(error.message)
+      else onAuthenticated()
+    } else if (mode === 'signin') {
       const { error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) setMessage(error.message)
       else onAuthenticated()
@@ -586,8 +590,8 @@ function AuthScreen({ onAuthenticated }) {
     <main style={{ minHeight: '100vh', background: cream, display: 'grid', placeItems: 'center', padding: 24, fontFamily: sans }}>
       <div style={{ width: '100%', maxWidth: 430 }}>
         <p style={{ color: gold, fontSize: 11, letterSpacing: '0.18em', textTransform: 'uppercase', fontWeight: 700 }}>King's Ark Dance Academy</p>
-        <h1 style={{ fontFamily: serif, color: emerald, fontSize: 32, fontWeight: 400, margin: '6px 0 8px' }}>{mode === 'signin' ? 'Welcome back.' : 'Create an account.'}</h1>
-        <p style={{ color: muted, fontSize: 14, marginBottom: 24 }}>{mode === 'signin' ? 'Sign in to access your KADA workspace.' : 'Create a school or instructor account.'}</p>
+        <h1 style={{ fontFamily: serif, color: emerald, fontSize: 32, fontWeight: 400, margin: '6px 0 8px' }}>{mode === 'setup' ? 'Set your password.' : mode === 'signin' ? 'Welcome back.' : 'Create an account.'}</h1>
+        <p style={{ color: muted, fontSize: 14, marginBottom: 24 }}>{mode === 'setup' ? 'Choose a password to finish setting up your account.' : mode === 'signin' ? 'Sign in to access your KADA workspace.' : 'Create a school or instructor account.'}</p>
         <Card style={{ padding: 22 }}>
           <form onSubmit={submit}>
             {mode === 'signup' && <>
@@ -595,12 +599,12 @@ function AuthScreen({ onAuthenticated }) {
               <Field label="Full name"><input style={inputStyle} value={fullName} onChange={(event) => setFullName(event.target.value)} required /></Field>
               {role === 'school' && <Field label="School name"><input style={inputStyle} value={schoolName} onChange={(event) => setSchoolName(event.target.value)} required /></Field>}
             </>}
-            <Field label="Email"><input type="email" style={inputStyle} value={email} onChange={(event) => setEmail(event.target.value)} required /></Field>
-            <Field label="Password"><input type="password" minLength="8" style={inputStyle} value={password} onChange={(event) => setPassword(event.target.value)} required /></Field>
-            <Button type="submit" disabled={busy}>{busy ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}</Button>
+            {mode !== 'setup' && <Field label="Email"><input type="email" style={inputStyle} value={email} onChange={(event) => setEmail(event.target.value)} required /></Field>}
+            <Field label={mode === 'setup' ? 'New password' : 'Password'}><input type="password" minLength="8" style={inputStyle} value={password} onChange={(event) => setPassword(event.target.value)} required /></Field>
+            <Button type="submit" disabled={busy}>{busy ? 'Please wait…' : mode === 'setup' ? 'Save password and continue' : mode === 'signin' ? 'Sign in' : 'Create account'}</Button>
           </form>
           {message && <p style={{ fontSize: 13, lineHeight: 1.5, color: message.includes('created') ? okGreen : warn, margin: '16px 0 0' }}>{message}</p>}
-          <button type="button" onClick={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setMessage('') }} style={{ marginTop: 18, background: 'none', border: 'none', padding: 0, color: emerald, fontFamily: sans, fontSize: 13, cursor: 'pointer' }}>{mode === 'signin' ? 'Create a new account' : 'Already have an account? Sign in'}</button>
+          {mode !== 'setup' && <button type="button" onClick={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setMessage('') }} style={{ marginTop: 18, background: 'none', border: 'none', padding: 0, color: emerald, fontFamily: sans, fontSize: 13, cursor: 'pointer' }}>{mode === 'signin' ? 'Create a new account' : 'Already have an account? Sign in'}</button>}
         </Card>
       </div>
     </main>
@@ -614,6 +618,7 @@ function App() {
   const [session, setSession] = useState(null)
   const [profile, setProfile] = useState(null)
   const [authReady, setAuthReady] = useState(!supabaseReady)
+  const [needsPasswordSetup, setNeedsPasswordSetup] = useState(false)
   const [bookings, setBookings] = useState(defaultBookings)
   const [schools, setSchools] = useState(defaultSchools)
   const [instructors, setInstructors] = useState(defaultInstructors)
@@ -696,9 +701,9 @@ function App() {
   }, [publicMenuOpen])
 
   // Public pages live at #event/<id> (ticketed events) and #privacy / #terms /
-  // #accessibility (legal pages) — all reachable by guests without sign-in.
+  // #accessibility (legal pages) ,  all reachable by guests without sign-in.
   // Supabase auth links (invite / password setup) arrive as
-  // #access_token=…&type=recovery — the client signs in from the hash itself.
+  // #access_token=…&type=recovery ,  the client signs in from the hash itself.
   useEffect(() => {
     const onHashChange = () => {
       const hash = window.location.hash || ''
@@ -710,7 +715,7 @@ function App() {
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
 
-  // Class booking success — Stripe redirects back to ?payment=success&session_id=…
+  // Class booking success ,  Stripe redirects back to ?payment=success&session_id=…
   // Poll for the webhook-recorded booking (the webhook can lag a second or two),
   // then show an on-screen confirmation; a confirmation email arrives separately.
   useEffect(() => {
@@ -743,9 +748,11 @@ function App() {
 
     let mounted = true
     const loadSession = async () => {
-      // Invite / password-setup links arrive with the token in the URL hash —
+      // Invite / password-setup links arrive with the token in the URL hash , 
       // give the Supabase client a moment to turn it into a real session.
-      const authHash = (window.location.hash || '').includes('access_token=')
+      const rawHash = window.location.hash || ''
+      const authHash = rawHash.includes('access_token=')
+      const isRecoveryLink = rawHash.includes('type=recovery') || rawHash.includes('type=invite')
       const { data } = await supabase.auth.getSession()
       let sessionNow = data.session
       if (!sessionNow && authHash) {
@@ -758,8 +765,13 @@ function App() {
       setAuthReady(true)
       if (authHash) {
         window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${sessionNow ? '#ops' : ''}`)
-        if (sessionNow) { setView('ops'); return }
-        setToast('That invite link has expired — ask your admin to resend it.')
+        if (sessionNow) {
+          // Recovery/invite links mean the person must set a password first.
+          if (isRecoveryLink) setNeedsPasswordSetup(true)
+          setView('ops')
+          return
+        }
+        setToast('That invite link has expired. Ask your admin to resend it.')
         return
       }
       // Deep link into a specific dashboard tab/record, e.g. #ops/bookings/book-123 from an admin email.
@@ -779,6 +791,7 @@ function App() {
       setSession(nextSession)
       if (!nextSession) {
         setProfile(null)
+        setNeedsPasswordSetup(false)
         setView('site')
         window.history.replaceState(null, '', window.location.pathname + window.location.search)
       }
@@ -867,7 +880,7 @@ function App() {
     return () => { mounted = false }
   }, [view])
 
-  // Homepage section layout (visible + order) — read by guests and by the Site Layout admin page.
+  // Homepage section layout (visible + order) ,  read by guests and by the Site Layout admin page.
   useEffect(() => {
     if (!supabaseReady) return undefined
     let mounted = true
@@ -879,7 +892,7 @@ function App() {
     return () => { mounted = false }
   }, [view])
 
-  // Homepage copy/team/contact/prices — key/value rows from site_content,
+  // Homepage copy/team/contact/prices ,  key/value rows from site_content,
   // editable from Operations > Site > Site content. Public read, admin write.
   useEffect(() => {
     if (!supabaseReady) return undefined
@@ -897,7 +910,7 @@ function App() {
     applySiteFavicon(siteContent.branding?.logoUrl)
   }, [siteContent.branding?.logoUrl])
 
-  // Weekly class schedule — guests/parents get bookable (active) sessions for the
+  // Weekly class schedule ,  guests/parents get bookable (active) sessions for the
   // public booking form; admins get every row for the Class schedule page.
   useEffect(() => {
     if (!supabaseReady) return undefined
@@ -980,7 +993,7 @@ function App() {
   }, [bookings])
 
   const stats = useMemo(() => {
-    // Abandoned checkouts sit at paymentStatus 'pending' — they are not real
+    // Abandoned checkouts sit at paymentStatus 'pending' ,  they are not real
     // bookings, so keep them out of the dashboard numbers entirely.
     const live = bookings.filter((booking) => booking.status !== 'Cancelled' && booking.paymentStatus !== 'pending')
     const upcomingCount = live.length
@@ -1026,7 +1039,7 @@ function App() {
     }
   }
 
-  // Parent dashboard checkout — same endpoint, but the form data comes from the
+  // Parent dashboard checkout ,  same endpoint, but the form data comes from the
   // parent portal rather than the public homepage modal.
   const startParentCheckout = async (booking) => {
     setCheckoutBusy(true)
@@ -1056,7 +1069,7 @@ function App() {
     const priceData = buildPrice(schoolRequest)
     const needed = priceData.staffNeeded
     // RLS hides the instructors table from school accounts, so only staff roles
-    // can see real availability — schools always see 0 available here.
+    // can see real availability ,  schools always see 0 available here.
     const canSeeInstructors = profile?.role === 'admin' || profile?.role === 'instructor'
     const available = canSeeInstructors
       ? instructors.filter((instructor) => {
@@ -1080,7 +1093,7 @@ function App() {
       canBook: fits !== false,
     })
 
-    // Every enquiry is filed — even when staffing needs a callback — so the
+    // Every enquiry is filed ,  even when staffing needs a callback ,  so the
     // request never vanishes and the admin is always notified.
     const bookingId = `book-${Date.now()}`
     const schoolId = profile?.school_id || `school-${Date.now()}`
@@ -1223,7 +1236,7 @@ function App() {
     const { error } = await supabase.from('parent_families').update({ ...changes, updated_at: new Date().toISOString() }).eq('id', family.id)
     if (error) setToast(`Family record could not be saved: ${error.message}`)
   }
-  // Parent portal > Settings — family contact/emergency details plus per-child
+  // Parent portal > Settings ,  family contact/emergency details plus per-child
   // welfare info. Routed through the server so family ownership is verified.
   const saveParentSettings = async ({ family, students: studentUpdates }) => {
     const response = await fetch('/api/parent/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` }, body: JSON.stringify({ family, students: studentUpdates }) })
@@ -1420,6 +1433,7 @@ function App() {
   if (eventPageId) return <Suspense fallback={routeFallback}><EventTicketPage eventId={eventPageId} onBack={() => { window.location.hash = '' }} /></Suspense>
   if (legalPageId) return <Suspense fallback={routeFallback}><LegalPage page={legalPageId} onBack={() => { window.location.hash = '' }} /></Suspense>
   if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
+  if (view === 'ops' && session && needsPasswordSetup) return <AuthScreen requirePasswordSetup onAuthenticated={() => { setNeedsPasswordSetup(false); setView('ops') }} />
   if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
 
   return (
@@ -1586,7 +1600,7 @@ function App() {
               <p style={{ fontSize: 16, margin: '0 0 10px' }}><strong>You're booked in! 🎉</strong></p>
               <p style={{ margin: '0 0 12px', fontSize: 14 }}>
                 <strong>Class:</strong> {classBookingSuccess.className}<br />
-                <strong>Date:</strong> {classBookingSuccess.classDate ? new Date(`${classBookingSuccess.classDate}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : 'To be confirmed'}{classBookingSuccess.startTime ? ` · ${classBookingSuccess.startTime}${classBookingSuccess.endTime ? `–${classBookingSuccess.endTime}` : ''}` : ''}<br />
+                <strong>Date:</strong> {classBookingSuccess.classDate ? new Date(`${classBookingSuccess.classDate}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : 'To be confirmed'}{classBookingSuccess.startTime ? ` · ${classBookingSuccess.startTime}${classBookingSuccess.endTime ? ` to ${classBookingSuccess.endTime}` : ''}` : ''}<br />
                 <strong>Children:</strong> {classBookingSuccess.students.length ? classBookingSuccess.students.join(', ') : 'Not listed'}<br />
                 <strong>Plan:</strong> {classBookingSuccess.planType === 'monthly_membership' ? 'Monthly Membership (£25/month)' : 'Day Pass (£10)'}<br />
                 <strong>Total paid:</strong> £{(classBookingSuccess.pricePence / 100).toFixed(2)}

@@ -58,25 +58,25 @@ Confirmed school bookings are sent through Resend by `server/index.js`. Add `RES
 
 ## Contacts CRM, team access & settings
 
-Three migrations add the CRM, staff accounts and settings (apply each in Supabase Dashboard > SQL Editor — all idempotent):
+Three migrations add the CRM, staff accounts and settings (apply each in Supabase Dashboard > SQL Editor ,  all idempotent):
 
-- `supabase/migrations/20260921_staff_permissions.sql` — `staff` role + per-area `permissions` on profiles, the `current_user_has_permission()` RLS helper, and staff policies for bookings, students, events, site, sales and messages.
-- `supabase/migrations/20260921_crm_contacts.sql` — the `contacts` table (schools/parents/clients/partners), deduped by email.
-- `supabase/migrations/20260921_settings_and_user_prefs.sql` — admin-only `app_settings`, public `site_content` seeds for social links/branding, and parent-editable family/student welfare columns.
+- `supabase/migrations/20260921_staff_permissions.sql` ,  `staff` role + per-area `permissions` on profiles, the `current_user_has_permission()` RLS helper, and staff policies for bookings, students, events, site, sales and messages.
+- `supabase/migrations/20260921_crm_contacts.sql` ,  the `contacts` table (schools/parents/clients/partners), deduped by email.
+- `supabase/migrations/20260921_settings_and_user_prefs.sql` ,  admin-only `app_settings`, public `site_content` seeds for social links/branding, and parent-editable family/student welfare columns.
 
-**Contacts (Operations > Contacts).** Add contacts manually, import old spreadsheets (`.xlsx`, `.csv`, or paste cells copied from Excel — columns are auto-mapped and existing contacts matched by email, never duplicated), file a pasted email with "Add from email", or export everything to CSV. Website contact-form enquiries are filed automatically by the server.
+**Contacts (Operations > Contacts).** Add contacts manually, import old spreadsheets (`.xlsx`, `.csv`, or paste cells copied from Excel ,  columns are auto-mapped and existing contacts matched by email, never duplicated), file a pasted email with "Add from email", or export everything to CSV. Website contact-form enquiries are filed automatically by the server.
 
-**Email → database.** `POST /api/inbound-email?token=…` files the sender into Contacts. Set `INBOUND_EMAIL_SECRET` (any long random string) in the server environment, then create an automation that POSTs `{ "from": "Name <a@b.com>", "subject": "…", "text": "…" }` whenever mail arrives at your bookings inbox — Power Automate ("When a new email arrives" → HTTP) for Microsoft 365, or a Zapier/Make webhook step for Gmail/Google Workspace. Mailgun Routes can also POST form data directly to the same URL.
+**Email → database.** `POST /api/inbound-email?token=…` files the sender into Contacts. Set `INBOUND_EMAIL_SECRET` (any long random string) in the server environment, then create an automation that POSTs `{ "from": "Name <a@b.com>", "subject": "…", "text": "…" }` whenever mail arrives at your bookings inbox ,  Power Automate ("When a new email arrives" → HTTP) for Microsoft 365, or a Zapier/Make webhook step for Gmail/Google Workspace. Mailgun Routes can also POST form data directly to the same URL.
 
-**Team & access (Operations > Administration > Team & access, admins only).** Invite anyone by email — staff, instructors, parents, schools or admins — from one form. The **Invitation progress** panel tracks each invite through *Invite sent → Accepted → Account created* (a DB trigger watches email confirmations). Staff get a job title and a tick-box list of areas (Bookings & calendar, Contacts, Students & class schedule, Events & ticketing, Messages, Site, Sales), enforced by database RLS. Removing access deletes their sign-in.
+**Team & access (Operations > Administration > Team & access, admins only).** Invite anyone by email ,  staff, instructors, parents, schools or admins ,  from one form. The **Invitation progress** panel tracks each invite through *Invite sent → Accepted → Account created* (a DB trigger watches email confirmations). Staff get a job title and a tick-box list of areas (Bookings & calendar, Contacts, Students & class schedule, Events & ticketing, Messages, Site, Sales), enforced by database RLS. Removing access deletes their sign-in.
 
-**Email marketing (Operations > Administration > Email campaigns).** Design branded emails from 50 ready-made KADA templates (announcements, workshops, classes, events, seasons, community) or ask AI to draft one. Pick an audience from Contacts, then send immediately or schedule — one-off, daily, weekly or monthly. Each recipient gets an individual email with their name merged in (`{{name}}`); sent/failed counts track per campaign. Recipients come from the CRM, so an import or a new website enquiry automatically widens future sends.
+**Email marketing (Operations > Administration > Email campaigns).** Design branded emails from 50 ready-made KADA templates (announcements, workshops, classes, events, seasons, community) or ask AI to draft one. Pick an audience from Contacts, then send immediately or schedule ,  one-off, daily, weekly or monthly. Each recipient gets an individual email with their name merged in (`{{name}}`); sent/failed counts track per campaign. Recipients come from the CRM, so an import or a new website enquiry automatically widens future sends.
 
 **AI email design.** Set `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_MODEL`, default `claude-haiku-4-5-20251001`) in the server environment. The "Design with AI" button in Email campaigns then drafts a fully-branded, editable email from a plain-English description.
 
 **Staying on the page.** Operations pages persist in the URL hash (`#ops/<tab>`), so refreshing the browser keeps you on the same dashboard page instead of returning to the homepage.
 
-**Settings (Operations > Administration > Settings).** Edit the business address/phone/email (used on the public site and invoices), swap the header logo by URL, manage footer social links, and choose where admin alert emails go (overrides `ADMIN_NOTIFICATION_EMAIL`) with per-type on/off switches — all live immediately, no redeploy.
+**Settings (Operations > Administration > Settings).** Edit the business address/phone/email (used on the public site and invoices), swap the header logo by URL, manage footer social links, and choose where admin alert emails go (overrides `ADMIN_NOTIFICATION_EMAIL`) with per-type on/off switches ,  all live immediately, no redeploy.
 
 **Parent portal > Settings.** Parents edit their own contact details, emergency contact, communication preferences, and each child's dietary requirements, allergies/medical notes and photo consent. Saved via `POST /api/parent/settings`, which verifies family ownership server-side.
 
@@ -89,4 +89,4 @@ npm run build
 
 ## Resetting test data
 
-Operations > Dashboard > "Review & reset test data" deletes all bookings, students, family accounts, and ticket orders after a typed confirmation. The endpoint only runs when `ALLOW_TEST_DATA_RESET=true` is set in the server environment — keep it set locally and unset (or set it temporarily) on production.
+Operations > Dashboard > "Review & reset test data" deletes all bookings, students, family accounts, and ticket orders after a typed confirmation. The endpoint only runs when `ALLOW_TEST_DATA_RESET=true` is set in the server environment ,  keep it set locally and unset (or set it temporarily) on production.

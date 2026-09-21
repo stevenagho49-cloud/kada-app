@@ -9,7 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const app = express()
-// Render (and most hosts) sit behind a single proxy — trust one hop so req.ip
+// Render (and most hosts) sit behind a single proxy ,  trust one hop so req.ip
 // is the real client IP, which the rate limiters below depend on.
 app.set('trust proxy', 1)
 const port = Number(process.env.PORT || 4242)
@@ -26,12 +26,12 @@ const allowedOrigins = (process.env.CLIENT_URLS || process.env.CLIENT_URL || 'ht
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) return callback(null, true) // same-origin / server-to-server / whitelisted
-    return callback(null, false) // no CORS headers for other origins — cross-origin browser reads are blocked
+    return callback(null, false) // no CORS headers for other origins ,  cross-origin browser reads are blocked
   },
   credentials: true,
 }))
 
-// Security headers — small, standard hardening. Render terminates TLS in front
+// Security headers ,  small, standard hardening. Render terminates TLS in front
 // of us; HSTS tells browsers to keep using it. frame-ancestors blocks clickjacking.
 app.use((_request, response, next) => {
   response.set({
@@ -45,7 +45,7 @@ app.use((_request, response, next) => {
 })
 
 /* ------------------------------------------------------------------ */
-/* Email via Resend — ticket confirmations, reminders, and admin       */
+/* Email via Resend ,  ticket confirmations, reminders, and admin       */
 /* notifications. No-ops (returns {sent:false}) when not configured.   */
 /* ------------------------------------------------------------------ */
 const EMAIL_FROM = process.env.INVOICE_FROM_EMAIL || "King's Ark Dance Academy <onboarding@resend.dev>"
@@ -84,7 +84,7 @@ async function sendEmail({ to, subject, html, attachments = [] }) {
 function money(pence) {
   return `£${(Number(pence || 0) / 100).toFixed(2)}`
 }
-/* Parse an email From value — handles 'Name <a@b.com>' and bare addresses. */
+/* Parse an email From value ,  handles 'Name <a@b.com>' and bare addresses. */
 function parseSender(raw) {
   const angle = String(raw || '').match(/^(.*?)\s*<([^>]+)>/)
   const bare = String(raw || '').match(/[\w.+-]+@[\w-]+\.[\w.]+/)
@@ -121,7 +121,7 @@ function buildIcs({ title, date, startTime, endTime, location, description, url 
 }
 
 /* Notification routing is editable from Operations > Administration >       */
-/* Settings (app_settings 'notifications') — the server re-reads it at most   */
+/* Settings (app_settings 'notifications') ,  the server re-reads it at most   */
 /* once a minute. Settings can retarget the alert inbox and switch off        */
 /* individual alert types; environment variables remain the fallback.         */
 let notificationSettingsCache = { at: 0, value: null }
@@ -192,7 +192,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 
       // Send confirmation email exactly once per order. Stripe redelivers webhook
       // events, so we atomically claim the order by setting confirmation_sent_at
-      // only where it is still null — a redelivery finds it already set and skips.
+      // only where it is still null ,  a redelivery finds it already set and skips.
       const { data: claimed } = await supabase
         .from('event_ticket_orders')
         .update({ confirmation_sent_at: new Date().toISOString() })
@@ -260,7 +260,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     if (!error) {
       await notifyAdmin('New paid class booking', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New paid class booking</h2><p><strong>Parent:</strong> ${metadata.parent_name} (${session.customer_details?.email || metadata.parent_email})<br><strong>Class:</strong> ${metadata.class_name} (${planType})<br><strong>Date:</strong> ${metadata.class_date}<br><strong>Amount:</strong> ${money(metadata.amount_pence)}<br><strong>Children:</strong> ${studentList.length}</p>${dashboardButton('bookings', 'View booking', metadata.booking_id)}</div>`, 'new-booking')
 
-      // Parent confirmation email, exactly once per booking — same idempotency
+      // Parent confirmation email, exactly once per booking ,  same idempotency
       // pattern as event tickets: atomically claim the booking by setting
       // confirmation_sent_at only where still null; a redelivery skips.
       const { data: claimed } = await supabase
@@ -277,7 +277,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
         ])
         const studentNames = (bookingStudents || []).map((student) => student.name).filter(Boolean)
         const planLabel = planType === 'monthly_membership' ? 'Monthly Membership (£25/month)' : 'Day Pass (£10)'
-        const classTime = classSession?.start_time ? ` · ${String(classSession.start_time).slice(0, 5)}${classSession.end_time ? `–${String(classSession.end_time).slice(0, 5)}` : ''}` : ''
+        const classTime = classSession?.start_time ? ` · ${String(classSession.start_time).slice(0, 5)}${classSession.end_time ? ` to ${String(classSession.end_time).slice(0, 5)}` : ''}` : ''
         const classesUrl = `${PUBLIC_BASE_URL}#classes`
         const ics = metadata.class_date ? buildIcs({ title: `${metadata.class_name} at King's Ark Dance Academy`, date: metadata.class_date, startTime: classSession?.start_time || '10:00', endTime: classSession?.end_time || classSession?.start_time || '11:00', location: "King's Ark Dance Academy, 395 College Rd, Birmingham B44 0HF", description: classSession?.description || '', url: classesUrl }) : ''
         const emailResult = await sendEmail({
@@ -299,7 +299,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     const subscription = event.data.object
     const membershipStatus = event.type.endsWith('deleted') ? 'cancelled' : ['active', 'trialing'].includes(subscription.status) ? 'active' : 'inactive'
     await supabase.from('parent_families').update({ membership_status: membershipStatus, updated_at: new Date().toISOString() }).eq('stripe_subscription_id', subscription.id)
-    // Keep the children's roster status in step with the subscription — a cancelled
+    // Keep the children's roster status in step with the subscription ,  a cancelled
     // membership must not leave students showing as active in Operations.
     if (event.type === 'customer.subscription.deleted') {
       const { data: cancelledFamilies } = await supabase.from('parent_families').select('id').eq('stripe_subscription_id', subscription.id)
@@ -324,7 +324,7 @@ app.use(['/api/stripe/create-checkout-session', '/api/stripe/create-event-checko
 app.use(['/api/stripe/event-order', '/api/stripe/class-booking'], lookupLimiter)
 app.use('/api/public/contact', contactLimiter)
 
-// Health check for Render's uptime monitor — confirms the server is up and can
+// Health check for Render's uptime monitor ,  confirms the server is up and can
 // reach Supabase (the critical dependency for auth, data, and ticketing).
 app.get('/api/health', async (_request, response) => {
   const status = { ok: true, service: 'kada-app', timestamp: new Date().toISOString(), checks: {} }
@@ -346,9 +346,9 @@ app.get('/api/health', async (_request, response) => {
   response.status(status.ok ? 200 : 503).json(status)
 })
 
-// Admin notification relay — the dashboard calls this after client-side actions that
+// Admin notification relay ,  the dashboard calls this after client-side actions that
 // need an admin email (job claim pending review, DBS uploaded, school enquiry received).
-// Public contact form — no account needed. Validates + relays to the admin inbox.
+// Public contact form ,  no account needed. Validates + relays to the admin inbox.
 // Rate limited (5/hour/IP) since it is unauthenticated.
 app.post('/api/public/contact', async (request, response) => {
   const { name, email, topic, message } = request.body || {}
@@ -366,7 +366,7 @@ app.post('/api/public/contact', async (request, response) => {
     `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New website message</h2><p><strong>From:</strong> ${esc(cleanName)} &lt;${esc(cleanEmail)}&gt;<br><strong>Topic:</strong> ${topicLabel}</p><p style="white-space:pre-wrap">${esc(cleanMessage)}</p><p style="color:#767066;font-size:12px">Reply directly to this email to respond to the sender.</p></div>`,
     'contact',
   )
-  // File the sender in the CRM — matched by email, never duplicated. Filing
+  // File the sender in the CRM ,  matched by email, never duplicated. Filing
   // must never break the contact form, so failures are swallowed.
   if (supabase) {
     const note = `Website message (${topicLabel}): ${cleanMessage.slice(0, 200)}`
@@ -426,7 +426,7 @@ app.post('/api/instructor/mark-done', async (request, response) => {
   if (error) return response.status(500).json({ error: 'Session could not be marked done.' })
   const { data: doneBooking } = await supabase.from('bookings').select('date, session_type, schools(name)').eq('id', bookingId).maybeSingle()
   const { data: instructor } = await supabase.from('instructors').select('name').eq('id', profile.instructor_id).maybeSingle()
-  await notifyAdmin('Session marked done — payment review needed', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Session awaiting payment review</h2><p><strong>Instructor:</strong> ${instructor?.name || profile.instructor_id}<br><strong>Session:</strong> ${doneBooking?.session_type || ''}<br><strong>School:</strong> ${doneBooking?.schools?.name || '—'}<br><strong>Date:</strong> ${doneBooking?.date || ''}</p>${dashboardButton('bookings', 'Review session', bookingId)}</div>`, 'jobs')
+  await notifyAdmin('Session marked done ,  payment review needed', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Session awaiting payment review</h2><p><strong>Instructor:</strong> ${instructor?.name || profile.instructor_id}<br><strong>Session:</strong> ${doneBooking?.session_type || ''}<br><strong>School:</strong> ${doneBooking?.schools?.name || ', '}<br><strong>Date:</strong> ${doneBooking?.date || ''}</p>${dashboardButton('bookings', 'Review session', bookingId)}</div>`, 'jobs')
   response.json({ completed: true })
 })
 
@@ -486,7 +486,7 @@ app.post('/api/admin/invoice-permissions', async (request, response) => {
 })
 
 /* ------------------------------------------------------------------ */
-/* Team management — admins list, invite, update and remove staff      */
+/* Team management ,  admins list, invite, update and remove staff      */
 /* accounts. Roles/permissions/job titles live on profiles; emails     */
 /* come from auth.users (service role only).                           */
 /* ------------------------------------------------------------------ */
@@ -523,13 +523,13 @@ const INVITE_ROLE_INTROS = {
 }
 const escHtml = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
-/* Branded invite email with the actual set-password link inside — one email, */
+/* Branded invite email with the actual set-password link inside ,  one email, */
 /* from KADA, through Resend. setupUrl is the magic recovery link.            */
 async function sendInviteEmail({ email, name, role, setupUrl }) {
   return sendEmail({
     to: email,
     subject: "You're invited to King's Ark Dance Academy",
-    html: `<div style="font-family:Arial,sans-serif;line-height:1.6;max-width:560px;background:#f6f3ea;padding:24px 16px"><div style="background:#fffdf8;border:1px solid #e4ddc9;border-radius:14px;overflow:hidden"><div style="height:6px;background:linear-gradient(90deg,#0b3d2e,#c9a227)"></div><div style="padding:26px 26px 8px"><h2 style="color:#0b3d2e;font-family:Georgia,serif;font-weight:500;margin:0 0 12px">Welcome to KADA, ${escHtml(name)}.</h2><p style="margin:0 0 14px">You've been invited to join King's Ark Dance Academy as <strong>${escHtml(role)}</strong> — you'll be able to ${INVITE_ROLE_INTROS[role]}.</p><p style="margin:0 0 14px"><strong>Step 1:</strong> set your password using the secure button below (this link expires in 24 hours).</p><p style="margin:18px 0"><a href="${setupUrl}" style="background:#0b3d2e;color:#fffdf8;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Set my password →</a></p><p style="margin:0 0 14px"><strong>Step 2:</strong> sign in any time at <a href="${APP_URL}">${APP_URL}</a> → Operations.</p><p style="color:#767066;font-size:12px;margin:16px 0 0">If the button doesn't work, copy this link into your browser:<br><span style="word-break:break-all">${setupUrl}</span></p><p style="color:#767066;font-size:12px">If you weren't expecting this invite, you can ignore it.</p></div></div></div>`,
+    html: `<div style="font-family:Arial,sans-serif;line-height:1.6;max-width:560px;background:#f6f3ea;padding:24px 16px"><div style="background:#fffdf8;border:1px solid #e4ddc9;border-radius:14px;overflow:hidden"><div style="height:6px;background:linear-gradient(90deg,#0b3d2e,#c9a227)"></div><div style="padding:26px 26px 8px"><h2 style="color:#0b3d2e;font-family:Georgia,serif;font-weight:500;margin:0 0 12px">Welcome to KADA, ${escHtml(name)}.</h2><p style="margin:0 0 14px">You've been invited to join King's Ark Dance Academy as <strong>${escHtml(role)}</strong> ,  you'll be able to ${INVITE_ROLE_INTROS[role]}.</p><p style="margin:0 0 14px"><strong>Step 1:</strong> set your password using the secure button below (this link expires in 24 hours).</p><p style="margin:18px 0"><a href="${setupUrl}" style="background:#0b3d2e;color:#fffdf8;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Set my password →</a></p><p style="margin:0 0 14px"><strong>Step 2:</strong> sign in any time at <a href="${APP_URL}">${APP_URL}</a> → Operations.</p><p style="color:#767066;font-size:12px;margin:16px 0 0">If the button doesn't work, copy this link into your browser:<br><span style="word-break:break-all">${setupUrl}</span></p><p style="color:#767066;font-size:12px">If you weren't expecting this invite, you can ignore it.</p></div></div></div>`,
   })
 }
 
@@ -543,7 +543,7 @@ app.post('/api/admin/team/invite', async (request, response) => {
   if (!cleanName || !/.+@.+\..+/.test(cleanEmail)) return response.status(400).json({ error: 'A name and a valid email are required.' })
 
   // Find or create the account. email_confirm:true + NO Supabase invite email
-  // — we send our own branded one with a working setup link instead.
+  // ,  we send our own branded one with a working setup link instead.
   let target = (await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 })).data?.users?.find((item) => item.email?.toLowerCase() === cleanEmail)
   const alreadyRegistered = Boolean(target && target.last_sign_in_at)
   if (!target) {
@@ -552,11 +552,14 @@ app.post('/api/admin/team/invite', async (request, response) => {
     target = created.user
   }
 
-  // Real set-password link (Supabase Auth must allow kingsarkdance.com as a
-  // redirect URL — see Site URL / Redirect URLs in the Auth settings).
-  const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({ type: 'recovery', email: cleanEmail, options: { redirectTo: `${APP_URL}/#ops` } })
-  if (linkError || !linkData?.properties?.action_link) return response.status(502).json({ error: `Setup link could not be generated: ${linkError?.message || 'unknown error'}` })
-  const emailResult = await sendInviteEmail({ email: cleanEmail, name: cleanName, role: cleanRole, setupUrl: linkData.properties.action_link })
+  // Build the set-password link ourselves: same domain as the app, no
+  // dependence on Supabase's Site URL (which produced the localhost:3000
+  // otp_expired redirect). The hash-token form is consumed client-side.
+  const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({ type: 'recovery', email: cleanEmail })
+  const tokenHash = linkData?.properties?.hashed_token
+  if (linkError || !tokenHash) return response.status(502).json({ error: `Setup link could not be generated: ${linkError?.message || 'unknown error'}` })
+  const setupUrl = `${APP_URL}/#access_token=${tokenHash}&type=recovery`
+  const emailResult = await sendInviteEmail({ email: cleanEmail, name: cleanName, role: cleanRole, setupUrl })
   if (!emailResult.sent) return response.status(502).json({ error: `Invite email could not be sent: ${emailResult.reason || 'email not configured'}` })
 
   // Sync the profile now for existing accounts; the trigger handles new ones.
@@ -616,7 +619,7 @@ app.post('/api/inbound-email', express.urlencoded({ extended: true }), async (re
   const sender = parseSender(rawFrom)
   if (!sender.email) return response.status(400).json({ error: 'No sender email address found in the payload.' })
   const name = (sender.name || sender.email.split('@')[0].replace(/[._-]+/g, ' ')).slice(0, 120)
-  const note = [`Email: ${subject || '(no subject)'}`, snippet].filter(Boolean).join(' — ')
+  const note = [`Email: ${subject || '(no subject)'}`, snippet].filter(Boolean).join(' ,  ')
   const now = new Date().toISOString()
   const { data: existing } = await supabase.from('contacts').select('id,notes').eq('email', sender.email).maybeSingle()
   if (existing) {
@@ -629,7 +632,7 @@ app.post('/api/inbound-email', express.urlencoded({ extended: true }), async (re
 })
 
 /* ------------------------------------------------------------------ */
-/* Parent portal settings — parents update their own family details    */
+/* Parent portal settings ,  parents update their own family details    */
 /* and their children's welfare notes. Ownership verified server-side. */
 /* ------------------------------------------------------------------ */
 app.post('/api/parent/settings', async (request, response) => {
@@ -638,7 +641,7 @@ app.post('/api/parent/settings', async (request, response) => {
   const { data: families, error: familyError } = await supabase.from('parent_families').select('*').or(`owner_user_id.eq.${user.id},guardian_email.eq.${user.email}`)
   if (familyError) return response.status(500).json({ error: 'Family data could not be loaded.' })
   const family = (families || []).find((item) => item.owner_user_id === user.id) || families?.[0]
-  if (!family) return response.status(404).json({ error: 'No family record found — complete a booking first.' })
+  if (!family) return response.status(404).json({ error: 'No family record found ,  complete a booking first.' })
   const { family: familyUpdates = {}, students: studentUpdates = [] } = request.body || {}
   const cleanText = (value, max) => (value === undefined ? undefined : String(value || '').trim().slice(0, max))
   const update = {}
@@ -681,16 +684,17 @@ app.post('/api/admin/invitations/:id/resend', async (request, response) => {
   if (!user) return
   const { data: invite } = await supabase.from('invitations').select('*').eq('id', request.params.id).maybeSingle()
   if (!invite) return response.status(404).json({ error: 'Invitation not found.' })
-  const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({ type: 'recovery', email: invite.email, options: { redirectTo: `${APP_URL}/#ops` } })
-  if (linkError || !linkData?.properties?.action_link) return response.status(502).json({ error: `Setup link could not be generated: ${linkError?.message || 'unknown error'}` })
-  const emailResult = await sendInviteEmail({ email: invite.email, name: invite.full_name || invite.email, role: invite.role, setupUrl: linkData.properties.action_link })
+  const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({ type: 'recovery', email: invite.email })
+  const tokenHash = linkData?.properties?.hashed_token
+  if (linkError || !tokenHash) return response.status(502).json({ error: `Setup link could not be generated: ${linkError?.message || 'unknown error'}` })
+  const emailResult = await sendInviteEmail({ email: invite.email, name: invite.full_name || invite.email, role: invite.role, setupUrl: `${APP_URL}/#access_token=${tokenHash}&type=recovery` })
   if (!emailResult.sent) return response.status(502).json({ error: `Invite email could not be sent: ${emailResult.reason || 'email not configured'}` })
   await supabase.from('invitations').update({ status: 'sent', accepted_at: null }).eq('id', invite.id)
   response.json({ resent: true })
 })
 
 /* ------------------------------------------------------------------ */
-/* Email campaigns — design, audience, schedule (one-off or recurring). */
+/* Email campaigns ,  design, audience, schedule (one-off or recurring). */
 /* Each send creates individual campaign_sends rows so every recipient   */
 /* gets their own Resend email (proper deliverability, no To: lists).    */
 /* ------------------------------------------------------------------ */
@@ -788,12 +792,12 @@ app.post('/api/admin/campaigns/:id/delete', async (request, response) => {
   response.json({ deleted: true })
 })
 
-/* AI email design — Anthropic (Claude). Set ANTHROPIC_API_KEY in the server  */
+/* AI email design ,  Anthropic (Claude). Set ANTHROPIC_API_KEY in the server  */
 /* environment. Returns a ready-to-edit HTML block using the brand palette.    */
 app.post('/api/admin/campaigns/ai-design', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
-  if (!process.env.ANTHROPIC_API_KEY) return response.status(503).json({ error: 'AI design is not configured — set ANTHROPIC_API_KEY on the server.' })
+  if (!process.env.ANTHROPIC_API_KEY) return response.status(503).json({ error: 'AI design is not configured ,  set ANTHROPIC_API_KEY on the server.' })
   const { prompt = '', tone = 'warm' } = request.body || {}
   if (!prompt.trim()) return response.status(400).json({ error: 'Describe the email you want.' })
   try {
@@ -803,7 +807,7 @@ app.post('/api/admin/campaigns/ai-design', async (request, response) => {
       body: JSON.stringify({
         model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
         max_tokens: 1500,
-        system: "You design marketing emails for King's Ark Dance Academy (KADA), a Gospel Afrobeats dance school for children aged 5-16 in Birmingham. Brand colours: emerald #0b3d2e, gold #c9a227, cream #f6f3ea. Return ONLY a valid JSON object (no markdown fences, no commentary) with keys: name (campaign name), subject (subject line, under 60 chars), previewText (inbox preview, under 90 chars), bodyHtml (a single <div> of inline-styled email-safe HTML — table-free, no <html>/<body>/<style> tags, inline styles only, brand colours, one clear call-to-action button linking to https://kingsarkdance.com). Use {{name}} where the recipient's first name should go.",
+        system: "You design marketing emails for King's Ark Dance Academy (KADA), a Gospel Afrobeats dance school for children aged 5-16 in Birmingham. Brand colours: emerald #0b3d2e, gold #c9a227, cream #f6f3ea. Return ONLY a valid JSON object (no markdown fences, no commentary) with keys: name (campaign name), subject (subject line, under 60 chars), previewText (inbox preview, under 90 chars), bodyHtml (a single <div> of inline-styled email-safe HTML ,  table-free, no <html>/<body>/<style> tags, inline styles only, brand colours, one clear call-to-action button linking to https://kingsarkdance.com). Use {{name}} where the recipient's first name should go.",
         messages: [{ role: 'user', content: `Design a ${tone} marketing email: ${prompt}` }],
       }),
     })
@@ -988,7 +992,7 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
   return Buffer.concat(chunks)
 }
 
-// Current date and wall-clock minutes in Europe/London — class times are UK local.
+// Current date and wall-clock minutes in Europe/London ,  class times are UK local.
 function londonNow() {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date())
   const get = (type) => parts.find((part) => part.type === type)?.value || ''
@@ -1023,7 +1027,7 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
     if (endTime) {
       const [endHour, endMinute] = String(endTime).split(':').map(Number)
       if (londonNow().minutes >= (endHour || 0) * 60 + (endMinute || 0)) {
-        return response.status(400).json({ error: "Today's class has already finished — please pick a future class date." })
+        return response.status(400).json({ error: "Today's class has already finished ,  please pick a future class date." })
       }
     }
   }
@@ -1050,7 +1054,7 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   if (bookingError) return response.status(500).json({ error: 'Booking record could not be created.' })
   const { error: studentsError } = await supabase.from('students').insert(students.map((student, index) => ({ id: `student-${bookingId}-${index + 1}`, booking_id: bookingId, family_id: familyId, parent_name: parentName, parent_email: parentEmail, name: student.name, date_of_birth: student.dateOfBirth, class_name: className, term: classDate, membership_status: 'inactive' })))
   if (studentsError) return response.status(500).json({ error: 'Student records could not be created.' })
-  // Return to the host the parent actually used (same pattern as event checkout) —
+  // Return to the host the parent actually used (same pattern as event checkout) , 
   // so dev/localhost sessions redirect back to dev, not to the live site.
   const requestOrigin = request.headers.origin || request.headers.referer?.replace(/\/[^/]*$/, '') || ''
   const clientUrl = requestOrigin.startsWith('http') ? requestOrigin : (process.env.CLIENT_URL || 'http://localhost:5173')
@@ -1067,7 +1071,7 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
 })
 
 // ------------------------------------------------------------------
-// Ticketed events — separate from the Day Pass/Membership flow above.
+// Ticketed events ,  separate from the Day Pass/Membership flow above.
 // Line items are built ad-hoc per ticket tier (price_data); the existing
 // Stripe products/prices are never touched.
 // ------------------------------------------------------------------
@@ -1210,7 +1214,7 @@ app.post('/api/parent/cancel-subscription', async (request, response) => {
 })
 
 // Admin subscription management from the Operations > Sales > Subscriptions table.
-// Actions: pause (void collection), resume, cancel — all applied to the real Stripe
+// Actions: pause (void collection), resume, cancel ,  all applied to the real Stripe
 // subscription first, then mirrored onto parent_families.
 app.post('/api/admin/subscriptions/:familyId/:action', async (request, response) => {
   if (!stripe || !supabase) return response.status(503).json({ error: 'Billing is not configured on the server.' })
@@ -1246,15 +1250,15 @@ app.post('/api/admin/subscriptions/:familyId/:action', async (request, response)
   }
 })
 
-// Admin "reset test data" — deliberately two-step. POST {} returns a preview of
+// Admin "reset test data" ,  deliberately two-step. POST {} returns a preview of
 // exactly which records would be deleted; only POST { confirm: 'DELETE' } actually
 // deletes. Clears class bookings, students, parent families, and event ticket
 // orders. Site content (events, schools, instructors, class schedule, messages)
-// is untouched, and no Stripe objects are modified — refunds are handled
+// is untouched, and no Stripe objects are modified ,  refunds are handled
 // separately in the Stripe dashboard.
 app.post('/api/admin/reset-test-data', async (request, response) => {
   // This endpoint deletes real customer records (bookings, students, families,
-  // ticket orders) — it must be explicitly enabled per environment.
+  // ticket orders) ,  it must be explicitly enabled per environment.
   if (process.env.ALLOW_TEST_DATA_RESET !== 'true') return response.status(403).json({ error: 'Test data reset is disabled on this server. Set ALLOW_TEST_DATA_RESET=true to enable it temporarily.' })
   if (!supabase) return response.status(503).json({ error: 'Supabase server storage is not configured.' })
   const user = await authenticatedUser(request)
@@ -1279,7 +1283,7 @@ app.post('/api/admin/reset-test-data', async (request, response) => {
   }
   const counts = Object.fromEntries(Object.entries(preview).map(([key, rows]) => [key, rows.length]))
 
-  // Default pass is a dry run — nothing is deleted without explicit confirmation.
+  // Default pass is a dry run ,  nothing is deleted without explicit confirmation.
   if (request.body?.confirm !== 'DELETE') return response.json({ dryRun: true, counts, preview })
 
   // FK-safe order: students first (their family_id is plain text), then bookings
@@ -1299,7 +1303,7 @@ app.post('/api/parent/cancel-booking', async (request, response) => {
   const user = await authenticatedUser(request)
   if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
   const { bookingId } = request.body || {}
-  // Legacy guest-checkout families have no owner_user_id — match by guardian email
+  // Legacy guest-checkout families have no owner_user_id ,  match by guardian email
   // too, mirroring /api/parent/dashboard, so parents can cancel what they can see.
   const { data: ownedFamilies } = await supabase.from('parent_families').select('id').or(`owner_user_id.eq.${user.id},guardian_email.eq.${user.email}`)
   const familyIds = (ownedFamilies || []).map((family) => family.id)
@@ -1312,7 +1316,7 @@ app.post('/api/parent/cancel-booking', async (request, response) => {
 })
 
 /* ------------------------------------------------------------------ */
-/* Reminder scheduler — emails buyers 24h before their event with an   */
+/* Reminder scheduler ,  emails buyers 24h before their event with an   */
 /* .ics calendar attachment. Runs while the server is up.              */
 /* ------------------------------------------------------------------ */
 async function sendDueReminders() {
@@ -1336,7 +1340,7 @@ async function sendDueReminders() {
     const result = await sendEmail({
       to: order.buyer_email,
       subject: `Reminder: ${eventRow.title} is tomorrow`,
-          html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>See you soon! ⏰</h2><p>Hi ${(order.buyer_name || 'there').split(' ')[0]},</p><p>This is a reminder that <strong>${eventRow.title}</strong> is coming up.</p><p><strong>Date:</strong> ${formatDateGB(eventRow.event_date)}${eventRow.event_time ? ` · ${eventRow.event_time.slice(0, 5)}` : ''}${eventRow.event_end_time ? ` – ${eventRow.event_end_time.slice(0, 5)}` : ''}<br><strong>Venue:</strong> ${eventRow.location || 'To be confirmed'}<br><strong>Your tickets:</strong> ${order.tier_name} × ${order.tickets}</p><p>Add it to your calendar so you don't miss it. The attachment drops straight in.</p><p>See you there!</p></div>`,
+          html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>See you soon! ⏰</h2><p>Hi ${(order.buyer_name || 'there').split(' ')[0]},</p><p>This is a reminder that <strong>${eventRow.title}</strong> is coming up.</p><p><strong>Date:</strong> ${formatDateGB(eventRow.event_date)}${eventRow.event_time ? ` · ${eventRow.event_time.slice(0, 5)}` : ''}${eventRow.event_end_time ? `  to  ${eventRow.event_end_time.slice(0, 5)}` : ''}<br><strong>Venue:</strong> ${eventRow.location || 'To be confirmed'}<br><strong>Your tickets:</strong> ${order.tier_name} × ${order.tickets}</p><p>Add it to your calendar so you don't miss it. The attachment drops straight in.</p><p>See you there!</p></div>`,
       attachments: [{ filename: 'event.ics', content: Buffer.from(buildIcs({ title: eventRow.title, date: eventRow.event_date, startTime: eventRow.event_time, endTime: eventRow.event_end_time, location: eventRow.location, description: eventRow.description, url: `${PUBLIC_BASE_URL}#event/${order.event_id}` })).toString('base64') }],
     })
     if (result.sent || !process.env.RESEND_API_KEY) {
@@ -1376,7 +1380,7 @@ if (fs.existsSync(distPath)) {
   })
   console.log('Serving built frontend from dist/')
 } else {
-  console.log('dist/ not found — API-only mode (run npm run build to serve the frontend)')
+  console.log('dist/ not found ,  API-only mode (run npm run build to serve the frontend)')
 }
 
 app.listen(port, '0.0.0.0', () => console.log(`KADA server listening on port ${port}`))

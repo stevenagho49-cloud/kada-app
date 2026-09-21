@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ImageField, OpsButton, OPS_COLORS, opsInputStyle } from './ui'
 
 /* ------------------------------------------------------------------ */
-/* Operations > Site > Site content — edit homepage copy, team,        */
+/* Operations > Site > Site content ,  edit homepage copy, team,        */
 /* contact details and prices. Stored as key/jsonb in site_content;    */
 /* the public homepage reads the same rows on every visit.             */
 /* ------------------------------------------------------------------ */
@@ -119,7 +119,7 @@ export function SiteContentPage({ content, onSave }) {
         <OpsButton small variant="ghost" onClick={() => edit('team', { members: [...(drafts.team?.members || []), { name: '', role: '', photo: '' }] })}>+ Add team member</OpsButton>
       </ContentSection>
 
-      <ContentSection title="Homepage photos" description="The big images across the site — hero, about section, and the workshop/class feature blocks. Upload a replacement and it goes live when you save." dirty={dirty.images} saving={savingKey === 'images'} onSave={() => save('images')}>
+      <ContentSection title="Homepage photos" description="The big images across the site ,  hero, about section, and the workshop/class feature blocks. Upload a replacement and it goes live when you save." dirty={dirty.images} saving={savingKey === 'images'} onSave={() => save('images')}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
           <ImageField label="Hero photo (top of homepage)" value={d('images').hero || ''} defaultSrc="/images/hero-workshop.jpeg" onChange={(dataUrl) => edit('images', { hero: dataUrl })} />
           <ImageField label="Hero accent photo (small overlay)" value={d('images').heroFloat || ''} defaultSrc="/images/nVgB0rjQ.jpeg" onChange={(dataUrl) => edit('images', { heroFloat: dataUrl })} />
@@ -139,7 +139,7 @@ export function SiteContentPage({ content, onSave }) {
         <TextField label="Address" value={d('contact').address || ''} onChange={(value) => edit('contact', { address: value })} />
       </ContentSection>
 
-      <ContentSection title="Prices" description="Class plan prices shown on the booking form. The Stripe prices themselves are set in Stripe — these must match what Stripe charges." dirty={dirty.prices} saving={savingKey === 'prices'} onSave={() => save('prices')}>
+      <ContentSection title="Prices" description="Class plan prices shown on the booking form. The Stripe prices themselves are set in Stripe ,  these must match what Stripe charges." dirty={dirty.prices} saving={savingKey === 'prices'} onSave={() => save('prices')}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <TextField label="Monthly membership (£)" type="number" value={String((d('prices').membershipPence ?? 2500) / 100)} onChange={(value) => edit('prices', { membershipPence: Math.round(Number(value || 0) * 100) })} />
           <TextField label="Day pass (£)" type="number" value={String((d('prices').dayPassPence ?? 1000) / 100)} onChange={(value) => edit('prices', { dayPassPence: Math.round(Number(value || 0) * 100) })} />

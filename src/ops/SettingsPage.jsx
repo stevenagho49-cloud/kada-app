@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase'
 import { ImageField, OpsButton, OPS_COLORS, opsInputStyle } from './ui'
 
 /* ------------------------------------------------------------------ */
-/* Operations > Administration > Settings — everything the business    */
+/* Operations > Administration > Settings ,  everything the business    */
 /* can change without touching code:                                   */
 /*   Business profile  → site_content 'contact' (public site + invoices) */
 /*   Branding          → site_content 'branding' (header logo override)  */
@@ -93,7 +93,7 @@ export function SettingsPage({ content, onSaveContent }) {
     <div className="panel">
       <div className="panel-head"><h3>Settings</h3></div>
       <p style={{ color: OPS_COLORS.muted, fontSize: 13, margin: '0 0 16px' }}>
-        Business-wide settings you can change yourself — no developer needed. Each section saves independently and goes live straight away.
+        Business-wide settings you can change yourself ,  no developer needed. Each section saves independently and goes live straight away.
       </p>
 
       <Section
@@ -129,7 +129,7 @@ export function SettingsPage({ content, onSaveContent }) {
 
       <Section
         title="Branding"
-        description="Upload your logo once — it replaces the logo in the site header, browser tab icon, ticket and legal pages, all at once. Use a PNG with a transparent background for the cleanest result."
+        description="Upload your logo once ,  it replaces the logo in the site header, browser tab icon, ticket and legal pages, all at once. Use a PNG with a transparent background for the cleanest result."
         dirty={dirty.branding}
         saving={savingKey === 'branding'}
         onSave={() => saveContent('branding', branding)}
@@ -167,20 +167,20 @@ export function SettingsPage({ content, onSaveContent }) {
           POST https://kingsarkdance.com/api/inbound-email?token=YOUR_SECRET
         </code>
         <ol style={{ fontSize: 13, color: OPS_COLORS.ink, margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
-          <li>Ask whoever manages your email (or your developer) to set <strong>INBOUND_EMAIL_SECRET</strong> on the server — any long random word.</li>
+          <li>Ask whoever manages your email (or your developer) to set <strong>INBOUND_EMAIL_SECRET</strong> on the server ,  any long random word.</li>
           <li>Google Workspace: Gmail routing rule → forward enquiries to a SendGrid/Mailgun inbound-parse address → webhook URL above. Microsoft 365: a Power Automate flow ("When a new email arrives" → HTTP POST) does the same job.</li>
-          <li>The sender is matched by email and added/updated automatically — never duplicated.</li>
+          <li>The sender is matched by email and added/updated automatically ,  never duplicated.</li>
           <li>Until that is wired up, use <strong>Contacts → Add from email</strong>: paste any email and it is filed in seconds.</li>
         </ol>
       </Section>
 
       <Section title="More places to look">
         <ul style={{ fontSize: 13, color: OPS_COLORS.ink, margin: 0, paddingLeft: 18, lineHeight: 1.9 }}>
-          <li><strong>Bank details for invoices</strong> — Sales → Invoice settings</li>
-          <li><strong>Homepage wording, prices, team photos</strong> — Site → Site content</li>
-          <li><strong>Homepage section order & visibility</strong> — Site → Homepage layout</li>
-          <li><strong>Staff logins & permissions</strong> — Administration → Team & access</li>
-          <li><strong>Old spreadsheet data</strong> — Operations → Contacts → Import Excel / CSV</li>
+          <li><strong>Bank details for invoices</strong> ,  Sales → Invoice settings</li>
+          <li><strong>Homepage wording, prices, team photos</strong> ,  Site → Site content</li>
+          <li><strong>Homepage section order & visibility</strong> ,  Site → Homepage layout</li>
+          <li><strong>Staff logins & permissions</strong> ,  Administration → Team & access</li>
+          <li><strong>Old spreadsheet data</strong> ,  Operations → Contacts → Import Excel / CSV</li>
         </ul>
       </Section>
     </div>

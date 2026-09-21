@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase'
 import { DataTable, EmptyState, OpsButton, Pill, OPS_COLORS, opsInputStyle } from './ui'
 
 /* ------------------------------------------------------------------ */
-/* Operations > Contacts — the KADA CRM. Every school, parent, client  */
+/* Operations > Contacts ,  the KADA CRM. Every school, parent, client  */
 /* and partner in one place, fed by manual entry, Excel/CSV imports,   */
 /* website enquiries and the inbound-email webhook.                    */
 /* ------------------------------------------------------------------ */
@@ -34,7 +34,7 @@ function normalizeKind(value) {
 }
 
 /* Guess the contact type from the email domain and name when no explicit     */
-/* Type column is mapped — school domains (.sch.uk, .edu, academy, college),  */
+/* Type column is mapped ,  school domains (.sch.uk, .edu, academy, college),  */
 /* generic personal inboxes (gmail/outlook…) → parent, companies → client.    */
 const PERSONAL_DOMAINS = /^(gmail|googlemail|outlook|hotmail|live|yahoo|icloud|aol|btinternet|btopenworld|sky|talktalk|virginmedia|proton|msn)\./i
 function inferKind(email, organisation, explicitKind) {
@@ -49,7 +49,7 @@ function inferKind(email, organisation, explicitKind) {
   return 'other'
 }
 
-/* RFC-4180-ish delimited parser — handles quoted cells, commas/tabs and     */
+/* RFC-4180-ish delimited parser ,  handles quoted cells, commas/tabs and     */
 /* embedded newlines, so pasted Excel ranges and exported CSVs both work.    */
 function parseDelimited(text) {
   const rows = []
@@ -139,7 +139,7 @@ export function ContactsPage() {
   const [expanded, setExpanded] = useState(false)
   const [notice, setNotice] = useState('')
 
-  // PostgREST caps responses at 1,000 rows — paginate so large imports still
+  // PostgREST caps responses at 1,000 rows ,  paginate so large imports still
   // show everything and dedupe stays accurate.
   const load = async () => {
     setLoading(true)
@@ -169,9 +169,9 @@ export function ContactsPage() {
   }, [contacts, search, kindFilter])
 
   /* Shared dedupe path: match by email, else by name+organisation. mode:     */
-  /*   'merge' (default) — update existing, filling only provided fields      */
-  /*   'addNew' — only insert brand-new contacts, skip anything that matches  */
-  /*   'replace' — overwrite matching contacts with the imported values       */
+  /*   'merge' (default) ,  update existing, filling only provided fields      */
+  /*   'addNew' ,  only insert brand-new contacts, skip anything that matches  */
+  /*   'replace' ,  overwrite matching contacts with the imported values       */
   const upsertOne = async (draft, source, mode = 'merge') => {
     const row = toDbRow(draft)
     if (!row.name && !row.email) return { status: 'skipped' }
@@ -240,9 +240,9 @@ export function ContactsPage() {
   const columns = [
     { key: 'name', label: 'Name', render: (row) => <div><div style={{ fontWeight: 700 }}>{row.name}</div>{row.organisation && <div style={{ fontSize: 12, color: OPS_COLORS.muted }}>{row.organisation}</div>}</div> },
     { key: 'kind', label: 'Type', render: (row) => <Pill text={row.kind} tone={KIND_TONES[row.kind]} /> },
-    { key: 'email', label: 'Email', render: (row) => row.email ? <a href={`mailto:${row.email}`} style={{ color: OPS_COLORS.emerald }}>{row.email}</a> : <span style={{ color: OPS_COLORS.muted }}>—</span> },
-    { key: 'phone', label: 'Phone', render: (row) => row.phone || <span style={{ color: OPS_COLORS.muted }}>—</span> },
-    { key: 'tags', label: 'Tags', render: (row) => (row.tags || []).length ? row.tags.map((tag) => <Pill key={tag} text={tag} />) : <span style={{ color: OPS_COLORS.muted }}>—</span> },
+    { key: 'email', label: 'Email', render: (row) => row.email ? <a href={`mailto:${row.email}`} style={{ color: OPS_COLORS.emerald }}>{row.email}</a> : <span style={{ color: OPS_COLORS.muted }}>, </span> },
+    { key: 'phone', label: 'Phone', render: (row) => row.phone || <span style={{ color: OPS_COLORS.muted }}>, </span> },
+    { key: 'tags', label: 'Tags', render: (row) => (row.tags || []).length ? row.tags.map((tag) => <Pill key={tag} text={tag} />) : <span style={{ color: OPS_COLORS.muted }}>, </span> },
     { key: 'source', label: 'Source', render: (row) => <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>{SOURCE_LABELS[row.source] || row.source}</span> },
     { key: 'actions', label: '', render: (row) => (
       <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -320,7 +320,7 @@ export function ContactsPage() {
         <ImportWizard
           existingCount={contacts.length}
           onClose={() => setShowImport(false)}
-          onDone={async (summary) => { setNotice(`Import finished — ${summary.added} added, ${summary.updated} updated, ${summary.skipped} skipped${summary.errors ? `, ${summary.errors} failed` : ''}.`); await load() }}
+          onDone={async (summary) => { setNotice(`Import finished ,  ${summary.added} added, ${summary.updated} updated, ${summary.skipped} skipped${summary.errors ? `, ${summary.errors} failed` : ''}.`); await load() }}
           upsertOne={upsertOne}
         />
       )}
@@ -337,7 +337,7 @@ export function ContactsPage() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Import wizard — .xlsx/.csv upload or paste-from-Excel, then column  */
+/* Import wizard ,  .xlsx/.csv upload or paste-from-Excel, then column  */
 /* mapping, preview and dedupe-on-import.                              */
 /* ------------------------------------------------------------------ */
 function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
@@ -349,16 +349,16 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
   const [importing, setImporting] = useState(false)
   const [importMode, setImportMode] = useState('merge') // merge | addNew | replace
   const [progress, setProgress] = useState({ done: 0, total: 0 })
-  const [result, setResult] = useState(null) // { summary, errors } — results screen
+  const [result, setResult] = useState(null) // { summary, errors } ,  results screen
 
   /* Turn a database error message into a plain-English fix. */
   const explainError = (message) => {
     const m = String(message || '').toLowerCase()
     if (m.includes('duplicate key')) return 'These emails already exist in Contacts. Choose "Only add new" to skip them, or "Replace duplicates" to overwrite.'
-    if (m.includes('row-level security')) return 'Your account is not allowed to write contacts — sign in as an admin (or staff with Contacts access), and confirm 20260921_crm_contacts.sql has been applied in Supabase.'
-    if (m.includes('does not exist') || m.includes('could not find') || m.includes('schema cache')) return 'The contacts table is missing — apply supabase/migrations/20260921_crm_contacts.sql in Supabase Dashboard → SQL Editor.'
-    if (m.includes('invalid input') || m.includes('syntax')) return 'Some values could not be read — save the sheet as CSV and import that instead.'
-    if (m.includes('failed to fetch') || m.includes('network')) return 'The connection dropped mid-import. Completed rows are already saved — run it again with "Only add new" to continue where it stopped.'
+    if (m.includes('row-level security')) return 'Your account is not allowed to write contacts ,  sign in as an admin (or staff with Contacts access), and confirm 20260921_crm_contacts.sql has been applied in Supabase.'
+    if (m.includes('does not exist') || m.includes('could not find') || m.includes('schema cache')) return 'The contacts table is missing ,  apply supabase/migrations/20260921_crm_contacts.sql in Supabase Dashboard → SQL Editor.'
+    if (m.includes('invalid input') || m.includes('syntax')) return 'Some values could not be read ,  save the sheet as CSV and import that instead.'
+    if (m.includes('failed to fetch') || m.includes('network')) return 'The connection dropped mid-import. Completed rows are already saved ,  run it again with "Only add new" to continue where it stopped.'
     return 'If this keeps happening, export the sheet as CSV and try again, or ask your developer to check the server logs.'
   }
 
@@ -418,7 +418,7 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
     })
     setProgress({ done: 0, total: drafts.length })
 
-    // 2. Look up which emails already exist — against the whole table, in
+    // 2. Look up which emails already exist ,  against the whole table, in
     //    chunks (never trust the on-screen list: it may hold only a page).
     const existingByEmail = new Map()
     const emails = [...seenEmails]
@@ -449,7 +449,7 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
       }
     })
 
-    // 4a. Batch inserts — 200 rows per request instead of one-by-one.
+    // 4a. Batch inserts ,  200 rows per request instead of one-by-one.
     for (let i = 0; i < toInsert.length; i += 200) {
       const chunk = toInsert.slice(i, i + 200)
       const { error } = await supabase.from('contacts').insert(chunk) // eslint-disable-line no-await-in-loop
@@ -460,7 +460,7 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
       setProgress({ done: Math.min(i + 200, toInsert.length), total: drafts.length })
     }
 
-    // 4b. Matched rows — replace = batch upsert over the email key; merge =
+    // 4b. Matched rows ,  replace = batch upsert over the email key; merge =
     //     per-row gap-fill so existing notes/details are never wiped.
     if (importMode === 'replace') {
       for (let i = 0; i < matched.length; i += 200) {
@@ -507,7 +507,7 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
           </p>
           {result.errors.length > 0 && (
             <div style={{ marginBottom: 14 }}>
-              <span style={labelStyle}>Why some rows failed — and how to fix it</span>
+              <span style={labelStyle}>Why some rows failed ,  and how to fix it</span>
               <div style={{ display: 'grid', gap: 8, maxHeight: 260, overflowY: 'auto' }}>
                 {result.errors.slice(0, 20).map((item, index) => (
                   <div key={index} style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: '8px 12px', background: OPS_COLORS.ivory, fontSize: 12.5 }}>
@@ -519,7 +519,7 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
               </div>
             </div>
           )}
-          <p style={{ fontSize: 12.5, color: OPS_COLORS.muted }}>Rows that failed were not lost from your file — fix the cause above and run the import again with <strong>Only add new</strong>; anything already saved is skipped automatically.</p>
+          <p style={{ fontSize: 12.5, color: OPS_COLORS.muted }}>Rows that failed were not lost from your file ,  fix the cause above and run the import again with <strong>Only add new</strong>; anything already saved is skipped automatically.</p>
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}><OpsButton onClick={onClose}>Close</OpsButton></div>
         </div>
       </div>
@@ -532,7 +532,7 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
         <h3 style={{ margin: '0 0 6px', fontFamily: "'Iowan Old Style', Georgia, serif", color: OPS_COLORS.emerald, fontWeight: 400 }}>Import contacts</h3>
         <p style={{ margin: '0 0 14px', fontSize: 13, color: OPS_COLORS.muted }}>
           Bring across your old business records. Upload an Excel (.xlsx) or CSV file, or copy cells in Excel and paste them straight in.
-          Existing contacts ({existingCount}) are matched by email and updated — never duplicated.
+          Existing contacts ({existingCount}) are matched by email and updated ,  never duplicated.
         </p>
 
         {!headers.length && (
@@ -556,7 +556,7 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
                 <label key={field.key} style={{ display: 'block' }}>
                   <span style={labelStyle}>{field.label}</span>
                   <select style={opsInputStyle} value={mapping[field.key]} onChange={(event) => setMapping({ ...mapping, [field.key]: event.target.value === '' ? '' : Number(event.target.value) })}>
-                    <option value="">— skip —</option>
+                    <option value="">,  skip , </option>
                     {headers.map((header, index) => <option key={index} value={index}>{header}</option>)}
                   </select>
                 </label>
@@ -611,7 +611,7 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Add from email — paste a raw email (or just a From line) and the    */
+/* Add from email ,  paste a raw email (or just a From line) and the    */
 /* sender is filed as a contact, matched by email if they exist.       */
 /* ------------------------------------------------------------------ */
 function EmailQuickAdd({ onClose, onDone, upsertOne }) {
@@ -640,7 +640,7 @@ function EmailQuickAdd({ onClose, onDone, upsertOne }) {
         <textarea style={{ ...opsInputStyle, minHeight: 130, fontFamily: 'monospace', fontSize: 12.5 }} placeholder={'From: Jane Doe <jane@oakridge.uk>\nSubject: Workshop enquiry\n…'} value={text} onChange={(event) => setText(event.target.value)} />
         {text.trim() && (
           <p style={{ fontSize: 13, color: OPS_COLORS.ink, background: OPS_COLORS.ivory, border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: '8px 12px' }}>
-            {parsed.email ? <>Found <strong>{parsed.name || 'Unknown'}</strong> &lt;{parsed.email}&gt;{parsed.subject ? ` — “${parsed.subject}”` : ''}</> : 'No email address detected yet…'}
+            {parsed.email ? <>Found <strong>{parsed.name || 'Unknown'}</strong> &lt;{parsed.email}&gt;{parsed.subject ? ` ,  “${parsed.subject}”` : ''}</> : 'No email address detected yet…'}
           </p>
         )}
         {error && <p style={{ color: OPS_COLORS.warn, fontSize: 13 }}>{error}</p>}

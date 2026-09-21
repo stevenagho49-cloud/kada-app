@@ -16,7 +16,7 @@ function timeLabel(value) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Operations > Class schedule — the admin-configurable weekly        */
+/* Operations > Class schedule ,  the admin-configurable weekly        */
 /* timetable. The public booking form only lets parents pick dates    */
 /* that match an active session's day of week.                        */
 /* ------------------------------------------------------------------ */
@@ -56,7 +56,7 @@ export function ClassSchedulePage({ sessions, onSave, onAdd, onDelete }) {
       key: 'time', label: 'Time', render: (session) => (
         <span style={{ color: OPS_COLORS.ink, whiteSpace: 'nowrap' }}>
           <EditableText type="time" value={timeLabel(session.start_time)} onSave={(value) => onSave(session, { start_time: value })} />
-          {' – '}
+          {'  to  '}
           <EditableText type="time" small value={timeLabel(session.end_time)} placeholder="Not set" onSave={(value) => onSave(session, { end_time: value || null })} />
         </span>
       ),
