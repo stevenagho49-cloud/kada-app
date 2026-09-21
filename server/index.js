@@ -707,6 +707,17 @@ function cleanEmailList(value) {
   return [...new Set(list.map((item) => String(item).trim().toLowerCase()).filter((item) => /.+@.+\..+/.test(item)))]
 }
 
+/* Whether the custom_emails column exists (migration applied). Probed once   */
+/* and cached; if absent we fall back to storing the list in the campaign    */
+/* name so one-off sends still work before the migration is applied.          */
+let customEmailsSupported = null
+async function hasCustomEmailsColumn() {
+  if (customEmailsSupported !== null) return customEmailsSupported
+  const { error } = await supabase.from('campaigns').select('custom_emails').limit(0)
+  customEmailsSupported = !(error && /custom_emails/.test(error.message))
+  return customEmailsSupported
+}
+
 async function campaignRecipients(audience, customEmails = []) {
   const recipients = []
   const seen = new Set()
@@ -735,7 +746,13 @@ async function runDueCampaigns() {
     .in('status', ['scheduled', 'active']).lte('scheduled_at', now.toISOString())
   let sent = 0
   for (const campaign of (due || [])) {
-    const recipients = await campaignRecipients(campaign.audience, campaign.custom_emails)
+    // Recover the one-off list: from the column when migrated, else from the
+    // campaign-name marker (pre-migration fallback). Marked campaigns are
+    // treated as a pure one-off list, never a CRM audience blast.
+    const markerMatch = /\s*\[one-off: ([^\]]+)\]$/.exec(campaign.name || '')
+    const isOneOff = Boolean(markerMatch)
+    const list = (campaign.custom_emails && campaign.custom_emails.length) ? campaign.custom_emails : (isOneOff ? cleanEmailList(markerMatch[1]) : [])
+    const recipients = isOneOff ? list.map((email) => ({ id: null, name: email.split('@')[0].replace(/[._-]+/g, ' '), email })) : await campaignRecipients(campaign.audience, list)
     const rows = []
     for (const recipient of recipients) {
       const result = await sendEmail({ to: recipient.email, subject: campaign.subject, html: campaign.body_html.replace(/{{name}}/g, recipient.name || 'there') })
@@ -745,6 +762,7 @@ async function runDueCampaigns() {
     if (rows.length) await supabase.from('campaign_sends').insert(rows)
     const next = campaign.recurrence !== 'none' ? new Date(now.getTime() + (RECURRENCE_MS[campaign.recurrence] || 0)) : null
     await supabase.from('campaigns').update({ status: next ? 'active' : 'done', scheduled_at: next ? next.toISOString() : null, updated_at: now.toISOString() }).eq('id', campaign.id)
+    console.log(`Campaign "${campaign.name}" sent: ${rows.filter((row) => row.status === 'sent').length}/${rows.length} delivered${rows.length === 0 ? ' (no recipients matched)' : ''}`)
   }
   return { sent }
 }
@@ -759,15 +777,25 @@ app.post('/api/admin/campaigns', async (request, response) => {
   if (!Object.keys(RECURRENCE_MS).includes(recurrence)) return response.status(400).json({ error: 'Unknown schedule.' })
   const emails = cleanEmailList(customEmails)
   if (audience === 'custom' && !emails.length) return response.status(400).json({ error: 'Add at least one email address for a one-off list.' })
-  const { data, error } = await supabase.from('campaigns').insert({ name, subject, preview_text: previewText, body_html: bodyHtml, audience, custom_emails: emails, recurrence, scheduled_at: scheduledAt, status: scheduledAt ? 'scheduled' : 'draft', created_by: user.id }).select().maybeSingle()
-  if (error) return response.status(500).json({ error: 'Campaign could not be saved.' })
+  const hasColumn = await hasCustomEmailsColumn()
+  // Until the custom-list migration is applied, the campaigns table rejects
+  // audience 'custom' and has no custom_emails column. Store a valid audience
+  // ('other') and carry the real audience + addresses in the campaign name so
+  // the send path can recover them and the emails still go out.
+  const storedAudience = hasColumn || audience !== 'custom' ? audience : 'other'
+  const marker = !hasColumn && audience === 'custom' ? ` [one-off: ${emails.join(', ')}]` : ''
+  const storedName = `${name}${marker}`
+  const record = { name: storedName, subject, preview_text: previewText, body_html: bodyHtml, audience: storedAudience, recurrence, scheduled_at: scheduledAt, status: scheduledAt ? 'scheduled' : 'draft', created_by: user.id }
+  if (hasColumn) record.custom_emails = emails
+  const { data, error } = await supabase.from('campaigns').insert(record).select().maybeSingle()
+  if (error) return response.status(500).json({ error: `Campaign could not be saved: ${error.message}` })
   response.json({ campaign: data })
 })
 
 app.get('/api/admin/campaigns', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
-  const { data, error } = await supabase.from('campaigns').select('id,name,subject,audience,custom_emails,status,recurrence,scheduled_at,updated_at').order('updated_at', { ascending: false })
+  const { data, error } = await supabase.from('campaigns').select('id,name,subject,audience,status,recurrence,scheduled_at,updated_at').order('updated_at', { ascending: false })
   if (error) return response.status(500).json({ error: 'Campaigns could not be loaded.' })
   const counts = {}
   const { data: sendRows } = await supabase.from('campaign_sends').select('campaign_id,status')
@@ -775,7 +803,17 @@ app.get('/api/admin/campaigns', async (request, response) => {
     counts[row.campaign_id] = counts[row.campaign_id] || { sent: 0, failed: 0 }
     counts[row.campaign_id][row.status === 'sent' ? 'sent' : 'failed'] += 1
   })
-  response.json({ campaigns: (data || []).map((campaign) => ({ ...campaign, sentCount: counts[campaign.id]?.sent || 0, failedCount: counts[campaign.id]?.failed || 0 })) })
+  response.json({ campaigns: (data || []).map((campaign) => {
+    const oneOff = /\s*\[one-off: ([^\]]+)\]$/.exec(campaign.name || '')?.[1]
+    return {
+      ...campaign,
+      audience: oneOff ? 'custom' : campaign.audience,
+      custom_emails: (campaign.custom_emails && campaign.custom_emails.length) ? campaign.custom_emails : (oneOff ? cleanEmailList(oneOff) : []),
+      name: oneOff ? campaign.name.replace(/\s*\[one-off: [^\]]+\]$/, '') : campaign.name,
+      sentCount: counts[campaign.id]?.sent || 0,
+      failedCount: counts[campaign.id]?.failed || 0,
+    }
+  }) })
 })
 
 app.post('/api/admin/campaigns/:id/schedule', async (request, response) => {
