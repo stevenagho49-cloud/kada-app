@@ -1,9 +1,8 @@
 /* Parent dashboard — lazy-loaded from App.jsx so the public site bundle
    doesn't carry it. All data/actions arrive via props from App. */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { OpsSidebar, DataTable, Pill, OpsButton, EmptyState } from './ops/ui'
-
-const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+import { ClassDatePicker, DAY_NAMES, nextClassDate } from './lib/classDates'
 
 const emerald = '#0b3d2e'
 const muted = '#767066'
@@ -122,6 +121,17 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
   const parentName = family?.guardian_name || session.user.user_metadata?.full_name || ''
   const parentEmail = family?.guardian_email || session.user.email || ''
   const knownChildren = students.filter((student) => student.name)
+  const selectedSession = classSessions.find((session) => session.name === form.className) || classSessions[0] || null
+
+  // Keep the chosen date on a real class day — switching class jumps to the
+  // nearest date that class actually runs; only scheduled days are selectable.
+  useEffect(() => {
+    if (!selectedSession) return
+    if (selectedSession.name !== form.className || !form.classDate) {
+      setForm((current) => ({ ...current, className: selectedSession.name, classDate: nextClassDate(selectedSession) }))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSession?.id, classSessions])
 
   const pickChild = (index, name) => {
     const found = knownChildren.find((student) => student.name === name)
@@ -162,7 +172,7 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
         </div>
         <div>
           <span style={label}>Class date</span>
-          <input type="date" style={input} value={form.classDate} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setForm({ ...form, classDate: event.target.value })} required />
+          <ClassDatePicker session={selectedSession} value={form.classDate} onChange={(date) => setForm({ ...form, classDate: date })} />
         </div>
         {form.students.map((student, index) => (
           <div key={index} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, borderTop: '1px solid #e4ddc9', paddingTop: 10 }}>

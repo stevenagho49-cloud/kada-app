@@ -513,6 +513,26 @@ app.get('/api/admin/team', async (request, response) => {
 
 /* NB: registered BEFORE /api/admin/team/:userId so 'invite' is not swallowed  */
 /* by the :userId param (Express matches routes in registration order).        */
+
+const INVITE_ROLE_INTROS = {
+  staff: 'manage the parts of KADA Operations your admin has given you access to',
+  instructor: 'view your assigned bookings, the job board and your DBS uploads',
+  parent: 'book classes, manage your children\'s details and your membership',
+  school: 'request workshops and track your bookings with KADA',
+  admin: 'manage the whole KADA Operations dashboard',
+}
+const escHtml = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+/* Branded invite email with the actual set-password link inside — one email, */
+/* from KADA, through Resend. setupUrl is the magic recovery link.            */
+async function sendInviteEmail({ email, name, role, setupUrl }) {
+  return sendEmail({
+    to: email,
+    subject: "You're invited to King's Ark Dance Academy",
+    html: `<div style="font-family:Arial,sans-serif;line-height:1.6;max-width:560px;background:#f6f3ea;padding:24px 16px"><div style="background:#fffdf8;border:1px solid #e4ddc9;border-radius:14px;overflow:hidden"><div style="height:6px;background:linear-gradient(90deg,#0b3d2e,#c9a227)"></div><div style="padding:26px 26px 8px"><h2 style="color:#0b3d2e;font-family:Georgia,serif;font-weight:500;margin:0 0 12px">Welcome to KADA, ${escHtml(name)}.</h2><p style="margin:0 0 14px">You've been invited to join King's Ark Dance Academy as <strong>${escHtml(role)}</strong> — you'll be able to ${INVITE_ROLE_INTROS[role]}.</p><p style="margin:0 0 14px"><strong>Step 1:</strong> set your password using the secure button below (this link expires in 24 hours).</p><p style="margin:18px 0"><a href="${setupUrl}" style="background:#0b3d2e;color:#fffdf8;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Set my password →</a></p><p style="margin:0 0 14px"><strong>Step 2:</strong> sign in any time at <a href="${APP_URL}">${APP_URL}</a> → Operations.</p><p style="color:#767066;font-size:12px;margin:16px 0 0">If the button doesn't work, copy this link into your browser:<br><span style="word-break:break-all">${setupUrl}</span></p><p style="color:#767066;font-size:12px">If you weren't expecting this invite, you can ignore it.</p></div></div></div>`,
+  })
+}
+
 app.post('/api/admin/team/invite', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
@@ -521,40 +541,37 @@ app.post('/api/admin/team/invite', async (request, response) => {
   const cleanEmail = String(email).trim().toLowerCase().slice(0, 200)
   const cleanRole = ['staff', 'instructor', 'parent', 'school', 'admin'].includes(role) ? role : 'staff'
   if (!cleanName || !/.+@.+\..+/.test(cleanEmail)) return response.status(400).json({ error: 'A name and a valid email are required.' })
-  // The Supabase invite email lets the new member set their own password; the
-  // handle_new_user trigger creates their profile from this metadata.
-  const { error: inviteError } = await supabase.auth.admin.inviteUserByEmail(cleanEmail, { data: { role: cleanRole, full_name: cleanName }, redirectTo: `${APP_URL}/#ops` })
-  const alreadyRegistered = inviteError && /already|registered|exists/i.test(inviteError.message)
-  if (inviteError && !alreadyRegistered) return response.status(500).json({ error: `Invite could not be sent: ${inviteError.message}` })
-  const users = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 })
-  const target = (users.data?.users || []).find((item) => item.email?.toLowerCase() === cleanEmail)
-  if (target) {
-    const update = { role: cleanRole, full_name: cleanName, job_title: String(jobTitle).trim().slice(0, 80), permissions: cleanPermissions(permissions) }
-    if (cleanRole === 'instructor') {
-      const { data: instructor } = await supabase.from('instructors').select('id').ilike('email', cleanEmail).maybeSingle()
-      if (instructor) update.instructor_id = instructor.id
-    }
-    await supabase.from('profiles').update(update).eq('id', target.id)
-    await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status: target.email_confirmed_at ? 'account_created' : 'accepted', invited_by: user.id, user_id: target.id, account_created_at: target.email_confirmed_at || null }, { onConflict: 'email' })
-  } else {
-    await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status: 'sent', invited_by: user.id }, { onConflict: 'email' })
+
+  // Find or create the account. email_confirm:true + NO Supabase invite email
+  // — we send our own branded one with a working setup link instead.
+  let target = (await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 })).data?.users?.find((item) => item.email?.toLowerCase() === cleanEmail)
+  const alreadyRegistered = Boolean(target && target.last_sign_in_at)
+  if (!target) {
+    const { data: created, error: createError } = await supabase.auth.admin.createUser({ email: cleanEmail, email_confirm: true, user_metadata: { role: cleanRole, full_name: cleanName } })
+    if (createError || !created.user) return response.status(500).json({ error: `Account could not be created: ${createError?.message || 'unknown error'}` })
+    target = created.user
   }
-  // Branded welcome alongside Supabase's plain invite email — explains who
-  // invited them, what their role can do, and where to sign in.
-  const roleIntros = {
-    staff: 'manage the parts of KADA Operations your admin has given you access to',
-    instructor: 'view your assigned bookings, the job board and your DBS uploads',
-    parent: 'book classes, manage your children\'s details and your membership',
-    school: 'request workshops and track your bookings with KADA',
-    admin: 'manage the whole KADA Operations dashboard',
+
+  // Real set-password link (Supabase Auth must allow kingsarkdance.com as a
+  // redirect URL — see Site URL / Redirect URLs in the Auth settings).
+  const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({ type: 'recovery', email: cleanEmail, options: { redirectTo: `${APP_URL}/#ops` } })
+  if (linkError || !linkData?.properties?.action_link) return response.status(502).json({ error: `Setup link could not be generated: ${linkError?.message || 'unknown error'}` })
+  const emailResult = await sendInviteEmail({ email: cleanEmail, name: cleanName, role: cleanRole, setupUrl: linkData.properties.action_link })
+  if (!emailResult.sent) return response.status(502).json({ error: `Invite email could not be sent: ${emailResult.reason || 'email not configured'}` })
+
+  // Sync the profile now for existing accounts; the trigger handles new ones.
+  const update = { role: cleanRole, full_name: cleanName, job_title: String(jobTitle).trim().slice(0, 80), permissions: cleanPermissions(permissions) }
+  if (cleanRole === 'instructor') {
+    const { data: instructor } = await supabase.from('instructors').select('id').ilike('email', cleanEmail).maybeSingle()
+    if (instructor) update.instructor_id = instructor.id
   }
-  const esc = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  await sendEmail({
-    to: cleanEmail,
-    subject: 'You\'re invited to King\'s Ark Dance Academy',
-    html: `<div style="font-family:Arial,sans-serif;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;font-family:Georgia,serif">Welcome to KADA, ${esc(cleanName)}.</h2><p>You've been invited to join King's Ark Dance Academy as <strong>${cleanRole}</strong> — you'll be able to ${roleIntros[cleanRole]}.</p><p><strong>Next step:</strong> open the invite email from Supabase (check spam too), click the link and set your password. Then sign in any time at <a href="${APP_URL}">${APP_URL}</a> → Operations.</p><p style="color:#767066;font-size:12px">If you weren't expecting this invite, you can ignore it.</p></div>`,
-  })
-  response.json({ invited: true, alreadyRegistered })
+  await supabase.from('profiles').update(update).eq('id', target.id)
+
+  // Status is honest: 'sent' until they actually sign in (the trigger flips
+  // it); only accounts that have signed in before count as account_created.
+  const status = target.last_sign_in_at ? 'account_created' : 'sent'
+  await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status, invited_by: user.id, user_id: target.id, account_created_at: target.last_sign_in_at || null }, { onConflict: 'email' })
+  response.json({ invited: true, alreadyRegistered, emailSent: emailResult.sent })
 })
 
 app.post('/api/admin/team/:userId', async (request, response) => {
@@ -664,8 +681,10 @@ app.post('/api/admin/invitations/:id/resend', async (request, response) => {
   if (!user) return
   const { data: invite } = await supabase.from('invitations').select('*').eq('id', request.params.id).maybeSingle()
   if (!invite) return response.status(404).json({ error: 'Invitation not found.' })
-  const { error: resendError } = await supabase.auth.admin.inviteUserByEmail(invite.email, { data: { role: invite.role, full_name: invite.full_name }, redirectTo: `${APP_URL}/` })
-  if (resendError && !/already|registered|exists/i.test(resendError.message)) return response.status(500).json({ error: resendError.message })
+  const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({ type: 'recovery', email: invite.email, options: { redirectTo: `${APP_URL}/#ops` } })
+  if (linkError || !linkData?.properties?.action_link) return response.status(502).json({ error: `Setup link could not be generated: ${linkError?.message || 'unknown error'}` })
+  const emailResult = await sendInviteEmail({ email: invite.email, name: invite.full_name || invite.email, role: invite.role, setupUrl: linkData.properties.action_link })
+  if (!emailResult.sent) return response.status(502).json({ error: `Invite email could not be sent: ${emailResult.reason || 'email not configured'}` })
   await supabase.from('invitations').update({ status: 'sent', accepted_at: null }).eq('id', invite.id)
   response.json({ resent: true })
 })

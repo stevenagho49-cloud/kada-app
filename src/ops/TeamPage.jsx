@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { supabase } from '../lib/supabase'
 import { OpsButton, Pill, OPS_COLORS, opsInputStyle } from './ui'
 
 /* ------------------------------------------------------------------ */
@@ -74,6 +75,23 @@ export function TeamPage({ session }) {
   }
   useEffect(() => { void load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Realtime invitation progress — flips sent → accepted → account created
+  // live as invitees act, with a polling fallback if realtime isn't enabled.
+  useEffect(() => {
+    let channel
+    let pollTimer
+    if (supabase) {
+      channel = supabase.channel('invitations-changes')
+        .on('broadcast', { event: '*' }, () => { void load() })
+        .subscribe()
+    }
+    if (!channel) pollTimer = window.setInterval(() => { void load() }, 15000)
+    return () => {
+      if (channel) supabase.removeChannel(channel)
+      if (pollTimer) window.clearInterval(pollTimer)
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   const draftFor = (member) => drafts[member.id] || { role: member.role, jobTitle: member.jobTitle || '', permissions: member.permissions || [] }
   const editDraft = (member, changes) => setDrafts((current) => ({ ...current, [member.id]: { ...draftFor(member), ...changes } }))
 
@@ -83,7 +101,7 @@ export function TeamPage({ session }) {
     setError('')
     try {
       await authedFetch('/api/admin/team/invite', { method: 'POST', body: JSON.stringify(invite) })
-      setNotice(`Invite emailed to ${invite.email}. They set their own password from the link.`)
+      setNotice(`Invite emailed to ${invite.email} — one branded email with a "Set my password" link inside.`)
       setInvite({ name: '', email: '', role: 'staff', jobTitle: '', permissions: [] })
       await load()
     } catch (inviteErr) {

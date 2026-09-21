@@ -697,10 +697,14 @@ function App() {
 
   // Public pages live at #event/<id> (ticketed events) and #privacy / #terms /
   // #accessibility (legal pages) — all reachable by guests without sign-in.
+  // Supabase auth links (invite / password setup) arrive as
+  // #access_token=…&type=recovery — the client signs in from the hash itself.
   useEffect(() => {
     const onHashChange = () => {
-      setEventPageId(window.location.hash.match(/^#event\/([\w-]+)/)?.[1] || null)
-      setLegalPageId(window.location.hash.match(/^#(privacy|terms|accessibility)$/)?.[1] || null)
+      const hash = window.location.hash || ''
+      if (hash.includes('access_token=')) return // Supabase is consuming the auth hash
+      setEventPageId(hash.match(/^#event\/([\w-]+)/)?.[1] || null)
+      setLegalPageId(hash.match(/^#(privacy|terms|accessibility)$/)?.[1] || null)
     }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
@@ -739,13 +743,28 @@ function App() {
 
     let mounted = true
     const loadSession = async () => {
+      // Invite / password-setup links arrive with the token in the URL hash —
+      // give the Supabase client a moment to turn it into a real session.
+      const authHash = (window.location.hash || '').includes('access_token=')
       const { data } = await supabase.auth.getSession()
+      let sessionNow = data.session
+      if (!sessionNow && authHash) {
+        await new Promise((resolve) => window.setTimeout(resolve, 600))
+        const retry = await supabase.auth.getSession()
+        sessionNow = retry.data.session
+      }
       if (!mounted) return
-      setSession(data.session)
+      setSession(sessionNow)
       setAuthReady(true)
+      if (authHash) {
+        window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${sessionNow ? '#ops' : ''}`)
+        if (sessionNow) { setView('ops'); return }
+        setToast('That invite link has expired — ask your admin to resend it.')
+        return
+      }
       // Deep link into a specific dashboard tab/record, e.g. #ops/bookings/book-123 from an admin email.
       const opsMatch = window.location.hash.match(/^#ops\/([\w-]+)(?:\/([\w-]+))?/)
-      if (opsMatch && data.session) {
+      if (opsMatch && sessionNow) {
         setTab(opsMatch[1])
         if (opsMatch[2]) pendingOpsRecord.current = { tab: opsMatch[1], id: opsMatch[2] }
         setView('ops')
