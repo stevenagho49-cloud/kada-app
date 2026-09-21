@@ -343,7 +343,7 @@ export function EventAttendeesModal({ event, session, onClose }) {
       const response = await fetch(`/api/admin/events/${event.id}/check-in`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ orderId: attendee.orderId, seat: attendee.seat, checkedIn }),
+        body: JSON.stringify({ orderId: attendee.orderId, seat: attendee.seat, checkedIn: checkingIn }),
       })
       const result = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(result.error || 'Check-in failed')
@@ -420,7 +420,7 @@ export function EventAttendeesModal({ event, session, onClose }) {
                     </div>
                   </div>
                   <span style={{ fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap', color: attendee.checkedInAt ? OPS_COLORS.okGreen : OPS_COLORS.muted }}>
-                    {attendee.checkedInAt ? `Arrived ${new Date(attendee.checkedInAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : 'Tap to check in'}
+                    {attendee.checkedInAt ? `Arrived ${new Date(attendee.checkedInAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} · tap to undo` : 'Tap to check in'}
                   </span>
                 </button>
               ))}
