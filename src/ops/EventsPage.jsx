@@ -99,11 +99,18 @@ const COPY = {
     emptyTitle: 'No event drafts yet',
     emptyBody: 'Create a new event draft and publish it when you are ready.',
   },
+  archived: {
+    heading: 'Archived events',
+    sub: 'Hidden from the public site and homepage, but kept so ticket sales history is never lost.',
+    emptyIcon: '🗄',
+    emptyTitle: 'No archived events',
+    emptyBody: 'Archive an event instead of deleting it when you want to keep its sales records.',
+  },
 }
 
 export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEvent, onAddEvent, session }) {
   const copy = COPY[view] || COPY.published
-  const filtered = events.filter((event) => (view === 'published' ? event.status === 'published' : event.status === 'draft'))
+  const filtered = events.filter((event) => (view === 'published' ? event.status === 'published' : view === 'archived' ? event.status === 'archived' : event.status === 'draft'))
   const [expanded, setExpanded] = useState(false)
   const [salesEvent, setSalesEvent] = useState(null)
   const [attendeesEvent, setAttendeesEvent] = useState(null)
@@ -191,10 +198,12 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
       key: 'status', label: 'Status', render: (event) => (
         <StatusMenu
           value={event.status}
-          label={event.status === 'published' ? 'Published' : 'Draft'}
+          label={event.status === 'published' ? 'Published' : event.status === 'archived' ? 'Archived' : 'Draft'}
           tone={event.status === 'published' ? 'green' : 'default'}
-          options={[{ value: 'published', label: 'Publish' }, { value: 'draft', label: 'Move to drafts' }]}
-          onChange={(value) => onSaveEvent({ ...event, status: value })}
+          options={event.status === 'archived'
+            ? [{ value: 'published', label: 'Republish' }, { value: 'draft', label: 'Restore to drafts' }]
+            : [{ value: 'published', label: 'Publish' }, { value: 'draft', label: 'Move to drafts' }, { value: 'archived', label: 'Archive' }]}
+          onChange={(value) => onSaveEvent({ ...event, status: value, showOnHomepage: value === 'archived' ? false : event.showOnHomepage })}
         />
       ),
     },
@@ -334,7 +343,7 @@ export function EventAttendeesModal({ event, session, onClose }) {
       const response = await fetch(`/api/admin/events/${event.id}/check-in`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ orderId: attendee.orderId, checkedIn }),
+        body: JSON.stringify({ orderId: attendee.orderId, seat: attendee.seat, checkedIn }),
       })
       const result = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(result.error || 'Check-in failed')
@@ -555,6 +564,7 @@ export function EventForm({ event, onSave, onUploadFlyer }) {
           <select style={opsInputStyle} value={form.status} onChange={set('status')}>
             <option value="draft">Draft</option>
             <option value="published">Published</option>
+            <option value="archived">Archived (hidden, keeps sales history)</option>
           </select>
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, cursor: 'pointer' }}>

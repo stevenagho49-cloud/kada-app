@@ -672,6 +672,7 @@ function App() {
   const [jobs, setJobs] = useState([])
   const [messages, setMessages] = useState([])
   const [events, setEvents] = useState([])
+  const [ticketOrders, setTicketOrders] = useState([])
   const [eventModal, setEventModal] = useState(null)
   const [eventPageId, setEventPageId] = useState(() => window.location.hash.match(/^#event\/([\w-]+)/)?.[1] || null)
   const [legalPageId, setLegalPageId] = useState(() => window.location.hash.match(/^#(privacy|terms|accessibility)$/)?.[1] || null)
@@ -832,7 +833,7 @@ function App() {
         ? await fetch('/api/parent/dashboard', { headers: { Authorization: `Bearer ${session.access_token}` } })
         : null
       const parentData = parentResponse?.ok ? await parentResponse.json() : null
-      const [nextBookings, nextSchools, nextInstructors, nextPublicInstructors, nextStudents, nextFamilies, nextJobs, nextMessages, nextEvents, templateResponse] = await Promise.all([
+      const [nextBookings, nextSchools, nextInstructors, nextPublicInstructors, nextStudents, nextFamilies, nextJobs, nextMessages, nextEvents, nextTicketOrders, templateResponse] = await Promise.all([
         loadTable('bookings', []),
         loadTable('schools', []),
         loadTable('instructors', []),
@@ -842,6 +843,7 @@ function App() {
         loadTable('job_board_jobs', []),
         loadTable('messages', []),
         loadTable('events', []),
+        loadTable('event_ticket_orders', []),
         supabase.from('workshop_template').select('*').limit(1).maybeSingle(),
       ])
 
@@ -855,6 +857,7 @@ function App() {
       setJobs(nextJobs)
       setMessages(nextMessages)
       setEvents(nextEvents)
+      setTicketOrders(nextTicketOrders)
       setTemplate(templateResponse.data
         ? { sections: templateResponse.data.sections || [], maxStudentsPerStaff: templateResponse.data.max_students_per_staff || 30, defaultDuration: templateResponse.data.default_duration || 45, notes: templateResponse.data.notes || '' }
         : parseStored('kada-template', defaultTemplate))
@@ -867,7 +870,7 @@ function App() {
         if (pending.tab === 'bookings') { const found = (nextBookings || []).find((item) => item.id === pending.id); if (found) setBookingModal(found) }
         if (pending.tab === 'schools') { const found = (nextSchools || []).find((item) => item.id === pending.id); if (found) setSchoolRecord(found) }
         if (pending.tab === 'instructors') { const found = (nextInstructors || []).find((item) => item.id === pending.id); if (found) setInstructorModal(found) }
-        if (pending.tab === 'events-published' || pending.tab === 'events-drafts') { const found = (nextEvents || []).map(normalizeEvent).find((item) => item.id === pending.id); if (found) setEventModal(found) }
+        if (pending.tab === 'events-published' || pending.tab === 'events-drafts' || pending.tab === 'events-archived') { const found = (nextEvents || []).map(normalizeEvent).find((item) => item.id === pending.id); if (found) setEventModal(found) }
       }
     }
 
@@ -1016,10 +1019,14 @@ function App() {
     // bookings, so keep them out of the dashboard numbers entirely.
     const live = bookings.filter((booking) => booking.status !== 'Cancelled' && booking.paymentStatus !== 'pending')
     const upcomingCount = live.length
-    const confirmedRevenue = live.reduce((sum, booking) => sum + Number(booking.price || 0), 0)
+    const classRevenue = live.reduce((sum, booking) => sum + Number(booking.price || 0), 0)
+    const eventRevenue = ticketOrders
+      .filter((order) => order.payment_status === 'paid')
+      .reduce((sum, order) => sum + Number(order.total_pence || 0), 0) / 100
+    const confirmedRevenue = classRevenue + eventRevenue
     const unpaidInvoices = live.filter((booking) => booking.invoiceStatus !== 'Paid').length
-    return { upcomingCount, confirmedRevenue, unpaidInvoices }
-  }, [bookings])
+    return { upcomingCount, classRevenue, eventRevenue, confirmedRevenue, unpaidInvoices }
+  }, [bookings, ticketOrders])
 
   const handleQuoteChange = (field, value) => {
     setSchoolRequest((previous) => ({ ...previous, [field]: value }))
@@ -1200,21 +1207,50 @@ function App() {
   }
   const saveSchool = (school) => { const next = schools.some((item) => item.id === school.id) ? schools.map((item) => item.id === school.id ? school : item) : [school, ...schools]; persistRows('schools', next, setSchools); setSchoolModal(null); setSchoolRecord(next.find((item) => item.id === school.id) || null) }
   const saveInstructor = (instructor) => { const next = instructors.some((item) => item.id === instructor.id) ? instructors.map((item) => item.id === instructor.id ? instructor : item) : [instructor, ...instructors]; persistRows('instructors', next, setInstructors); setInstructorModal(null) }
+  const deleteBooking = async (booking) => {
+    if (!window.confirm(`Delete the booking for ${booking.sessionType || 'this session'} on ${booking.date || 'this date'}? This cannot be undone.`)) return
+    const previous = bookings
+    const next = bookings.filter((item) => item.id !== booking.id)
+    setBookings(next)
+    setBookingModal(null)
+    const { error } = await supabase.from('bookings').delete().eq('id', booking.id)
+    if (error) { setBookings(previous); setToast(`Booking could not be deleted: ${error.message}`); return }
+    if (typeof window !== 'undefined') window.localStorage.setItem('bookings', JSON.stringify(next))
+    setToast('Booking deleted.')
+  }
   const publishJob = (booking, draft) => { const pay = Number(draft.pay || booking.instructorPay || 0); if (!pay) { setToast('Set an instructor pay rate before publishing.'); return } const job = { id: `job-${booking.id}`, bookingId: booking.id, date: booking.date, sessionType: booking.sessionType, studentCount: booking.studentCount, locationArea: draft.location || 'Location shared after acceptance', instructorPay: pay, status: 'open', claimedBy: '' }; const updatedBooking = { ...booking, instructorPay: pay }; const nextBookings = bookings.map((item) => item.id === booking.id ? updatedBooking : item); persistRows('bookings', nextBookings, setBookings); persistRows('job_board_jobs', [job, ...jobs], setJobs) }
   const claimJob = (job) => { const next = jobs.map((item) => item.id === job.id ? { ...item, status: 'pending', claimedBy: profile.instructor_id, claimedAt: new Date().toISOString(), decidedAt: '' } : item); persistRows('job_board_jobs', next, setJobs); if (session) void fetch('/api/notify-admin', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'job-claim', detail: { sessionType: job.sessionType, date: job.date, claimedBy: instructors.find((instructor) => instructor.id === profile.instructor_id)?.name || profile.instructor_id } }) }) }
   const decideJob = (job, decision, rejectionReason = '') => { const timestamp = new Date().toISOString(); const nextStatus = decision === 'undo' ? 'pending' : decision; const next = jobs.map((item) => item.id === job.id ? { ...item, status: nextStatus, rejectionReason: decision === 'undo' ? '' : rejectionReason, decidedAt: decision === 'undo' ? '' : timestamp } : item); persistRows('job_board_jobs', next, setJobs); if (decision === 'accepted' || decision === 'undo') { const booking = bookings.find((item) => item.id === job.bookingId); if (booking) saveBooking({ ...booking, instructorId: decision === 'accepted' ? job.claimedBy : '' }) } }
   const saveTemplate = async (next) => { setTemplate(next); window.localStorage.setItem('kada-template', JSON.stringify(next)); const { data: current } = await supabase.from('workshop_template').select('id').limit(1).maybeSingle(); const row = { id: current?.id || 'default', max_students_per_staff: Number(next.maxStudentsPerStaff), default_duration: Number(next.defaultDuration), sections: next.sections, notes: next.notes }; const { error } = await supabase.from('workshop_template').upsert(row, { onConflict: 'id' }); setToast(error ? 'Template could not be saved.' : 'Workshop template saved.') }
   const saveEvent = async (event) => {
+    const previousEvents = events
     setEvents((current) => current.some((item) => item.id === event.id) ? current.map((item) => item.id === event.id ? event : item) : [event, ...current])
     setEventModal(null)
     const { error } = await supabase.from('events').upsert(toDbEvent(event), { onConflict: 'id' })
-    setToast(error ? `Event could not be saved: ${error.message}` : `Event "${event.title || 'Untitled'}" saved.`)
+    if (error) {
+      setEvents(previousEvents) // revert optimistic update so a failed archive/publish doesn't stick
+      setToast(`Event could not be saved: ${error.message}`)
+    } else {
+      setToast(`Event "${event.title || 'Untitled'}" saved.`)
+    }
   }
+  // Deleting an event with ticket orders would destroy sales history, so the
+  // database blocks it (FK RESTRICT). Offer archiving instead; only events with
+  // no orders get the hard-delete confirm.
   const deleteEvent = async (event) => {
-    setEvents((current) => current.filter((item) => item.id !== event.id))
+    const { count } = await supabase.from('event_ticket_orders').select('id', { count: 'exact', head: true }).eq('event_id', event.id)
+    if ((count || 0) > 0) {
+      if (window.confirm(`"${event.title || 'Untitled'}" has ${count} ticket order${count === 1 ? '' : 's'} on record and can't be deleted without losing sales history. Archive it instead? It disappears from the public site but stays in the Archived tab.`)) {
+        await saveEvent({ ...event, status: 'archived', showOnHomepage: false })
+      }
+      return
+    }
+    if (!window.confirm(`Delete "${event.title || 'Untitled'}" permanently? This cannot be undone.`)) return
     if (event.flyerPath) await supabase.storage.from('event-flyers').remove([event.flyerPath])
     const { error } = await supabase.from('events').delete().eq('id', event.id)
-    setToast(error ? `Event could not be deleted: ${error.message}` : 'Event deleted.')
+    if (error) { setToast(`Event could not be deleted: ${error.message}`); return }
+    setEvents((current) => current.filter((item) => item.id !== event.id))
+    setToast('Event deleted.')
   }
   const uploadEventFlyer = async (eventId, file) => {
     const path = `${eventId}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`
@@ -1408,6 +1444,7 @@ function App() {
       children: [
         { key: 'events-published', label: 'Published' },
         { key: 'events-drafts', label: 'Drafts' },
+        { key: 'events-archived', label: 'Archived' },
         { key: 'events-add', label: '+ Add event', action: true },
       ],
     }] : []),
@@ -1543,8 +1580,9 @@ function App() {
               <strong>{stats.upcomingCount}</strong>
             </div>
             <div className="panel stat-panel">
-              <div className="panel-label">Confirmed revenue</div>
+              <div className="panel-label">Total revenue</div>
               <strong>{formatCurrency(stats.confirmedRevenue)}</strong>
+              <div style={{ color: muted, fontSize: 12, marginTop: 4 }}>Classes {formatCurrency(stats.classRevenue)} · Events {formatCurrency(stats.eventRevenue)}</div>
             </div>
             <div className="panel stat-panel">
               <div className="panel-label">Unpaid / pending</div>
@@ -1591,7 +1629,7 @@ function App() {
 
           {isAdmin && tab === 'schools' && <div className="panel"><div className="panel-head"><h3>Schools</h3><Button small onClick={() => setSchoolModal(emptySchool())}>Add school</Button></div><input style={{ ...inputStyle, marginBottom: 12 }} placeholder="Search schools" value={schoolSearch} onChange={(event) => setSchoolSearch(event.target.value)} /><SchoolsTable schools={visibleSchools} bookings={bookings} expanded={showAllSchools} onToggleExpand={() => setShowAllSchools(!showAllSchools)} onSaveSchool={saveSchool} onView={setSchoolRecord} onMessage={(school) => setMessageTarget({ kind: 'school', id: school.id, name: school.name })} /></div>}
           {isAdmin && tab === 'instructors' && <div className="panel"><div className="panel-head"><h3>Instructors and assignments</h3><Button small onClick={() => setInstructorModal({ id: crypto.randomUUID(), name: '', email: '', phone: '', rate: 100, locationAreas: '', gender: '', dbsStatus: 'Missing' })}>Add instructor</Button></div><div style={{ display: 'grid', gridTemplateColumns: '1fr 180px', gap: 8, marginBottom: 12 }}><input style={inputStyle} placeholder="Search by name, location, gender" value={instructorSearch} onChange={(event) => setInstructorSearch(event.target.value)} /><select style={inputStyle} value={instructorSort} onChange={(event) => setInstructorSort(event.target.value)}><option value="name">Sort by name</option><option value="location">Sort by location</option><option value="gender">Sort by gender</option><option value="completed">Sort by completed</option></select></div><InstructorsTable instructors={visibleInstructors} expanded={showAllInstructors} onToggleExpand={() => setShowAllInstructors(!showAllInstructors)} completedBy={completedByInstructor} onSaveInstructor={saveInstructor} onMessage={(instructor) => setMessageTarget({ kind: 'instructor', id: instructor.id, name: instructor.name })} onEdit={setInstructorModal} onOpenDbs={openDbsFile} onReviewDbs={reviewDbs} /></div>}
-          {can('events') && (tab === 'events-published' || tab === 'events-drafts') && <EventsPage view={tab === 'events-published' ? 'published' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} session={session} />}
+          {can('events') && (tab === 'events-published' || tab === 'events-drafts' || tab === 'events-archived') && <EventsPage view={tab === 'events-published' ? 'published' : tab === 'events-archived' ? 'archived' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} session={session} />}
           {can('site') && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} />}
           {can('site') && tab === 'site-content' && <SiteContentPage content={siteContent} onSave={saveSiteContent} />}
           {(isAdmin || can('sales')) && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
@@ -1600,7 +1638,7 @@ function App() {
           {tab === 'messages' && profile && <MessagesView messages={messages} myKind={myKind} myInstructorId={myInstructorId} mySchoolId={mySchoolId} schools={schools} instructors={instructors} isAdmin={isAdmin} onSend={sendMessage} onMarkRead={markMessageRead} />}
 
           {schoolRecord && <SchoolRecord school={schoolRecord} bookings={bookings} instructorLabel={assignedInstructorLabel} onEdit={setSchoolModal} onBooking={setBookingModal} onMessage={(school) => setMessageTarget({ kind: 'school', id: school.id, name: school.name })} onClose={() => setSchoolRecord(null)} />}
-          {bookingModal && <Modal title="Booking" onClose={() => setBookingModal(null)} wide><BookingForm booking={bookingModal} schools={schools} instructors={instructors} onSave={saveBooking} onDelete={() => { const next = bookings.filter((item) => item.id !== bookingModal.id); persistRows('bookings', next, setBookings); setBookingModal(null) }} /></Modal>}
+          {bookingModal && <Modal title="Booking" onClose={() => setBookingModal(null)} wide><BookingForm booking={bookingModal} schools={schools} instructors={instructors} onSave={saveBooking} onDelete={() => deleteBooking(bookingModal)} /></Modal>}
           {schoolModal && <Modal title="School" onClose={() => setSchoolModal(null)}><SchoolForm school={schoolModal} onSave={saveSchool} /></Modal>}
           {instructorModal && <Modal title="Instructor" onClose={() => setInstructorModal(null)}><InstructorForm instructor={instructorModal} onSave={saveInstructor} /></Modal>}
           {eventModal && <Modal title={eventModal.title ? 'Edit event' : 'New event'} onClose={() => setEventModal(null)}><EventForm event={eventModal} onSave={saveEvent} onUploadFlyer={uploadEventFlyer} /></Modal>}

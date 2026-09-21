@@ -168,6 +168,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     return response.status(400).send(`Webhook Error: ${error.message}`)
   }
 
+  try {
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object
     const metadata = session.metadata || {}
@@ -196,7 +197,11 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
         payment_status: 'paid',
         attendee_names: attendeeNames,
       }, { onConflict: 'stripe_checkout_session_id' })
-      if (ticketError) console.error('Ticket order creation failed:', ticketError)
+      if (ticketError) {
+        console.error('Ticket order creation failed:', ticketError)
+        // Non-200 so Stripe retries instead of marking this delivered while nothing was written.
+        return response.status(500).json({ error: 'Ticket order write failed' })
+      }
 
       // File the buyer into the CRM as an event attendee with a category tag
       // for this event (e.g. "event:It's Time to Rise") so Contacts can sort
@@ -289,8 +294,12 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       payment_status: 'paid',
       requested_by: null,
     }, { onConflict: 'id' })
-    if (error) console.error('Booking creation failed:', error)
-    if (!error && !familyError && studentList.length) {
+    if (error) {
+      console.error('Booking creation failed:', error)
+      // Non-200 so Stripe retries instead of marking this delivered while nothing was written.
+      return response.status(500).json({ error: 'Booking write failed' })
+    }
+    if (!familyError && studentList.length) {
       const { error: studentError } = await supabase.from('students').update({ membership_status: 'active' }).eq('booking_id', metadata.booking_id)
       if (studentError) console.error('Student creation failed:', studentError)
     }
@@ -346,6 +355,12 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   }
 
   response.json({ received: true })
+  } catch (error) {
+    // Unexpected throw (not one of the explicit checked writes above) ,  return non-200
+    // so Stripe retries instead of recording this event as delivered.
+    console.error('Webhook processing threw:', error)
+    if (!response.headersSent) response.status(500).json({ error: 'Webhook processing failed' })
+  }
 })
 
 app.use(express.json())
@@ -535,6 +550,18 @@ async function requireAdmin(request, response) {
   if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
   const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle()
   if (profile?.role !== 'admin') { response.status(403).json({ error: 'Only admins can manage the team.' }); return null }
+  return user
+}
+
+// Door staff: admins, or team members whose profile grants the 'events' area.
+// Mirrors the client RLS policy so staff who can manage events can also run
+// the attendee list and check-in endpoints.
+async function requireEventsAccess(request, response) {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
+  const { data: profile } = await supabase.from('profiles').select('role,permissions').eq('id', user.id).maybeSingle()
+  const allowed = profile?.role === 'admin' || (profile?.role === 'staff' && (profile.permissions || []).includes('events'))
+  if (!allowed) { response.status(403).json({ error: 'You need the events permission to run check-in.' }); return null }
   return user
 }
 
@@ -905,27 +932,32 @@ app.post('/api/admin/campaigns/:id/delete', async (request, response) => {
 /* the tickets sold. Check-in/out stamps checked_in_at.                 */
 /* ------------------------------------------------------------------ */
 app.get('/api/admin/events/:id/attendees', async (request, response) => {
-  const user = await requireAdmin(request, response)
+  const user = await requireEventsAccess(request, response)
   if (!user) return
   const { data: orders, error } = await supabase.from('event_ticket_orders')
-    .select('id,buyer_name,buyer_email,tier_name,tickets,total_pence,payment_status,attendee_names,checked_in_at,created_at')
+    .select('id,buyer_name,buyer_email,tier_name,tickets,total_pence,payment_status,attendee_names,checked_in_at,checked_in_seats,created_at')
     .eq('event_id', request.params.id)
     .order('created_at', { ascending: true })
   if (error) return response.status(500).json({ error: 'Attendees could not be loaded. Has 20260921_event_attendees.sql been applied?' })
   const attendees = []
   ;(orders || []).forEach((order) => {
     const names = Array.isArray(order.attendee_names) && order.attendee_names.length ? order.attendee_names : Array.from({ length: order.tickets || 1 }, () => order.buyer_name)
+    const seats = order.checked_in_seats && typeof order.checked_in_seats === 'object' ? order.checked_in_seats : {}
     names.slice(0, order.tickets || names.length).forEach((name, index) => {
+      const seat = index + 1
       attendees.push({
         key: `${order.id}:${index}`,
         orderId: order.id,
-        seat: index + 1,
+        seat,
         name,
         buyerName: order.buyer_name,
         buyerEmail: order.buyer_email,
         tierName: order.tier_name,
         paymentStatus: order.payment_status,
-        checkedInAt: order.checked_in_at || null,
+        // Per-seat timestamp; if the seats map is empty but the legacy
+        // whole-order stamp exists (rows written between the two migrations),
+        // every seat shows that arrival time.
+        checkedInAt: seats[String(seat)] || (Object.keys(seats).length === 0 ? order.checked_in_at : null) || null,
       })
     })
   })
@@ -937,17 +969,26 @@ app.get('/api/admin/events/:id/attendees', async (request, response) => {
 })
 
 app.post('/api/admin/events/:id/check-in', async (request, response) => {
-  const user = await requireAdmin(request, response)
+  const user = await requireEventsAccess(request, response)
   if (!user) return
-  const { orderId, checkedIn = true } = request.body || {}
+  const { orderId, seat, checkedIn = true } = request.body || {}
   if (!orderId) return response.status(400).json({ error: 'An order id is required.' })
-  const { data: order, error } = await supabase.from('event_ticket_orders')
-    .update({ checked_in_at: checkedIn ? new Date().toISOString() : null })
-    .eq('id', orderId).eq('event_id', request.params.id)
-    .select('id,checked_in_at').maybeSingle()
-  if (error) return response.status(500).json({ error: 'Check-in could not be saved. Has 20260921_event_attendees.sql been applied?' })
-  if (!order) return response.status(404).json({ error: 'Order not found for this event.' })
-  response.json({ orderId: order.id, checkedInAt: order.checked_in_at })
+  const seatNumber = Math.floor(Number(seat))
+  if (!Number.isInteger(seatNumber) || seatNumber < 1) return response.status(400).json({ error: 'A seat number is required.' })
+  // The RPC only touches paid orders and applies the toggle atomically, so two
+  // door devices can check in different seats of the same order simultaneously.
+  const { data: seats, error } = await supabase.rpc('set_event_seat_checkin', { p_order_id: orderId, p_seat: seatNumber, p_checked_in: Boolean(checkedIn) })
+  if (error) {
+    const missing = /function .* does not exist/i.test(error.message || '')
+    return response.status(500).json({ error: missing ? 'Check-in could not be saved. Has 20260921_event_archive_and_seat_checkin.sql been applied?' : 'Check-in could not be saved.' })
+  }
+  if (seats === null) {
+    // Distinguish "no such order for this event" from "not paid" for a useful door message.
+    const { data: order } = await supabase.from('event_ticket_orders').select('id,payment_status').eq('id', orderId).eq('event_id', request.params.id).maybeSingle()
+    if (!order) return response.status(404).json({ error: 'Order not found for this event.' })
+    return response.status(409).json({ error: `This ticket is ${order.payment_status}. Only paid tickets can be checked in.` })
+  }
+  response.json({ orderId, seat: seatNumber, checkedInAt: seats[String(seatNumber)] || null, seats })
 })
 
 /* ------------------------------------------------------------------ */
