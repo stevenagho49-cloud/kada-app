@@ -84,6 +84,14 @@ async function sendEmail({ to, subject, html, attachments = [] }) {
 function money(pence) {
   return `£${(Number(pence || 0) / 100).toFixed(2)}`
 }
+/* Parse an email From value — handles 'Name <a@b.com>' and bare addresses. */
+function parseSender(raw) {
+  const angle = String(raw || '').match(/^(.*?)\s*<([^>]+)>/)
+  const bare = String(raw || '').match(/[\w.+-]+@[\w-]+\.[\w.]+/)
+  const email = (angle ? angle[2] : bare?.[0] || '').toLowerCase().trim()
+  const name = angle ? angle[1].replace(/^["']|["']$/g, '').trim() : ''
+  return { email, name }
+}
 function formatDateGB(value) {
   return value ? new Date(`${value}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : ''
 }
@@ -112,9 +120,26 @@ function buildIcs({ title, date, startTime, endTime, location, description, url 
   ].filter(Boolean).join('\r\n')
 }
 
-async function notifyAdmin(subject, html) {
-  if (!ADMIN_EMAIL) return { sent: false, reason: 'ADMIN_NOTIFICATION_EMAIL not set' }
-  return sendEmail({ to: ADMIN_EMAIL, subject: `[KADA] ${subject}`, html })
+/* Notification routing is editable from Operations > Administration >       */
+/* Settings (app_settings 'notifications') — the server re-reads it at most   */
+/* once a minute. Settings can retarget the alert inbox and switch off        */
+/* individual alert types; environment variables remain the fallback.         */
+let notificationSettingsCache = { at: 0, value: null }
+async function notificationSettings() {
+  if (!supabase) return null
+  if (notificationSettingsCache.value && Date.now() - notificationSettingsCache.at < 60000) return notificationSettingsCache.value
+  const { data } = await supabase.from('app_settings').select('value').eq('key', 'notifications').maybeSingle()
+  if (data?.value) notificationSettingsCache = { at: Date.now(), value: data.value }
+  return notificationSettingsCache.value
+}
+
+async function notifyAdmin(subject, html, type = '') {
+  const settings = await notificationSettings()
+  const toggleKey = { 'new-booking': 'newBooking', contact: 'newContact', jobs: 'jobAlerts' }[type]
+  if (settings && toggleKey && settings[toggleKey] === false) return { sent: false, reason: `${toggleKey} alerts disabled in Settings` }
+  const to = settings?.notifyEmail || ADMIN_EMAIL
+  if (!to) return { sent: false, reason: 'ADMIN_NOTIFICATION_EMAIL not set' }
+  return sendEmail({ to, subject: `[KADA] ${subject}`, html })
 }
 
 // A prominent button linking into the relevant Operations dashboard tab (deep link
@@ -233,7 +258,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       if (studentError) console.error('Student creation failed:', studentError)
     }
     if (!error) {
-      await notifyAdmin('New paid class booking', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New paid class booking</h2><p><strong>Parent:</strong> ${metadata.parent_name} (${session.customer_details?.email || metadata.parent_email})<br><strong>Class:</strong> ${metadata.class_name} (${planType})<br><strong>Date:</strong> ${metadata.class_date}<br><strong>Amount:</strong> ${money(metadata.amount_pence)}<br><strong>Children:</strong> ${studentList.length}</p>${dashboardButton('bookings', 'View booking', metadata.booking_id)}</div>`)
+      await notifyAdmin('New paid class booking', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New paid class booking</h2><p><strong>Parent:</strong> ${metadata.parent_name} (${session.customer_details?.email || metadata.parent_email})<br><strong>Class:</strong> ${metadata.class_name} (${planType})<br><strong>Date:</strong> ${metadata.class_date}<br><strong>Amount:</strong> ${money(metadata.amount_pence)}<br><strong>Children:</strong> ${studentList.length}</p>${dashboardButton('bookings', 'View booking', metadata.booking_id)}</div>`, 'new-booking')
 
       // Parent confirmation email, exactly once per booking — same idempotency
       // pattern as event tickets: atomically claim the booking by setting
@@ -339,7 +364,20 @@ app.post('/api/public/contact', async (request, response) => {
   const result = await notifyAdmin(
     `Website contact: ${topicLabel}`,
     `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New website message</h2><p><strong>From:</strong> ${esc(cleanName)} &lt;${esc(cleanEmail)}&gt;<br><strong>Topic:</strong> ${topicLabel}</p><p style="white-space:pre-wrap">${esc(cleanMessage)}</p><p style="color:#767066;font-size:12px">Reply directly to this email to respond to the sender.</p></div>`,
+    'contact',
   )
+  // File the sender in the CRM — matched by email, never duplicated. Filing
+  // must never break the contact form, so failures are swallowed.
+  if (supabase) {
+    const note = `Website message (${topicLabel}): ${cleanMessage.slice(0, 200)}`
+    const kind = { school: 'school', parent: 'parent', partnership: 'partner', other: 'other' }[cleanTopic]
+    const now = new Date().toISOString()
+    void supabase.from('contacts').select('id,notes').eq('email', cleanEmail.toLowerCase()).maybeSingle()
+      .then(({ data: existing }) => existing
+        ? supabase.from('contacts').update({ notes: `${existing.notes ? `${existing.notes}\n` : ''}${note}`.slice(-4000), last_contacted_at: now, updated_at: now }).eq('id', existing.id)
+        : supabase.from('contacts').insert({ kind, name: cleanName, email: cleanEmail.toLowerCase(), source: 'website', notes: note, last_contacted_at: now }))
+      .catch((error) => console.error('Contact filing failed:', error))
+  }
   if (!result.sent) return response.status(503).json({ error: 'Messages cannot be sent right now. Please email bookings@kingsarkdance.com directly.' })
   response.json({ sent: true })
 })
@@ -356,7 +394,7 @@ app.post('/api/notify-admin', async (request, response) => {
   const template = templates[type]
   if (!template) return response.status(400).json({ error: 'Unknown notification type.' })
   const [subject, html] = template()
-  const result = await notifyAdmin(subject, html)
+  const result = await notifyAdmin(subject, html, type === 'school-enquiry' ? 'new-booking' : 'jobs')
   response.json(result)
 })
 
@@ -388,7 +426,7 @@ app.post('/api/instructor/mark-done', async (request, response) => {
   if (error) return response.status(500).json({ error: 'Session could not be marked done.' })
   const { data: doneBooking } = await supabase.from('bookings').select('date, session_type, schools(name)').eq('id', bookingId).maybeSingle()
   const { data: instructor } = await supabase.from('instructors').select('name').eq('id', profile.instructor_id).maybeSingle()
-  await notifyAdmin('Session marked done — payment review needed', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Session awaiting payment review</h2><p><strong>Instructor:</strong> ${instructor?.name || profile.instructor_id}<br><strong>Session:</strong> ${doneBooking?.session_type || ''}<br><strong>School:</strong> ${doneBooking?.schools?.name || '—'}<br><strong>Date:</strong> ${doneBooking?.date || ''}</p>${dashboardButton('bookings', 'Review session', bookingId)}</div>`)
+  await notifyAdmin('Session marked done — payment review needed', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Session awaiting payment review</h2><p><strong>Instructor:</strong> ${instructor?.name || profile.instructor_id}<br><strong>Session:</strong> ${doneBooking?.session_type || ''}<br><strong>School:</strong> ${doneBooking?.schools?.name || '—'}<br><strong>Date:</strong> ${doneBooking?.date || ''}</p>${dashboardButton('bookings', 'Review session', bookingId)}</div>`, 'jobs')
   response.json({ completed: true })
 })
 
@@ -445,6 +483,146 @@ app.post('/api/admin/invoice-permissions', async (request, response) => {
   const { error } = await supabase.from('profiles').update({ can_send_invoices: Boolean(enabled) }).eq('id', target.id)
   if (error) return response.status(500).json({ error: 'Invoice permission could not be saved.' })
   response.json({ saved: true, enabled: Boolean(enabled) })
+})
+
+/* ------------------------------------------------------------------ */
+/* Team management — admins list, invite, update and remove staff      */
+/* accounts. Roles/permissions/job titles live on profiles; emails     */
+/* come from auth.users (service role only).                           */
+/* ------------------------------------------------------------------ */
+const TEAM_PERMISSIONS = ['bookings', 'contacts', 'students', 'events', 'messages', 'site', 'sales']
+const cleanPermissions = (value) => (Array.isArray(value) ? value.filter((item) => TEAM_PERMISSIONS.includes(item)) : [])
+
+async function requireAdmin(request, response) {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
+  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle()
+  if (profile?.role !== 'admin') { response.status(403).json({ error: 'Only admins can manage the team.' }); return null }
+  return user
+}
+
+app.get('/api/admin/team', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { data: profiles, error } = await supabase.from('profiles').select('id,role,full_name,job_title,permissions').in('role', ['admin', 'staff']).order('full_name')
+  if (error) return response.status(500).json({ error: 'Team could not be loaded.' })
+  const users = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 })
+  const emailById = new Map((users.data?.users || []).map((item) => [item.id, item.email]))
+  response.json({ members: (profiles || []).map((item) => ({ id: item.id, name: item.full_name || '', email: emailById.get(item.id) || '', role: item.role, jobTitle: item.job_title || '', permissions: item.permissions || [] })) })
+})
+
+app.post('/api/admin/team/invite', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { name = '', email = '', jobTitle = '', permissions = [] } = request.body || {}
+  const cleanName = String(name).trim().slice(0, 120)
+  const cleanEmail = String(email).trim().toLowerCase().slice(0, 200)
+  if (!cleanName || !/.+@.+\..+/.test(cleanEmail)) return response.status(400).json({ error: 'A name and a valid email are required.' })
+  // The invite email lets the new staff member set their own password. The
+  // handle_new_user trigger creates their staff profile from this metadata.
+  const { error: inviteError } = await supabase.auth.admin.inviteUserByEmail(cleanEmail, { data: { role: 'staff', full_name: cleanName }, redirectTo: `${APP_URL}/` })
+  const alreadyRegistered = inviteError && /already|registered|exists/i.test(inviteError.message)
+  if (inviteError && !alreadyRegistered) return response.status(500).json({ error: `Invite could not be sent: ${inviteError.message}` })
+  const users = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 })
+  const target = (users.data?.users || []).find((item) => item.email?.toLowerCase() === cleanEmail)
+  if (!target) return response.status(502).json({ error: 'The invite was sent but the new profile is not visible yet — try again in a moment.' })
+  const { error } = await supabase.from('profiles').update({ role: 'staff', full_name: cleanName, job_title: String(jobTitle).trim().slice(0, 80), permissions: cleanPermissions(permissions) }).eq('id', target.id)
+  if (error) return response.status(500).json({ error: 'Profile could not be updated.' })
+  response.json({ invited: true, alreadyRegistered })
+})
+
+app.post('/api/admin/team/:userId', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { userId } = request.params
+  const { role = 'staff', jobTitle = '', permissions = [] } = request.body || {}
+  if (!['admin', 'staff'].includes(role)) return response.status(400).json({ error: 'Role must be admin or staff.' })
+  if (userId === user.id && role !== 'admin') return response.status(400).json({ error: 'You cannot remove your own admin role.' })
+  const { error } = await supabase.from('profiles').update({ role, job_title: String(jobTitle).trim().slice(0, 80), permissions: cleanPermissions(permissions) }).eq('id', userId)
+  if (error) return response.status(500).json({ error: 'Team member could not be saved.' })
+  response.json({ saved: true })
+})
+
+app.post('/api/admin/team/:userId/remove', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { userId } = request.params
+  if (userId === user.id) return response.status(400).json({ error: 'You cannot remove your own access.' })
+  const { data: target } = await supabase.from('profiles').select('role').eq('id', userId).maybeSingle()
+  if (!target || !['admin', 'staff'].includes(target.role)) return response.status(404).json({ error: 'Team member not found.' })
+  await supabase.from('profiles').delete().eq('id', userId)
+  const { error } = await supabase.auth.admin.deleteUser(userId)
+  if (error) return response.status(500).json({ error: 'Sign-in could not be removed.' })
+  response.json({ removed: true })
+})
+
+/* ------------------------------------------------------------------ */
+/* Inbound email → Contacts. Point an email automation at this URL     */
+/* (Power Automate / Zapier / Make HTTP POST, or Mailgun Routes form   */
+/* post) with the shared secret; the sender is filed/updated in the    */
+/* CRM, matched by email so repeats never duplicate.                   */
+/* ------------------------------------------------------------------ */
+app.post('/api/inbound-email', express.urlencoded({ extended: true }), async (request, response) => {
+  const secret = process.env.INBOUND_EMAIL_SECRET
+  if (!secret || request.query.token !== secret) return response.status(401).json({ error: 'Invalid or missing token.' })
+  if (!supabase) return response.status(503).json({ error: 'Database is not configured.' })
+  const body = request.body || {}
+  const rawFrom = body.from || body.From || body.sender || ''
+  const subject = String(body.subject || body.Subject || '').trim().slice(0, 200)
+  const snippet = String(body.text || body['body-plain'] || body.body || '').replace(/\s+/g, ' ').trim().slice(0, 300)
+  const sender = parseSender(rawFrom)
+  if (!sender.email) return response.status(400).json({ error: 'No sender email address found in the payload.' })
+  const name = (sender.name || sender.email.split('@')[0].replace(/[._-]+/g, ' ')).slice(0, 120)
+  const note = [`Email: ${subject || '(no subject)'}`, snippet].filter(Boolean).join(' — ')
+  const now = new Date().toISOString()
+  const { data: existing } = await supabase.from('contacts').select('id,notes').eq('email', sender.email).maybeSingle()
+  if (existing) {
+    await supabase.from('contacts').update({ notes: `${existing.notes ? `${existing.notes}\n` : ''}${note}`.slice(-4000), last_contacted_at: now, updated_at: now }).eq('id', existing.id)
+    return response.json({ filed: true, created: false })
+  }
+  const { error } = await supabase.from('contacts').insert({ kind: 'other', name, email: sender.email, source: 'email', notes: note, last_contacted_at: now })
+  if (error) return response.status(500).json({ error: 'Contact could not be filed.' })
+  response.json({ filed: true, created: true })
+})
+
+/* ------------------------------------------------------------------ */
+/* Parent portal settings — parents update their own family details    */
+/* and their children's welfare notes. Ownership verified server-side. */
+/* ------------------------------------------------------------------ */
+app.post('/api/parent/settings', async (request, response) => {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
+  const { data: families, error: familyError } = await supabase.from('parent_families').select('*').or(`owner_user_id.eq.${user.id},guardian_email.eq.${user.email}`)
+  if (familyError) return response.status(500).json({ error: 'Family data could not be loaded.' })
+  const family = (families || []).find((item) => item.owner_user_id === user.id) || families?.[0]
+  if (!family) return response.status(404).json({ error: 'No family record found — complete a booking first.' })
+  const { family: familyUpdates = {}, students: studentUpdates = [] } = request.body || {}
+  const cleanText = (value, max) => (value === undefined ? undefined : String(value || '').trim().slice(0, max))
+  const update = {}
+  ;['guardian_name', 'guardian_phone', 'address', 'emergency_contact_name', 'emergency_contact_phone'].forEach((key) => {
+    const value = cleanText(familyUpdates[key], key === 'address' ? 300 : 120)
+    if (value !== undefined) update[key] = value
+  })
+  if (familyUpdates.comms && typeof familyUpdates.comms === 'object') update.comms = { reminders: Boolean(familyUpdates.comms.reminders), marketing: Boolean(familyUpdates.comms.marketing) }
+  let savedFamily = family
+  if (Object.keys(update).length) {
+    const { data: saved, error } = await supabase.from('parent_families').update({ ...update, updated_at: new Date().toISOString() }).eq('id', family.id).select().maybeSingle()
+    if (error) return response.status(500).json({ error: 'Family settings could not be saved.' })
+    savedFamily = saved || family
+  }
+  const savedStudents = []
+  for (const studentUpdate of (Array.isArray(studentUpdates) ? studentUpdates : []).slice(0, 20)) {
+    if (!studentUpdate?.id) continue
+    const payload = {
+      dietary_requirements: cleanText(studentUpdate.dietary_requirements, 500),
+      medical_notes: cleanText(studentUpdate.medical_notes, 500),
+      photo_consent: typeof studentUpdate.photo_consent === 'boolean' ? studentUpdate.photo_consent : null,
+    }
+    // eslint-disable-next-line no-await-in-loop
+    const { data: savedStudent } = await supabase.from('students').update(payload).eq('id', studentUpdate.id).eq('family_id', family.id).select().maybeSingle()
+    if (savedStudent) savedStudents.push(savedStudent)
+  }
+  response.json({ family: savedFamily, students: savedStudents })
 })
 
 function invoiceOverrides(booking, overrides = {}) {
@@ -546,7 +724,7 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
   document.rect(0, 0, pageWidth, 130.39).fill(emerald)
   document.rect(0, 130.39, pageWidth, 3.4).fill(gold)
   document.circle(margin + 28.35, 65.2, 31.75).fill(ivory)
-  const logoPath = ['public/images/logo-v2.jpg', 'dist/images/logo-v2.jpg', 'public/images/logo.jpg', 'dist/images/logo.jpg'].map((candidate) => path.resolve(process.cwd(), candidate)).find((candidate) => fs.existsSync(candidate))
+  const logoPath = ['public/images/logo-mark.png', 'dist/images/logo-mark.png'].map((candidate) => path.resolve(process.cwd(), candidate)).find((candidate) => fs.existsSync(candidate))
   if (logoPath) document.image(logoPath, margin + 5.67, 42.52, { fit: [45.36, 45.36], align: 'center', valign: 'center' })
   document.font('Times-Bold').fontSize(17).fillColor(ivory).text("King's Ark Dance Academy", margin + 68.03, 56.69)
   document.font('Helvetica').fontSize(8.5).fillColor(gold).text('GOSPEL AFROBEATS  ·  BIRMINGHAM', margin + 68.03, 72.28)

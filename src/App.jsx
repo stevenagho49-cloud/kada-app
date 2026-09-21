@@ -9,6 +9,9 @@ import { SiteLayoutPage } from './ops/SiteLayoutPage'
 import { SiteContentPage } from './ops/SiteContentPage'
 import { CalendarPage } from './ops/CalendarPage'
 import { ClassSchedulePage } from './ops/ClassSchedulePage'
+import { ContactsPage } from './ops/ContactsPage'
+import { TeamPage } from './ops/TeamPage'
+import { SettingsPage } from './ops/SettingsPage'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
 
 // Routable screens loaded on demand — the public homepage bundle doesn't pay for them.
@@ -164,7 +167,7 @@ function normalizeInstructor(row = {}) {
 }
 
 function normalizeStudent(row = {}) {
-  return { id: row.id, bookingId: row.booking_id ?? row.bookingId ?? '', familyId: row.family_id ?? row.familyId ?? '', parentName: row.parent_name ?? row.parentName ?? '', parentEmail: row.parent_email ?? row.parentEmail ?? '', name: row.name ?? '', dateOfBirth: row.date_of_birth ?? row.dateOfBirth ?? '', className: row.class_name ?? row.className ?? '', term: row.term ?? '', membershipStatus: row.membership_status ?? row.membershipStatus ?? 'active' }
+  return { id: row.id, bookingId: row.booking_id ?? row.bookingId ?? '', familyId: row.family_id ?? row.familyId ?? '', parentName: row.parent_name ?? row.parentName ?? '', parentEmail: row.parent_email ?? row.parentEmail ?? '', name: row.name ?? '', dateOfBirth: row.date_of_birth ?? row.dateOfBirth ?? '', className: row.class_name ?? row.className ?? '', term: row.term ?? '', membershipStatus: row.membership_status ?? row.membershipStatus ?? 'active', dietaryRequirements: row.dietary_requirements ?? row.dietaryRequirements ?? '', medicalNotes: row.medical_notes ?? row.medicalNotes ?? '', photoConsent: row.photo_consent ?? row.photoConsent ?? null }
 }
 
 function normalizeJob(row = {}) {
@@ -820,7 +823,8 @@ function App() {
   }, [session])
 
   useEffect(() => {
-    if (!supabaseReady || profile?.role !== 'admin') return undefined
+    const canSeeInvoiceSettings = profile?.role === 'admin' || (profile?.role === 'staff' && (profile?.permissions || []).includes('sales'))
+    if (!supabaseReady || !canSeeInvoiceSettings) return undefined
     let mounted = true
     supabase.from('invoice_settings').select('account_name,sort_code,account_number').eq('id', 'default').maybeSingle().then(({ data }) => {
       if (mounted && data) setInvoiceSettings({ accountName: data.account_name || '', sortCode: data.sort_code || '', accountNumber: data.account_number || '' })
@@ -1094,6 +1098,9 @@ function App() {
   const quoteStaff = quote ? quote.staffNeeded : buildPrice(schoolRequest).staffNeeded
   const isAdmin = profile?.role === 'admin'
   const isInstructor = profile?.role === 'instructor'
+  const isStaff = profile?.role === 'staff'
+  // Staff only see the areas an admin granted them in Team & access. Admins pass every check.
+  const can = (area) => isAdmin || (isStaff && (profile?.permissions || []).includes(area))
   const toggleOpsGroup = (label) => {
     setOpsOpenGroups((current) => {
       const next = new Set(current)
@@ -1186,6 +1193,18 @@ function App() {
     setFamilies((current) => current.map((item) => item.id === family.id ? { ...item, ...changes } : item))
     const { error } = await supabase.from('parent_families').update({ ...changes, updated_at: new Date().toISOString() }).eq('id', family.id)
     if (error) setToast(`Family record could not be saved: ${error.message}`)
+  }
+  // Parent portal > Settings — family contact/emergency details plus per-child
+  // welfare info. Routed through the server so family ownership is verified.
+  const saveParentSettings = async ({ family, students: studentUpdates }) => {
+    const response = await fetch('/api/parent/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` }, body: JSON.stringify({ family, students: studentUpdates }) })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(result.error || 'Settings could not be saved.')
+    if (result.family) setFamilies((current) => current.map((item) => item.id === result.family.id ? result.family : item))
+    if (result.students?.length) {
+      const byId = new Map(result.students.map((row) => [row.id, normalizeStudent(row)]))
+      setStudents((current) => current.map((item) => byId.get(item.id) || item))
+    }
   }
   const runSubscriptionAction = async (family, action) => {
     setSubscriptionBusyId(family.id)
@@ -1283,11 +1302,11 @@ function App() {
     const { error } = await supabase.from('messages').update({ read_at: readAt }).eq('id', message.id).is('read_at', null)
     if (!error) setMessages((current) => current.map((item) => item.id === message.id ? { ...item, readAt } : item))
   }
-  const myKind = isAdmin ? 'admin' : isInstructor ? 'instructor' : 'school'
+  const myKind = isAdmin || can('messages') ? 'admin' : isInstructor ? 'instructor' : 'school'
   const myInstructorId = isInstructor ? profile?.instructor_id : ''
   const mySchoolId = profile?.role === 'school' ? profile?.school_id : ''
-  const unreadMessages = messages.filter((message) => !message.readAt && (isAdmin ? message.recipientKind === 'admin' : isInstructor ? message.recipientKind === 'instructor' && message.recipientInstructorId === myInstructorId : message.recipientKind === 'school' && message.recipientSchoolId === mySchoolId)).length
-  const canIssueInvoices = isAdmin || Boolean(profile?.can_send_invoices)
+  const unreadMessages = messages.filter((message) => !message.readAt && (can('messages') ? message.recipientKind === 'admin' : isInstructor ? message.recipientKind === 'instructor' && message.recipientInstructorId === myInstructorId : message.recipientKind === 'school' && message.recipientSchoolId === mySchoolId)).length
+  const canIssueInvoices = isAdmin || can('sales') || Boolean(profile?.can_send_invoices)
   useEffect(() => {
     if (!invoiceBooking || !session || !canIssueInvoices) {
       return undefined
@@ -1316,12 +1335,14 @@ function App() {
       children: [
         { key: 'calendar', label: 'Calendar' },
         { key: 'bookings', label: 'Bookings' },
-        ...(isAdmin ? [{ key: 'schools', label: 'Schools' }, { key: 'instructors', label: 'Instructors' }, { key: 'students', label: 'Students' }, { key: 'class-schedule', label: 'Class schedule' }] : []),
+        ...(can('contacts') ? [{ key: 'contacts', label: 'Contacts' }] : []),
+        ...(isAdmin ? [{ key: 'schools', label: 'Schools' }, { key: 'instructors', label: 'Instructors' }] : []),
+        ...(isAdmin || can('students') ? [{ key: 'students', label: 'Students' }, { key: 'class-schedule', label: 'Class schedule' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'jobs', label: 'Job board' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'template', label: 'Workshop template' }] : []),
       ],
     },
-    ...(isAdmin ? [{
+    ...(can('events') ? [{
       label: 'Events',
       children: [
         { key: 'events-published', label: 'Published' },
@@ -1329,18 +1350,25 @@ function App() {
         { key: 'events-add', label: '+ Add event', action: true },
       ],
     }] : []),
-    ...(isAdmin ? [{
+    ...(can('site') ? [{
       label: 'Site',
       children: [
         { key: 'site-layout', label: 'Homepage layout' },
         { key: 'site-content', label: 'Site content' },
       ],
     }] : []),
-    ...(isAdmin ? [{
+    ...(can('sales') ? [{
       label: 'Sales',
       children: [
         { key: 'subscriptions', label: 'Subscriptions' },
         { key: 'invoice-settings', label: 'Invoice settings' },
+      ],
+    }] : []),
+    ...(isAdmin ? [{
+      label: 'Administration',
+      children: [
+        { key: 'team', label: 'Team & access' },
+        { key: 'settings', label: 'Settings' },
       ],
     }] : []),
     { key: 'messages', label: `Messages${unreadMessages ? ` (${unreadMessages})` : ''}` },
@@ -1352,7 +1380,7 @@ function App() {
     }
     setTab(key)
   }
-  const opsHeading = isAdmin ? 'Operations dashboard' : isInstructor ? 'Instructor dashboard' : 'School dashboard'
+  const opsHeading = isAdmin ? 'Operations dashboard' : isStaff ? 'Team dashboard' : isInstructor ? 'Instructor dashboard' : 'School dashboard'
 
   const routeFallback = <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', fontFamily: sans, background: cream, color: muted }}>Loading…</div>
 
@@ -1360,14 +1388,14 @@ function App() {
   if (eventPageId) return <Suspense fallback={routeFallback}><EventTicketPage eventId={eventPageId} onBack={() => { window.location.hash = '' }} /></Suspense>
   if (legalPageId) return <Suspense fallback={routeFallback}><LegalPage page={legalPageId} onBack={() => { window.location.hash = '' }} /></Suspense>
   if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
-  if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
+  if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
 
   return (
     <div className="app-shell">
       <header ref={headerRef} className="site-header">
         <div className="wrap nav-wrap">
           <div className="brand" aria-label="King's Ark Dance Academy home">
-                <img className="brand-logo" src="/images/logo-v2.jpg" alt="King's Ark Dance Academy logo" />
+                <img className="brand-logo" src={siteContent.branding?.logoUrl || '/images/logo-mark.png'} alt="King's Ark Dance Academy logo" />
             <div className="brand-text">
               <span className="name">King's Ark</span>
               <span className="sub">Dance Academy</span>
@@ -1459,11 +1487,14 @@ function App() {
           </div>
           )}
 
-          {tab === 'students' && isAdmin && <StudentPlansView students={students} />}
-          {tab === 'invoice-settings' && isAdmin && <InvoiceSettings settings={invoiceSettings} onSave={saveInvoiceSettings} saving={invoiceSettingsSaving} />}
+          {tab === 'students' && (isAdmin || can('students')) && <StudentPlansView students={students} />}
+          {tab === 'invoice-settings' && (isAdmin || can('sales')) && <InvoiceSettings settings={invoiceSettings} onSave={saveInvoiceSettings} saving={invoiceSettingsSaving} />}
+          {tab === 'contacts' && can('contacts') && <ContactsPage />}
+          {tab === 'team' && isAdmin && session && <TeamPage session={session} />}
+          {tab === 'settings' && isAdmin && <SettingsPage content={siteContent} onSaveContent={saveSiteContent} />}
           {tab === 'jobs' && (isAdmin || isInstructor) && <JobBoardView jobs={isInstructor ? jobs.filter((job) => job.status === 'open' || job.claimedBy === profile.instructor_id) : jobs} bookings={bookings} schools={schools} instructors={instructors} isAdmin={isAdmin} onClaim={claimJob} onDecision={decideJob} onGoToBookings={() => setTab('bookings')} />}
 
-          {tab === 'calendar' && (isAdmin || isInstructor) && <CalendarPage bookings={isInstructor ? bookings.filter((booking) => booking.instructorId === profile?.instructor_id) : bookings} events={events} instructors={instructors} onOpenBooking={(booking) => setBookingModal(booking)} onAddEvent={(date) => setEventModal({ ...emptyEvent(), eventDate: date })} />}
+          {tab === 'calendar' && (isAdmin || isInstructor || can('bookings')) && <CalendarPage bookings={isInstructor ? bookings.filter((booking) => booking.instructorId === profile?.instructor_id) : bookings} events={events} instructors={instructors} onOpenBooking={(booking) => setBookingModal(booking)} onAddEvent={(date) => setEventModal({ ...emptyEvent(), eventDate: date })} />}
           {tab === 'bookings' && <div className="panel">
             <div className="panel-head">
               <h3>Bookings</h3>
@@ -1493,11 +1524,11 @@ function App() {
 
           {isAdmin && tab === 'schools' && <div className="panel"><div className="panel-head"><h3>Schools</h3><Button small onClick={() => setSchoolModal(emptySchool())}>Add school</Button></div><input style={{ ...inputStyle, marginBottom: 12 }} placeholder="Search schools" value={schoolSearch} onChange={(event) => setSchoolSearch(event.target.value)} /><SchoolsTable schools={visibleSchools} bookings={bookings} expanded={showAllSchools} onToggleExpand={() => setShowAllSchools(!showAllSchools)} onSaveSchool={saveSchool} onView={setSchoolRecord} onMessage={(school) => setMessageTarget({ kind: 'school', id: school.id, name: school.name })} /></div>}
           {isAdmin && tab === 'instructors' && <div className="panel"><div className="panel-head"><h3>Instructors and assignments</h3><Button small onClick={() => setInstructorModal({ id: crypto.randomUUID(), name: '', email: '', phone: '', rate: 100, locationAreas: '', gender: '', dbsStatus: 'Missing' })}>Add instructor</Button></div><div style={{ display: 'grid', gridTemplateColumns: '1fr 180px', gap: 8, marginBottom: 12 }}><input style={inputStyle} placeholder="Search by name, location, gender" value={instructorSearch} onChange={(event) => setInstructorSearch(event.target.value)} /><select style={inputStyle} value={instructorSort} onChange={(event) => setInstructorSort(event.target.value)}><option value="name">Sort by name</option><option value="location">Sort by location</option><option value="gender">Sort by gender</option><option value="completed">Sort by completed</option></select></div><InstructorsTable instructors={visibleInstructors} expanded={showAllInstructors} onToggleExpand={() => setShowAllInstructors(!showAllInstructors)} completedBy={completedByInstructor} onSaveInstructor={saveInstructor} onMessage={(instructor) => setMessageTarget({ kind: 'instructor', id: instructor.id, name: instructor.name })} onEdit={setInstructorModal} onOpenDbs={openDbsFile} onReviewDbs={reviewDbs} /></div>}
-          {isAdmin && (tab === 'events-published' || tab === 'events-drafts') && <EventsPage view={tab === 'events-published' ? 'published' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} />}
-          {isAdmin && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} />}
-          {isAdmin && tab === 'site-content' && <SiteContentPage content={siteContent} onSave={saveSiteContent} />}
-          {isAdmin && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
-          {isAdmin && tab === 'class-schedule' && <ClassSchedulePage sessions={classSessions} onSave={saveClassSession} onAdd={addClassSession} onDelete={deleteClassSession} />}
+          {can('events') && (tab === 'events-published' || tab === 'events-drafts') && <EventsPage view={tab === 'events-published' ? 'published' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} />}
+          {can('site') && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} />}
+          {can('site') && tab === 'site-content' && <SiteContentPage content={siteContent} onSave={saveSiteContent} />}
+          {(isAdmin || can('sales')) && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
+          {(isAdmin || can('students')) && tab === 'class-schedule' && <ClassSchedulePage sessions={classSessions} onSave={saveClassSession} onAdd={addClassSession} onDelete={deleteClassSession} />}
           {tab === 'template' && <TemplateView template={template} onSave={saveTemplate} />}
           {tab === 'messages' && profile && <MessagesView messages={messages} myKind={myKind} myInstructorId={myInstructorId} mySchoolId={mySchoolId} schools={schools} instructors={instructors} isAdmin={isAdmin} onSend={sendMessage} onMarkRead={markMessageRead} />}
 

@@ -182,6 +182,13 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
   const classes = siteContent.classes || {}
   const team = siteContent.team || {}
   const contact = siteContent.contact || {}
+  const social = siteContent.social || {}
+  const socialLinks = [
+    { label: 'Instagram', url: social.instagram ?? 'https://www.instagram.com/kingsarkdance' },
+    { label: 'TikTok', url: social.tiktok },
+    { label: 'YouTube', url: social.youtube },
+    { label: 'Facebook', url: social.facebook },
+  ].filter((link) => link.url)
   const prices = siteContent.prices || {}
   const membershipPounds = (prices.membershipPence ?? 2500) / 100
   const dayPassPounds = (prices.dayPassPence ?? 1000) / 100
@@ -511,7 +518,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
           <div>
             <div className="f-brand">King's Ark Dance Academy</div>
             <div className="f-links">
-              <a href="https://www.instagram.com/kingsarkdance" target="_blank" rel="noreferrer">Instagram</a>
+              {socialLinks.map((link) => <a key={link.label} href={link.url} target="_blank" rel="noreferrer">{link.label}</a>)}
             </div>
           </div>
           <div className="f-links">
