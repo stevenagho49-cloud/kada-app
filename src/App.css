@@ -1746,3 +1746,56 @@ footer {
   margin: 8px 0 0;
   line-height: 1.5;
 }
+
+/* Event ticket page — two columns on desktop, stacked single column on mobile. */
+.ticket-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+
+.ticket-card {
+  position: sticky;
+  top: 20px;
+}
+
+.ticket-title {
+  font-size: 44px;
+}
+
+.ticket-flyer {
+  max-height: 380px;
+}
+
+@media (max-width: 900px) {
+  .ticket-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+
+  .ticket-card {
+    position: static;
+  }
+
+  .ticket-title {
+    font-size: clamp(28px, 8vw, 34px);
+  }
+
+  .ticket-flyer {
+    max-height: 240px;
+  }
+}
+
+/* Two-up form rows (parent dashboard booking/settings) stack on phones. */
+.pair-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+@media (max-width: 640px) {
+  .pair-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { AddressAutocomplete } from '../lib/AddressAutocomplete'
 import { DataTable, EditableText, StatusMenu, Toggle, OpsButton, EmptyState, Pill, OPS_COLORS, opsInputStyle } from './ui'
 
 export function flyerPublicUrl(path) {
@@ -100,11 +101,12 @@ const COPY = {
   },
 }
 
-export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEvent, onAddEvent }) {
+export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEvent, onAddEvent, session }) {
   const copy = COPY[view] || COPY.published
   const filtered = events.filter((event) => (view === 'published' ? event.status === 'published' : event.status === 'draft'))
   const [expanded, setExpanded] = useState(false)
   const [salesEvent, setSalesEvent] = useState(null)
+  const [attendeesEvent, setAttendeesEvent] = useState(null)
   const [copiedId, setCopiedId] = useState('')
 
   const copyShareLink = async (event) => {
@@ -171,7 +173,10 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
     },
     {
       key: 'sales', label: 'Sales', render: (event) => (
-        <OpsButton small variant="ghost" onClick={() => setSalesEvent(event)}>Buyers</OpsButton>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <OpsButton small variant="ghost" onClick={() => setSalesEvent(event)}>Buyers</OpsButton>
+          {event.ticketingEnabled && <OpsButton small onClick={() => setAttendeesEvent(event)}>Attendees</OpsButton>}
+        </div>
       ),
     },
     {
@@ -226,6 +231,7 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
         }
       />
       {salesEvent && <EventBuyersModal event={salesEvent} onClose={() => setSalesEvent(null)} />}
+      {attendeesEvent && session && <EventAttendeesModal event={attendeesEvent} session={session} onClose={() => setAttendeesEvent(null)} />}
     </div>
   )
 }
@@ -294,6 +300,138 @@ export function EventBuyersModal({ event, onClose }) {
   )
 }
 
+/* ------------------------------------------------------------------ */
+/* Attendees & door check-in. One row per ticket (bundle deals expand  */
+/* into each named seat). Paid tickets can be checked in/out with a    */
+/* tap; the counter doubles as the on-the-day arrival board.           */
+/* ------------------------------------------------------------------ */
+export function EventAttendeesModal({ event, session, onClose }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState('')
+  const [search, setSearch] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  const load = () => {
+    fetch(`/api/admin/events/${event.id}/attendees`, { headers: { Authorization: `Bearer ${session.access_token}` } })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(result.error || 'Could not load attendees')
+        setData(result)
+      })
+      .catch((loadError) => setError(loadError.message))
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(load, [event.id, session])
+
+  const toggleCheckIn = async (attendee) => {
+    const checkingIn = !attendee.checkedInAt
+    setData((current) => ({
+      ...current,
+      checkedIn: current.checkedIn + (checkingIn ? 1 : -1),
+      attendees: current.attendees.map((item) => (item.key === attendee.key ? { ...item, checkedInAt: checkingIn ? new Date().toISOString() : null } : item)),
+    }))
+    try {
+      const response = await fetch(`/api/admin/events/${event.id}/check-in`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ orderId: attendee.orderId, checkedIn }),
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || 'Check-in failed')
+    } catch (checkError) {
+      setError(checkError.message)
+      load() // revert to server truth
+    }
+  }
+
+  const paidAttendees = (data?.attendees || []).filter((attendee) => attendee.paymentStatus === 'paid')
+  const query = search.trim().toLowerCase()
+  const visible = (data?.attendees || []).filter((attendee) => !query || [attendee.name, attendee.buyerName, attendee.buyerEmail, attendee.tierName].filter(Boolean).some((value) => value.toLowerCase().includes(query)))
+
+  const exportCsv = () => {
+    const escapeCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`
+    const lines = [['Name', 'Ticket type', 'Booked by', 'Email', 'Status', 'Checked in'].map(escapeCell).join(',')]
+    paidAttendees.forEach((attendee) => lines.push([attendee.name, attendee.tierName, attendee.buyerName, attendee.buyerEmail, attendee.paymentStatus, attendee.checkedInAt ? new Date(attendee.checkedInAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''].map(escapeCell).join(',')))
+    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = `${event.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-door-list.csv`
+    link.click()
+    URL.revokeObjectURL(link.href)
+  }
+
+  const copyDoorList = async () => {
+    const text = paidAttendees.map((attendee) => attendee.name).join('\n')
+    try { await navigator.clipboard.writeText(text) } catch { window.prompt('Copy the door list:', text) }
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(20,16,8,0.45)', display: 'grid', placeItems: 'center', zIndex: 1000, padding: 20 }}>
+      <div onClick={(clickEvent) => clickEvent.stopPropagation()} style={{ background: OPS_COLORS.ivory, borderRadius: 12, border: `1px solid ${OPS_COLORS.rule}`, width: '100%', maxWidth: 720, maxHeight: '86vh', overflow: 'auto', padding: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+          <h3 style={{ margin: 0, fontFamily: "'Iowan Old Style', Georgia, serif", color: OPS_COLORS.emerald }}>{event.title}: attendees & check-in</h3>
+          <button type="button" onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: OPS_COLORS.muted }}>×</button>
+        </div>
+        {data && (
+          <div style={{ display: 'flex', gap: 14, margin: '8px 0 12px', fontSize: 13, color: OPS_COLORS.muted, flexWrap: 'wrap' }}>
+            <span><strong style={{ color: OPS_COLORS.ink }}>{paidAttendees.length}</strong> ticket{paidAttendees.length === 1 ? '' : 's'}</span>
+            <span><strong style={{ color: OPS_COLORS.emerald }}>{data.checkedIn}</strong> checked in</span>
+            <span><strong style={{ color: OPS_COLORS.ink }}>{data.orders}</strong> order{data.orders === 1 ? '' : 's'}</span>
+            <span style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
+              <button type="button" onClick={copyDoorList} style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', fontSize: 12.5, color: OPS_COLORS.emerald, fontWeight: 600 }}>{copied ? '✓ Copied' : '📋 Copy door list'}</button>
+              <button type="button" onClick={exportCsv} style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', fontSize: 12.5, color: OPS_COLORS.emerald, fontWeight: 600 }}>Export CSV</button>
+            </span>
+          </div>
+        )}
+        {error && <p style={{ color: OPS_COLORS.warn, fontSize: 13 }}>{error}</p>}
+        {!data && !error && <p style={{ color: OPS_COLORS.muted, fontSize: 13 }}>Loading attendees…</p>}
+        {data && paidAttendees.length === 0 && !error && (
+          <EmptyState icon="🪪" title="No ticket holders yet" body="Everyone who buys a ticket appears here, one row per ticket, ready for check-in on the day." />
+        )}
+        {data && paidAttendees.length > 0 && (
+          <>
+            <input style={{ ...opsInputStyle, marginBottom: 10 }} placeholder="Search name, email, ticket type…" value={search} onChange={(searchEvent) => setSearch(searchEvent.target.value)} />
+            <div style={{ display: 'grid', gap: 6 }}>
+              {visible.filter((attendee) => attendee.paymentStatus === 'paid').map((attendee) => (
+                <button
+                  type="button"
+                  key={attendee.key}
+                  onClick={() => toggleCheckIn(attendee)}
+                  style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '9px 12px', border: `1px solid ${attendee.checkedInAt ? OPS_COLORS.okGreen : OPS_COLORS.rule}`, borderRadius: 8, background: attendee.checkedInAt ? '#e6f0e9' : OPS_COLORS.ivory, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: OPS_COLORS.ink }}>
+                      {attendee.checkedInAt ? '✓ ' : ''}{attendee.name}
+                      {attendee.name === attendee.buyerName && attendee.seat > 1 ? <span style={{ fontWeight: 400, fontSize: 12, color: OPS_COLORS.muted }}> (ticket {attendee.seat})</span> : null}
+                    </div>
+                    <div style={{ fontSize: 12, color: OPS_COLORS.muted, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {attendee.tierName}{attendee.name !== attendee.buyerName ? ` · booked by ${attendee.buyerName}` : ''} · {attendee.buyerEmail}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap', color: attendee.checkedInAt ? OPS_COLORS.okGreen : OPS_COLORS.muted }}>
+                    {attendee.checkedInAt ? `Arrived ${new Date(attendee.checkedInAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : 'Tap to check in'}
+                  </span>
+                </button>
+              ))}
+              {visible.filter((attendee) => attendee.paymentStatus !== 'paid').map((attendee) => (
+                <div key={attendee.key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '9px 12px', border: `1px dashed ${OPS_COLORS.rule}`, borderRadius: 8, background: OPS_COLORS.cream, opacity: 0.75 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 14 }}>{attendee.name}</div>
+                    <div style={{ fontSize: 12, color: OPS_COLORS.muted }}>{attendee.tierName} · {attendee.buyerEmail}</div>
+                  </div>
+                  <Pill text={attendee.paymentStatus} tone={attendee.paymentStatus === 'refunded' ? 'red' : 'gold'} />
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function EventForm({ event, onSave, onUploadFlyer }) {
   const [form, setForm] = useState(event)
   const [uploadingFlyer, setUploadingFlyer] = useState(false)
@@ -323,7 +461,13 @@ export function EventForm({ event, onSave, onUploadFlyer }) {
         </label>
         <label style={{ display: 'block', marginBottom: 12 }}>
           <span style={{ display: 'block', fontSize: 12, fontWeight: 700, color: OPS_COLORS.emerald, marginBottom: 4 }}>Venue</span>
-          <input style={opsInputStyle} value={form.location} onChange={(inputEvent) => setForm({ ...form, location: inputEvent.target.value, mapUrl: '' })} placeholder="Birmingham" />
+          <AddressAutocomplete
+            style={opsInputStyle}
+            value={form.location}
+            onChange={(text) => setForm({ ...form, location: text, mapUrl: '' })}
+            onSelect={(result) => setForm((current) => ({ ...current, location: result.label, mapUrl: result.mapUrl }))}
+            placeholder="Postcode or venue, e.g. B1 2AA"
+          />
         </label>
       </div>
       <label style={{ display: 'block', marginBottom: 12 }}>

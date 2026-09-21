@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { AddressAutocomplete } from '../lib/AddressAutocomplete'
 import { ImageField, OpsButton, OPS_COLORS, opsInputStyle } from './ui'
 
 /* ------------------------------------------------------------------ */
@@ -107,7 +108,16 @@ export function SettingsPage({ content, onSaveContent }) {
           <TextField label="Bookings email" type="email" value={contact.email} onChange={(value) => { setContact({ ...contact, email: value }); setDirty((c) => ({ ...c, contact: true })) }} />
           <TextField label="Phone" value={contact.phone} onChange={(value) => { setContact({ ...contact, phone: value }); setDirty((c) => ({ ...c, contact: true })) }} />
         </div>
-        <TextField label="Address" value={contact.address} onChange={(value) => { setContact({ ...contact, address: value }); setDirty((c) => ({ ...c, contact: true })) }} />
+        <div style={{ marginBottom: 10 }}>
+          <span style={labelStyle}>Address</span>
+          <AddressAutocomplete
+            style={opsInputStyle}
+            value={contact.address}
+            placeholder="Postcode or street, pick the full address"
+            onChange={(value) => { setContact({ ...contact, address: value }); setDirty((c) => ({ ...c, contact: true })) }}
+            onSelect={(result) => { setContact((current) => ({ ...current, address: result.label })); setDirty((c) => ({ ...c, contact: true })) }}
+          />
+        </div>
       </Section>
 
       <Section

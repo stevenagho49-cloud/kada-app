@@ -23,8 +23,22 @@ function formatEventDate(value) {
   return value ? new Date(`${value}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : 'Date to be announced'
 }
 
+// Below this width the page is a single column: event info on top, tickets underneath.
+function useIsMobile(breakpoint = 900) {
+  const query = `(max-width: ${breakpoint}px)`
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const media = window.matchMedia(query)
+    const onChange = (changeEvent) => setMatches(changeEvent.matches)
+    media.addEventListener('change', onChange)
+    return () => media.removeEventListener('change', onChange)
+  }, [query])
+  return matches
+}
+
 export function EventTicketPage({ eventId, onBack }) {
   const logoUrl = useSiteLogo()
+  const isMobile = useIsMobile()
   const [event, setEvent] = useState(null)
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
@@ -32,6 +46,7 @@ export function EventTicketPage({ eventId, onBack }) {
   const [quantity, setQuantity] = useState(1)
   const [buyerName, setBuyerName] = useState('')
   const [buyerEmail, setBuyerEmail] = useState('')
+  const [attendeeNames, setAttendeeNames] = useState([''])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   // successState: null (no redirect) | 'loading' | 'found' | 'pending'
@@ -85,7 +100,25 @@ export function EventTicketPage({ eventId, onBack }) {
   const selectedTier = event?.ticketTiers.find((tier) => tier.id === selectedTierId) || null
   const totalPence = selectedTier ? selectedTier.pricePence * quantity : 0
   const totalTickets = selectedTier ? selectedTier.bundleSize * quantity : 0
-  const canBuy = Boolean(event?.ticketingEnabled && selectedTier && buyerName.trim() && /.+@.+\..+/.test(buyerEmail) && !busy)
+  // One name slot per ticket: bundle deals (2-for-1) and multi-quantity orders
+  // expand to one input each. Slot 1 defaults to the buyer's name.
+  useEffect(() => {
+    setAttendeeNames((current) => {
+      const next = Array.from({ length: totalTickets }, (_, index) => current[index] ?? '')
+      return next.length ? next : ['']
+    })
+  }, [totalTickets])
+  // Slot 1 mirrors the buyer's name until the buyer types something different there.
+  const setAttendeeName = (index, value) => setAttendeeNames((current) => current.map((name, nameIndex) => (nameIndex === index ? value : name)))
+  const onBuyerNameChange = (value) => {
+    setBuyerName(value)
+    setAttendeeNames((current) => {
+      if (current[0]?.trim() && current[0] !== buyerName) return current // buyer customised slot 1
+      return current.map((name, index) => (index === 0 ? value : name))
+    })
+  }
+  const namesReady = attendeeNames.slice(0, totalTickets).every((name, index) => (index === 0 ? (name.trim() || buyerName.trim()) : name.trim() || buyerName.trim()))
+  const canBuy = Boolean(event?.ticketingEnabled && selectedTier && buyerName.trim() && /.+@.+\..+/.test(buyerEmail) && namesReady && !busy)
 
   const startTicketCheckout = async (submitEvent) => {
     submitEvent.preventDefault()
@@ -93,10 +126,11 @@ export function EventTicketPage({ eventId, onBack }) {
     setBusy(true)
     setError('')
     try {
+      const names = attendeeNames.slice(0, totalTickets).map((name) => name.trim() || buyerName.trim())
       const response = await fetch('/api/stripe/create-event-checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ eventId, tierId: selectedTierId, quantity, buyerName: buyerName.trim(), buyerEmail: buyerEmail.trim() }),
+        body: JSON.stringify({ eventId, tierId: selectedTierId, quantity, buyerName: buyerName.trim(), buyerEmail: buyerEmail.trim(), attendeeNames: names }),
       })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Checkout could not be started.')
@@ -110,7 +144,7 @@ export function EventTicketPage({ eventId, onBack }) {
   const shell = (children) => (
     <div style={{ minHeight: '100vh', background: cream, fontFamily: sans, color: ink }}>
       <header style={{ background: emerald, color: ivory }}>
-        <div style={{ maxWidth: 1040, margin: '0 auto', padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div style={{ maxWidth: 1040, margin: '0 auto', padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <img src={logoUrl} alt="King's Ark Dance Academy logo" style={{ width: 34, height: 34, objectFit: 'contain' }} />
             <div>
@@ -154,6 +188,7 @@ export function EventTicketPage({ eventId, onBack }) {
               {successOrder.location && <SummaryRow label="Venue" value={successOrder.location} />}
               <SummaryRow label="Ticket type" value={successOrder.tierName} />
               <SummaryRow label="Tickets" value={`${successOrder.tickets}`} />
+              {(successOrder.attendeeNames || []).length > 0 && <SummaryRow label="Names" value={successOrder.attendeeNames.join(', ')} />}
               <SummaryRow label="Total paid" value={formatTierPrice(successOrder.totalPence)} bold />
               <SummaryRow label="Confirmation to" value={successOrder.buyerEmail} />
             </div>
@@ -164,15 +199,15 @@ export function EventTicketPage({ eventId, onBack }) {
   }
 
   return shell(
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.15fr) minmax(0, 1fr)', gap: 28, alignItems: 'start' }}>
+    <div className="ticket-grid" style={isMobile ? { display: 'block' } : undefined}>
       <div>
         {event.flyerPath && (
-          <img src={flyerPublicUrl(event.flyerPath)} alt={`${event.title} flyer`} style={{ width: '100%', maxHeight: 380, objectFit: 'cover', borderRadius: 14, border: `1px solid ${rule}`, marginBottom: 18, display: 'block' }} />
+          <img className="ticket-flyer" src={flyerPublicUrl(event.flyerPath)} alt={`${event.title} flyer`} style={{ width: '100%', maxHeight: isMobile ? 240 : 380, objectFit: 'cover', borderRadius: 14, border: `1px solid ${rule}`, marginBottom: 18, display: 'block' }} />
         )}
         <div style={{ color: gold, fontSize: 12.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 10 }}>
           {formatEventDate(event.eventDate)}{formatEventTimeRange(event.eventTime, event.eventEndTime) ? ` · ${formatEventTimeRange(event.eventTime, event.eventEndTime)}` : ''}
         </div>
-        <h1 style={{ fontFamily: serif, fontSize: 44, lineHeight: 1.05, margin: '0 0 14px', color: emerald }}>{event.title}</h1>
+        <h1 className="ticket-title" style={{ fontFamily: serif, fontSize: isMobile ? 32 : 44, lineHeight: 1.05, margin: '0 0 14px', color: emerald }}>{event.title}</h1>
         {event.guestArtists && (
           <p style={{ fontSize: 15.5, margin: '0 0 12px' }}>Featuring <strong>{event.guestArtists}</strong></p>
         )}
@@ -189,7 +224,7 @@ export function EventTicketPage({ eventId, onBack }) {
         {event.description && <p style={{ color: ink, lineHeight: 1.65, fontSize: 15, whiteSpace: 'pre-line' }}>{event.description}</p>}
       </div>
 
-      <div style={{ background: ivory, border: `1px solid ${rule}`, borderRadius: 14, padding: 22, position: 'sticky', top: 20 }}>
+      <div className="ticket-card" style={{ background: ivory, border: `1px solid ${rule}`, borderRadius: 14, padding: 22, marginTop: isMobile ? 24 : 0, position: isMobile ? 'static' : 'sticky', top: isMobile ? 0 : 20 }}>
         <h2 style={{ fontFamily: serif, fontSize: 22, margin: '0 0 4px', color: emerald }}>Tickets</h2>
         {!event.ticketingEnabled || event.ticketTiers.length === 0 ? (
           <p style={{ color: muted, margin: '8px 0 0' }}>Tickets for this event are not on sale yet. Check back soon.</p>
@@ -208,7 +243,7 @@ export function EventTicketPage({ eventId, onBack }) {
                     style={{
                       textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit', borderRadius: 10, padding: '12px 14px',
                       border: `2px solid ${selected ? emerald : rule}`, background: selected ? '#eef4ef' : ivory,
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12,
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap',
                     }}
                   >
                     <div>
@@ -233,12 +268,32 @@ export function EventTicketPage({ eventId, onBack }) {
 
             <label style={{ display: 'block', marginBottom: 10 }}>
               <span style={{ display: 'block', fontSize: 12, fontWeight: 700, color: emerald, marginBottom: 4 }}>Your name</span>
-              <input style={inputStyle} value={buyerName} onChange={(inputEvent) => setBuyerName(inputEvent.target.value)} placeholder="Full name" required />
+              <input style={inputStyle} value={buyerName} onChange={(inputEvent) => onBuyerNameChange(inputEvent.target.value)} placeholder="Full name" required />
             </label>
             <label style={{ display: 'block', marginBottom: 14 }}>
               <span style={{ display: 'block', fontSize: 12, fontWeight: 700, color: emerald, marginBottom: 4 }}>Email for confirmation</span>
               <input type="email" style={inputStyle} value={buyerEmail} onChange={(inputEvent) => setBuyerEmail(inputEvent.target.value)} placeholder="you@example.com" required />
             </label>
+
+            {totalTickets > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                <span style={{ display: 'block', fontSize: 12, fontWeight: 700, color: emerald, marginBottom: 4 }}>
+                  Who is coming? {totalTickets > 1 ? `One name per ticket (${totalTickets} tickets)` : 'Name on the ticket'}
+                </span>
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {Array.from({ length: totalTickets }, (_, index) => (
+                    <input
+                      key={index}
+                      style={inputStyle}
+                      value={attendeeNames[index] ?? ''}
+                      onChange={(inputEvent) => setAttendeeName(index, inputEvent.target.value)}
+                      placeholder={index === 0 ? `Ticket 1 (usually you${buyerName.trim() ? `, ${buyerName.trim()}` : ''})` : `Ticket ${index + 1} guest name (same name is fine)`}
+                    />
+                  ))}
+                </div>
+                {totalTickets > 1 && <p style={{ fontSize: 11.5, color: muted, margin: '6px 0 0' }}>Every ticket needs a name for the door list, even if two seats are for the same person.</p>}
+              </div>
+            )}
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', borderTop: `1px solid ${rule}`, paddingTop: 12, marginBottom: 14 }}>
               <span style={{ fontSize: 13, color: muted }}>{totalTickets} ticket{totalTickets === 1 ? '' : 's'} total</span>
@@ -272,8 +327,8 @@ const stepperStyle = {
 function SummaryRow({ label, value, bold = false }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, padding: '7px 0', borderBottom: `1px solid ${rule}`, fontSize: 14 }}>
-      <span style={{ color: muted }}>{label}</span>
-      <span style={{ fontWeight: bold ? 700 : 600, textAlign: 'right' }}>{value}</span>
+      <span style={{ color: muted, flexShrink: 0 }}>{label}</span>
+      <span style={{ fontWeight: bold ? 700 : 600, textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>{value}</span>
     </div>
   )
 }

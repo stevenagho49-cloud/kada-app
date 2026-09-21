@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { AddressAutocomplete } from '../lib/AddressAutocomplete'
 import { DataTable, EmptyState, OpsButton, Pill, OPS_COLORS, opsInputStyle } from './ui'
 
 /* ------------------------------------------------------------------ */
@@ -13,10 +14,11 @@ const KIND_OPTIONS = [
   { value: 'parent', label: 'Parent' },
   { value: 'client', label: 'Client' },
   { value: 'partner', label: 'Partner' },
+  { value: 'event-attendee', label: 'Event attendee' },
   { value: 'other', label: 'Other' },
 ]
-const KIND_TONES = { school: 'green', parent: 'gold', client: 'default', partner: 'gold', other: 'default' }
-const SOURCE_LABELS = { manual: 'Manual', import: 'Import', email: 'Email', website: 'Website' }
+const KIND_TONES = { school: 'green', parent: 'gold', client: 'default', partner: 'gold', 'event-attendee': 'green', other: 'default' }
+const SOURCE_LABELS = { manual: 'Manual', import: 'Import', email: 'Email', website: 'Website', 'event-ticket': 'Event tickets' }
 
 const emptyContact = { id: '', kind: 'school', name: '', organisation: '', email: '', phone: '', address: '', tags: [], notes: '' }
 
@@ -125,12 +127,16 @@ function toDbRow(draft) {
   }
 }
 
-export function ContactsPage() {
+export function ContactsPage({ session }) {
   const [contacts, setContacts] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [search, setSearch] = useState('')
   const [kindFilter, setKindFilter] = useState('')
+  const [tagFilter, setTagFilter] = useState('')
+  const [sortBy, setSortBy] = useState('recent')
+  const [selected, setSelected] = useState(() => new Set())
+  const [showEmailBlast, setShowEmailBlast] = useState(false)
   const [editing, setEditing] = useState(null) // draft object or null
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
@@ -158,15 +164,36 @@ export function ContactsPage() {
   }
   useEffect(() => { void load() }, [])
 
+  // Category tags (e.g. "event:It's Time to Rise") so contacts can be grouped
+  // and sorted by which event or list they belong to.
+  const allTags = useMemo(() => [...new Set(contacts.flatMap((contact) => contact.tags || []))].sort((a, b) => a.localeCompare(b)), [contacts])
+
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase()
-    return contacts.filter((contact) => {
+    const list = contacts.filter((contact) => {
       if (kindFilter && contact.kind !== kindFilter) return false
+      if (tagFilter && !(contact.tags || []).includes(tagFilter)) return false
       if (!query) return true
       return [contact.name, contact.organisation, contact.email, contact.phone, (contact.tags || []).join(' ')]
         .filter(Boolean).some((value) => value.toLowerCase().includes(query))
     })
-  }, [contacts, search, kindFilter])
+    const byName = (a, b) => (a.name || '').localeCompare(b.name || '')
+    if (sortBy === 'name') return list.slice().sort(byName)
+    if (sortBy === 'type') return list.slice().sort((a, b) => (a.kind || '').localeCompare(b.kind || '') || byName(a, b))
+    if (sortBy === 'category') return list.slice().sort((a, b) => ((a.tags || [])[0] || '￿').localeCompare((b.tags || [])[0] || '￿') || byName(a, b))
+    return list // 'recent' keeps the created_at order from the server
+  }, [contacts, search, kindFilter, tagFilter, sortBy])
+
+  const visibleIds = filtered.map((contact) => contact.id)
+  const selectedContacts = contacts.filter((contact) => selected.has(contact.id))
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id))
+  const toggleOne = (id) => setSelected((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
+  const toggleAllVisible = () => setSelected((current) => {
+    const next = new Set(current)
+    if (allVisibleSelected) visibleIds.forEach((id) => next.delete(id))
+    else visibleIds.forEach((id) => next.add(id))
+    return next
+  })
 
   /* Shared dedupe path: match by email, else by name+organisation. mode:     */
   /*   'merge' (default) ,  update existing, filling only provided fields      */
@@ -238,6 +265,11 @@ export function ContactsPage() {
   }
 
   const columns = [
+    { key: 'select', label: (
+      <input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} aria-label="Select all visible contacts" style={{ accentColor: OPS_COLORS.emerald }} />
+    ), render: (row) => (
+      <input type="checkbox" checked={selected.has(row.id)} onChange={() => toggleOne(row.id)} aria-label={`Select ${row.name}`} style={{ accentColor: OPS_COLORS.emerald }} />
+    ) },
     { key: 'name', label: 'Name', render: (row) => <div><div style={{ fontWeight: 700 }}>{row.name}</div>{row.organisation && <div style={{ fontSize: 12, color: OPS_COLORS.muted }}>{row.organisation}</div>}</div> },
     { key: 'kind', label: 'Type', render: (row) => <Pill text={row.kind} tone={KIND_TONES[row.kind]} /> },
     { key: 'email', label: 'Email', render: (row) => row.email ? <a href={`mailto:${row.email}`} style={{ color: OPS_COLORS.emerald }}>{row.email}</a> : <span style={{ color: OPS_COLORS.muted }}>, </span> },
@@ -269,11 +301,24 @@ export function ContactsPage() {
       </p>
 
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
-        <input style={{ ...opsInputStyle, maxWidth: 280 }} placeholder="Search name, email, phone, tag…" value={search} onChange={(event) => setSearch(event.target.value)} />
-        <select style={{ ...opsInputStyle, maxWidth: 170 }} value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}>
+        <input style={{ ...opsInputStyle, maxWidth: 260 }} placeholder="Search name, email, phone, tag…" value={search} onChange={(event) => setSearch(event.target.value)} />
+        <select style={{ ...opsInputStyle, maxWidth: 160 }} value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}>
           <option value="">All types</option>
           {KIND_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
+        <select style={{ ...opsInputStyle, maxWidth: 200 }} value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}>
+          <option value="">All categories</option>
+          {allTags.map((tag) => <option key={tag} value={tag}>{tag.replace(/^event:/, 'Event: ')}</option>)}
+        </select>
+        <select style={{ ...opsInputStyle, maxWidth: 150 }} value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+          <option value="recent">Newest first</option>
+          <option value="name">Sort by name</option>
+          <option value="type">Sort by type</option>
+          <option value="category">Sort by category</option>
+        </select>
+        {selected.size > 0 && (
+          <OpsButton small variant="gold" onClick={() => setShowEmailBlast(true)}>✉ Email {selected.size} selected</OpsButton>
+        )}
       </div>
 
       {notice && <p style={{ color: OPS_COLORS.okGreen, fontSize: 13 }}>{notice}</p>}
@@ -305,7 +350,15 @@ export function ContactsPage() {
               <label style={{ display: 'block' }}><span style={labelStyle}>Phone</span><input style={opsInputStyle} value={editing.phone || ''} onChange={(event) => setEditing({ ...editing, phone: event.target.value })} /></label>
               <label style={{ display: 'block' }}><span style={labelStyle}>Tags (comma separated)</span><input style={opsInputStyle} placeholder="e.g. bhm, workshop, vip" value={editing.tags.join(', ')} onChange={(event) => setEditing({ ...editing, tags: event.target.value.split(',') })} /></label>
             </div>
-            <label style={{ display: 'block', marginTop: 10 }}><span style={labelStyle}>Address</span><input style={opsInputStyle} value={editing.address || ''} onChange={(event) => setEditing({ ...editing, address: event.target.value })} /></label>
+            <label style={{ display: 'block', marginTop: 10 }}><span style={labelStyle}>Address</span>
+              <AddressAutocomplete
+                style={opsInputStyle}
+                value={editing.address || ''}
+                onChange={(value) => setEditing({ ...editing, address: value })}
+                onSelect={(result) => setEditing((current) => ({ ...current, address: result.label }))}
+                placeholder="Postcode or start of address…"
+              />
+            </label>
             <label style={{ display: 'block', marginTop: 10 }}><span style={labelStyle}>Notes</span><textarea style={{ ...opsInputStyle, minHeight: 70 }} value={editing.notes || ''} onChange={(event) => setEditing({ ...editing, notes: event.target.value })} /></label>
             {formError && <p style={{ color: OPS_COLORS.warn, fontSize: 13 }}>{formError}</p>}
             <div style={{ display: 'flex', gap: 10, marginTop: 14, justifyContent: 'flex-end' }}>
@@ -314,6 +367,20 @@ export function ContactsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {showEmailBlast && (
+        <EmailBlastModal
+          contacts={selectedContacts}
+          session={session}
+          onClose={() => setShowEmailBlast(false)}
+          onSent={(result) => {
+            setShowEmailBlast(false)
+            setSelected(new Set())
+            setNotice(`Email sent to ${result.sent} contact${result.sent === 1 ? '' : 's'}${result.failed ? `, ${result.failed} failed` : ''}${result.skipped ? `, ${result.skipped} without an email skipped` : ''}.`)
+            window.setTimeout(() => setNotice(''), 6000)
+          }}
+        />
       )}
 
       {showImport && (
@@ -647,6 +714,60 @@ function EmailQuickAdd({ onClose, onDone, upsertOne }) {
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 12 }}>
           <OpsButton variant="ghost" onClick={onClose}>Cancel</OpsButton>
           <OpsButton disabled={busy || !text.trim()} onClick={file}>{busy ? 'Filing…' : 'File as contact'}</OpsButton>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Mass email to the selected contacts. Sends one branded email per    */
+/* recipient through the server (never a shared To: list).             */
+/* ------------------------------------------------------------------ */
+function EmailBlastModal({ contacts, session, onClose, onSent }) {
+  const [subject, setSubject] = useState('')
+  const [body, setBody] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const withEmail = contacts.filter((contact) => contact.email)
+  const withoutEmail = contacts.length - withEmail.length
+
+  const send = async () => {
+    if (!session?.access_token) { setError('Only admins can send mass emails. Sign in as an admin first.'); return }
+    setBusy(true)
+    setError('')
+    try {
+      const response = await fetch('/api/admin/contacts/email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ ids: withEmail.map((contact) => contact.id), subject, body }),
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || 'The emails could not be sent.')
+      onSent(result)
+    } catch (sendError) {
+      setError(sendError.message)
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div style={overlayStyle} onClick={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <div style={modalStyle}>
+        <h3 style={{ margin: '0 0 4px', fontFamily: "'Iowan Old Style', Georgia, serif", color: OPS_COLORS.emerald, fontWeight: 400 }}>Email {withEmail.length} contact{withEmail.length === 1 ? '' : 's'}</h3>
+        <p style={{ margin: '0 0 12px', fontSize: 12.5, color: OPS_COLORS.muted }}>
+          Each person gets their own branded email (nobody sees anyone else's address).
+          {withoutEmail > 0 ? ` ${withoutEmail} selected contact${withoutEmail === 1 ? '' : 's'} without an email address will be skipped.` : ''}
+        </p>
+        <div style={{ maxHeight: 84, overflowY: 'auto', border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: '6px 10px', marginBottom: 12, background: OPS_COLORS.ivory, fontSize: 12.5, color: OPS_COLORS.muted }}>
+          {withEmail.map((contact) => contact.email).join(', ') || 'No email addresses in the selection.'}
+        </div>
+        <label style={{ display: 'block', marginBottom: 10 }}><span style={labelStyle}>Subject</span><input style={opsInputStyle} value={subject} onChange={(event) => setSubject(event.target.value)} placeholder="e.g. It's Time to Rise ,  final details" /></label>
+        <label style={{ display: 'block' }}><span style={labelStyle}>Message</span><textarea style={{ ...opsInputStyle, minHeight: 130 }} value={body} onChange={(event) => setBody(event.target.value)} placeholder="Write your message… Blank lines start a new paragraph." /></label>
+        {error && <p style={{ color: OPS_COLORS.warn, fontSize: 13 }}>{error}</p>}
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 14 }}>
+          <OpsButton variant="ghost" onClick={onClose}>Cancel</OpsButton>
+          <OpsButton variant="gold" disabled={busy || !subject.trim() || !body.trim() || !withEmail.length} onClick={send}>{busy ? 'Sending…' : `Send to ${withEmail.length}`}</OpsButton>
         </div>
       </div>
     </div>

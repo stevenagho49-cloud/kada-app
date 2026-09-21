@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { OpsSidebar, DataTable, Pill, OpsButton, EmptyState } from './ops/ui'
 import { ClassDatePicker, DAY_NAMES, nextClassDate } from './lib/classDates'
+import { AddressAutocomplete } from './lib/AddressAutocomplete'
 
 const emerald = '#0b3d2e'
 const muted = '#767066'
@@ -175,7 +176,7 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
           <ClassDatePicker session={selectedSession} value={form.classDate} onChange={(date) => setForm({ ...form, classDate: date })} />
         </div>
         {form.students.map((student, index) => (
-          <div key={index} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, borderTop: '1px solid #e4ddc9', paddingTop: 10 }}>
+          <div key={index} className="pair-grid" style={{ borderTop: '1px solid #e4ddc9', paddingTop: 10 }}>
             <div>
               <span style={label}>Child {index + 1}</span>
               {knownChildren.length ? (
@@ -255,17 +256,26 @@ function ParentSettingsView({ family, students, onSave }) {
 
       <div style={section}>
         <h4 style={{ margin: '0 0 12px', fontSize: 15, color: emerald }}>Contact details</h4>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <div className="pair-grid">
           <div><span style={label}>Your name</span><input style={input} value={form.guardian_name} onChange={(event) => setForm({ ...form, guardian_name: event.target.value })} /></div>
           <div><span style={label}>Phone</span><input style={input} value={form.guardian_phone} onChange={(event) => setForm({ ...form, guardian_phone: event.target.value })} /></div>
         </div>
-        <div style={{ marginTop: 10 }}><span style={label}>Home address</span><input style={input} value={form.address} onChange={(event) => setForm({ ...form, address: event.target.value })} /></div>
+        <div style={{ marginTop: 10 }}>
+          <span style={label}>Home address</span>
+          <AddressAutocomplete
+            style={input}
+            value={form.address}
+            placeholder="Your postcode or the start of your street"
+            onChange={(value) => setForm({ ...form, address: value })}
+            onSelect={(result) => setForm((current) => ({ ...current, address: result.label }))}
+          />
+        </div>
         <p style={{ fontSize: 12, color: muted, margin: '8px 0 0' }}>Your email is your sign-in address ,  contact us if it changes.</p>
       </div>
 
       <div style={section}>
         <h4 style={{ margin: '0 0 12px', fontSize: 15, color: emerald }}>Emergency contact</h4>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <div className="pair-grid">
           <div><span style={label}>Contact name</span><input style={input} value={form.emergency_contact_name} onChange={(event) => setForm({ ...form, emergency_contact_name: event.target.value })} /></div>
           <div><span style={label}>Contact phone</span><input style={input} value={form.emergency_contact_phone} onChange={(event) => setForm({ ...form, emergency_contact_phone: event.target.value })} /></div>
         </div>
@@ -287,7 +297,7 @@ function ParentSettingsView({ family, students, onSave }) {
             return (
               <div key={student.id} style={{ borderTop: '1px solid #e4ddc9', paddingTop: 12, marginTop: 8 }}>
                 <strong style={{ display: 'block', marginBottom: 8 }}>{student.name}</strong>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div className="pair-grid">
                   <div><span style={label}>Dietary requirements</span><input style={input} placeholder="e.g. vegetarian, nut allergy" value={notes.dietary_requirements} onChange={(event) => update({ dietary_requirements: event.target.value })} /></div>
                   <div><span style={label}>Photos & videos</span>
                     <select style={input} value={notes.photo_consent} onChange={(event) => update({ photo_consent: event.target.value })}>

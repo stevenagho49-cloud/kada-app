@@ -313,6 +313,11 @@ function CampaignAnalytics({ session, campaign, onClose }) {
                 </div>
               ))}
             </div>
+            {data.machineOpens > 0 && (
+              <p style={{ margin: '-4px 0 12px', fontSize: 12, color: OPS_COLORS.muted }}>
+                {data.machineOpens} machine open{data.machineOpens === 1 ? '' : 's'} filtered out (privacy proxies and security scanners fetch images before anyone reads). Only real readers are counted, and a click always counts as an open.
+              </p>
+            )}
             <div style={{ maxHeight: 320, overflowY: 'auto', border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8 }}>
               <table className="ops-table">
                 <thead><tr><th>Recipient</th><th>Status</th><th>Opened</th><th>Clicked</th></tr></thead>

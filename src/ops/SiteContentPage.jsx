@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ImageField, OpsButton, OPS_COLORS, opsInputStyle } from './ui'
+import { AddressAutocomplete } from '../lib/AddressAutocomplete'
 
 /* ------------------------------------------------------------------ */
 /* Operations > Site > Site content ,  edit homepage copy, team,        */
@@ -18,6 +19,21 @@ function TextField({ label, value, onChange, textarea = false, type = 'text' }) 
         ? <textarea style={{ ...opsInputStyle, minHeight: 74 }} value={value} onChange={(event) => onChange(event.target.value)} />
         : <input type={type} style={opsInputStyle} value={value} onChange={(event) => onChange(event.target.value)} />}
     </label>
+  )
+}
+
+function AddressField({ label, value, onChange }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <span style={labelStyle}>{label}</span>
+      <AddressAutocomplete
+        style={opsInputStyle}
+        value={value}
+        onChange={onChange}
+        onSelect={(result) => onChange(result.label)}
+        placeholder="Postcode or street, pick the full address"
+      />
+    </div>
   )
 }
 
@@ -136,7 +152,7 @@ export function SiteContentPage({ content, onSave }) {
           <TextField label="Email" value={d('contact').email || ''} onChange={(value) => edit('contact', { email: value })} />
           <TextField label="Phone" value={d('contact').phone || ''} onChange={(value) => edit('contact', { phone: value })} />
         </div>
-        <TextField label="Address" value={d('contact').address || ''} onChange={(value) => edit('contact', { address: value })} />
+        <AddressField label="Address" value={d('contact').address || ''} onChange={(value) => edit('contact', { address: value })} />
       </ContentSection>
 
       <ContentSection title="Prices" description="Class plan prices shown on the booking form. The Stripe prices themselves are set in Stripe ,  these must match what Stripe charges." dirty={dirty.prices} saving={savingKey === 'prices'} onSave={() => save('prices')}>

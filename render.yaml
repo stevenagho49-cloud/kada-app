@@ -44,3 +44,8 @@ services:
       # --- Runtime: app config ---
       - key: APP_URL
         sync: false
+      # --- Runtime: address autocomplete (optional) ---
+      # Set GOOGLE_MAPS_API_KEY (Places API enabled) for Google-powered address
+      # search. Without it the server falls back to free OpenStreetMap lookup.
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false

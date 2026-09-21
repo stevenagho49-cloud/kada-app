@@ -176,6 +176,13 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     // The Day Pass/Membership booking logic below is unchanged.
     if (metadata.kind === 'event_ticket') {
       const orderId = `ticket-${session.id}`
+      const ticketCount = Number(metadata.tickets || 1)
+      // Attendee names travel in metadata as a JSON array (one per ticket,
+      // duplicates allowed ,  a 2-for-1 for the same person twice is fine).
+      let attendeeNames = []
+      try { attendeeNames = JSON.parse(metadata.attendee_names || '[]') } catch { attendeeNames = [] }
+      attendeeNames = (Array.isArray(attendeeNames) ? attendeeNames : []).map((name) => String(name || '').trim()).filter(Boolean)
+      while (attendeeNames.length < ticketCount) attendeeNames.push(metadata.buyer_name || session.customer_details?.name || 'Guest')
       const { error: ticketError } = await supabase.from('event_ticket_orders').upsert({
         id: orderId,
         event_id: metadata.event_id,
@@ -183,12 +190,42 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
         buyer_email: session.customer_details?.email || metadata.buyer_email || '',
         tier_id: metadata.tier_id,
         tier_name: metadata.tier_name,
-        tickets: Number(metadata.tickets || 1),
+        tickets: ticketCount,
         total_pence: Number(metadata.total_pence || session.amount_total || 0),
         stripe_checkout_session_id: session.id,
         payment_status: 'paid',
+        attendee_names: attendeeNames,
       }, { onConflict: 'stripe_checkout_session_id' })
       if (ticketError) console.error('Ticket order creation failed:', ticketError)
+
+      // File the buyer into the CRM as an event attendee with a category tag
+      // for this event (e.g. "event:It's Time to Rise") so Contacts can sort
+      // and filter by who came to what. Idempotent: email is unique, tags merge.
+      const buyerEmail = (session.customer_details?.email || metadata.buyer_email || '').toLowerCase().trim()
+      if (!ticketError && buyerEmail) {
+        const { data: orderEvent } = await supabase.from('events').select('title').eq('id', metadata.event_id).maybeSingle()
+        const eventTag = `event:${orderEvent?.title || 'Event'}`
+        const buyerName = metadata.buyer_name || session.customer_details?.name || 'Guest'
+        const { data: existingContact } = await supabase.from('contacts').select('id,kind,tags').eq('email', buyerEmail).maybeSingle()
+        if (existingContact) {
+          const tags = [...new Set([...(existingContact.tags || []), eventTag])]
+          await supabase.from('contacts').update({
+            tags,
+            kind: existingContact.kind === 'other' ? 'event-attendee' : existingContact.kind,
+            updated_at: new Date().toISOString(),
+          }).eq('id', existingContact.id)
+        } else {
+          await supabase.from('contacts').insert({
+            kind: 'event-attendee',
+            name: buyerName,
+            email: buyerEmail,
+            source: 'event-ticket',
+            tags: [eventTag],
+            last_contacted_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+        }
+      }
 
       // Send confirmation email exactly once per order. Stripe redelivers webhook
       // events, so we atomically claim the order by setting confirmation_sent_at
@@ -863,6 +900,150 @@ app.post('/api/admin/campaigns/:id/delete', async (request, response) => {
 })
 
 /* ------------------------------------------------------------------ */
+/* Event attendees + door check-in (admin). One row per ticket: bundle  */
+/* purchases expand into their attendee names so the door list matches  */
+/* the tickets sold. Check-in/out stamps checked_in_at.                 */
+/* ------------------------------------------------------------------ */
+app.get('/api/admin/events/:id/attendees', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { data: orders, error } = await supabase.from('event_ticket_orders')
+    .select('id,buyer_name,buyer_email,tier_name,tickets,total_pence,payment_status,attendee_names,checked_in_at,created_at')
+    .eq('event_id', request.params.id)
+    .order('created_at', { ascending: true })
+  if (error) return response.status(500).json({ error: 'Attendees could not be loaded. Has 20260921_event_attendees.sql been applied?' })
+  const attendees = []
+  ;(orders || []).forEach((order) => {
+    const names = Array.isArray(order.attendee_names) && order.attendee_names.length ? order.attendee_names : Array.from({ length: order.tickets || 1 }, () => order.buyer_name)
+    names.slice(0, order.tickets || names.length).forEach((name, index) => {
+      attendees.push({
+        key: `${order.id}:${index}`,
+        orderId: order.id,
+        seat: index + 1,
+        name,
+        buyerName: order.buyer_name,
+        buyerEmail: order.buyer_email,
+        tierName: order.tier_name,
+        paymentStatus: order.payment_status,
+        checkedInAt: order.checked_in_at || null,
+      })
+    })
+  })
+  response.json({
+    attendees,
+    orders: (orders || []).length,
+    checkedIn: attendees.filter((attendee) => attendee.checkedInAt && attendee.paymentStatus === 'paid').length,
+  })
+})
+
+app.post('/api/admin/events/:id/check-in', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { orderId, checkedIn = true } = request.body || {}
+  if (!orderId) return response.status(400).json({ error: 'An order id is required.' })
+  const { data: order, error } = await supabase.from('event_ticket_orders')
+    .update({ checked_in_at: checkedIn ? new Date().toISOString() : null })
+    .eq('id', orderId).eq('event_id', request.params.id)
+    .select('id,checked_in_at').maybeSingle()
+  if (error) return response.status(500).json({ error: 'Check-in could not be saved. Has 20260921_event_attendees.sql been applied?' })
+  if (!order) return response.status(404).json({ error: 'Order not found for this event.' })
+  response.json({ orderId: order.id, checkedInAt: order.checked_in_at })
+})
+
+/* ------------------------------------------------------------------ */
+/* Mass email to selected contacts (CRM bulk select). One Resend email  */
+/* per recipient ,  proper deliverability, never a giant To: list.      */
+/* ------------------------------------------------------------------ */
+app.post('/api/admin/contacts/email', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { ids = [], subject = '', body = '' } = request.body || {}
+  const cleanIds = (Array.isArray(ids) ? ids : []).map(String).slice(0, 500)
+  if (!cleanIds.length) return response.status(400).json({ error: 'Select at least one contact.' })
+  if (!subject.trim() || !body.trim()) return response.status(400).json({ error: 'A subject and message are required.' })
+  const { data: contacts, error } = await supabase.from('contacts').select('id,name,email').in('id', cleanIds)
+  if (error) return response.status(500).json({ error: 'Contacts could not be loaded.' })
+  const recipients = (contacts || []).filter((contact) => contact.email)
+  const paragraphs = String(body).split(/\n{2,}/).map((part) => part.trim()).filter(Boolean)
+  const results = []
+  for (const contact of recipients) {
+    const greeting = `<p>Hi ${(contact.name || 'there').split(' ')[0]},</p>`
+    const bodyHtml = paragraphs.map((part) => `<p>${part.replace(/\n/g, '<br>')}</p>`).join('')
+    const result = await sendEmail({
+      to: contact.email,
+      subject: subject.trim(),
+      html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2>${greeting}${bodyHtml}<p style="color:#767066;font-size:12px;margin-top:22px">King's Ark Dance Academy · kingsarkdance.com</p></div>`,
+    }) // eslint-disable-line no-await-in-loop
+    results.push({ email: contact.email, sent: result.sent })
+  }
+  response.json({ sent: results.filter((result) => result.sent).length, failed: results.filter((result) => !result.sent).length, skipped: cleanIds.length - recipients.length })
+})
+
+/* ------------------------------------------------------------------ */
+/* Address lookup: postcode/address autocomplete used by the event     */
+/* form, business settings, and the parent portal. Google Places when  */
+/* GOOGLE_MAPS_API_KEY is configured, otherwise OpenStreetMap          */
+/* Nominatim (free, keyless). Cached in memory and rate-limited so a   */
+/* busy typist cannot run up provider costs. Results normalize to      */
+/* { label, mapUrl }; mapUrl is a ready "Get directions" link.         */
+/* ------------------------------------------------------------------ */
+const addressLimiter = rateLimit({ windowMs: 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
+const addressCache = new Map() // lowercased query -> { at, payload }
+
+app.get('/api/address-lookup', addressLimiter, async (request, response) => {
+  const q = String(request.query.q || '').trim().slice(0, 120)
+  if (q.length < 3) return response.json({ results: [], provider: null })
+  const cacheKey = q.toLowerCase()
+  const cached = addressCache.get(cacheKey)
+  if (cached && Date.now() - cached.at < 6 * 60 * 60 * 1000) return response.json(cached.payload)
+  let payload = { results: [], provider: null }
+  try {
+    if (process.env.GOOGLE_MAPS_API_KEY) {
+      const google = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': process.env.GOOGLE_MAPS_API_KEY },
+        body: JSON.stringify({ input: q, languageCode: 'en-GB', includedRegionCodes: ['gb'] }),
+      })
+      if (google.ok) {
+        const data = await google.json()
+        payload = {
+          provider: 'google',
+          results: (data.suggestions || [])
+            .filter((suggestion) => suggestion.placePrediction?.text?.text)
+            .slice(0, 6)
+            .map((suggestion) => {
+              const prediction = suggestion.placePrediction
+              const label = prediction.text.text
+              return { label, mapUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(label)}&query_place_id=${prediction.placeId}` }
+            }),
+        }
+      }
+    } else {
+      // Nominatim usage policy requires an identifying User-Agent; keep to
+      // 1 req/s via the debounced client + this cache + the rate limiter.
+      const osm = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&countrycodes=gb&q=${encodeURIComponent(q)}`, {
+        headers: { 'User-Agent': `kingsarkdance.com address lookup (${ADMIN_EMAIL || 'site admin'})`, 'Accept-Language': 'en-GB' },
+      })
+      if (osm.ok) {
+        const data = await osm.json()
+        payload = {
+          provider: 'osm',
+          results: (data || []).map((place) => ({
+            label: place.display_name,
+            mapUrl: `https://www.google.com/maps/search/?api=1&query=${place.lat},${place.lon}`,
+          })),
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Address lookup error:', error.message)
+  }
+  addressCache.set(cacheKey, { at: Date.now(), payload })
+  if (addressCache.size > 300) addressCache.delete(addressCache.keys().next().value)
+  response.json(payload)
+})
+
+/* ------------------------------------------------------------------ */
 /* Analytics: campaign open/click tracking + site page views.          */
 /* ------------------------------------------------------------------ */
 
@@ -883,6 +1064,34 @@ function instrumentCampaignHtml(html, sendId) {
   return withClicks + pixel
 }
 
+/* Mail clients and security gateways fetch the open pixel before any human  */
+/* reads the email (Apple Mail Privacy Protection, Gmail proxy prefetch,     */
+/* Mimecast/Proofpoint/Barracuda scans). Classify those so opens stay true.  */
+const MACHINE_OPEN_UA = /AppleImageProxy|GoogleImageProxy|Microsoft (Office|Outlook)|Outlook-|Office365|Mimecast|Proofpoint|ppserver|Barracuda|Trend\s?Micro|McAfee|Symantec|Sophos|Forcepoint|Zscaler|Bitdefender|SpamExperts|Googlebot|bingbot|Slackbot|Discordbot|facebookexternalhit|WhatsApp|curl|wget|python-requests|Go-http-client|HeadlessChrome|PhantomJS/i
+
+function isLikelyMachineOpen(userAgent, send) {
+  const ua = String(userAgent || '')
+  if (MACHINE_OPEN_UA.test(ua)) return true
+  if (!ua.trim()) return true
+  // A fetch within 2 minutes of delivery is almost always a delivery-time
+  // prefetch or gateway scan. Real readers who open later refetch the pixel
+  // (it is served no-store), so a genuine open is still counted then.
+  if (send?.sent_at) {
+    const ageMs = Date.now() - new Date(send.sent_at).getTime()
+    if (ageMs >= 0 && ageMs < 2 * 60 * 1000) return true
+  }
+  return false
+}
+
+/* Whether the truthful-opens columns exist (cached, probed once). */
+let truthfulOpensSupported = null
+async function hasTruthfulOpens() {
+  if (truthfulOpensSupported !== null) return truthfulOpensSupported
+  const { error } = await supabase.from('campaign_sends').select('machine_opens').limit(0)
+  truthfulOpensSupported = !error
+  return truthfulOpensSupported
+}
+
 /* 1px transparent GIF for open tracking. */
 const PIXEL_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
 
@@ -890,19 +1099,40 @@ app.get('/api/t/open/:sendId.gif', async (request, response) => {
   response.set({ 'Content-Type': 'image/gif', 'Cache-Control': 'no-store, no-cache, must-revalidate' })
   response.send(PIXEL_GIF)
   if (!supabase || !(await hasAnalytics())) return
-  const { data: send } = await supabase.from('campaign_sends').select('id,opens').eq('id', request.params.sendId).maybeSingle()
-  if (send) {
-    await supabase.from('campaign_sends').update({ opens: (send.opens || 0) + 1, first_opened_at: send.opens ? undefined : new Date().toISOString() }).eq('id', send.id)
+  const { data: send } = await supabase.from('campaign_sends').select('id,opens,status,sent_at').eq('id', request.params.sendId).maybeSingle()
+  if (!send || send.status !== 'sent') return
+  const userAgent = String(request.headers['user-agent'] || '').slice(0, 300)
+  const truthful = await hasTruthfulOpens()
+  if (isLikelyMachineOpen(userAgent, send)) {
+    // Machine fetches never touch the human opens count. When the truthful
+    // migration is applied they are tallied separately for transparency.
+    if (truthful) {
+      const { data: row } = await supabase.from('campaign_sends').select('machine_opens').eq('id', send.id).maybeSingle()
+      await supabase.from('campaign_sends').update({ machine_opens: (row?.machine_opens || 0) + 1, last_open_user_agent: userAgent }).eq('id', send.id)
+    }
+    return
   }
+  const update = { opens: (send.opens || 0) + 1, first_opened_at: send.opens ? undefined : new Date().toISOString() }
+  if (truthful) update.last_open_user_agent = userAgent
+  await supabase.from('campaign_sends').update(update).eq('id', send.id)
 })
 
 app.get('/api/t/click/:sendId', async (request, response) => {
   const target = String(request.query.u || APP_URL)
   response.redirect(target)
   if (!supabase || !(await hasAnalytics())) return
-  const { data: send } = await supabase.from('campaign_sends').select('id,clicks').eq('id', request.params.sendId).maybeSingle()
+  const userAgent = String(request.headers['user-agent'] || '').slice(0, 300)
+  if (MACHINE_OPEN_UA.test(userAgent)) return // gateway link scanner, not a reader
+  const { data: send } = await supabase.from('campaign_sends').select('id,opens,clicks,first_opened_at').eq('id', request.params.sendId).maybeSingle()
   if (send) {
-    await supabase.from('campaign_sends').update({ clicks: (send.clicks || 0) + 1, last_clicked_at: new Date().toISOString() }).eq('id', send.id)
+    // A click is proof a person read the email, so it always counts as an
+    // open even when the image pixel was blocked or filtered as machine.
+    await supabase.from('campaign_sends').update({
+      clicks: (send.clicks || 0) + 1,
+      last_clicked_at: new Date().toISOString(),
+      opens: send.opens ? send.opens : 1,
+      first_opened_at: send.first_opened_at || new Date().toISOString(),
+    }).eq('id', send.id)
   }
 })
 
@@ -920,7 +1150,8 @@ app.post('/api/track/pageview', async (request, response) => {
 app.get('/api/admin/campaigns/:id/analytics', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
-  const { data: sends, error } = await supabase.from('campaign_sends').select('id,email,status,opens,clicks,first_opened_at,last_clicked_at,sent_at').eq('campaign_id', request.params.id).order('sent_at', { ascending: false })
+  const truthful = await hasTruthfulOpens()
+  const { data: sends, error } = await supabase.from('campaign_sends').select(`id,email,status,opens,clicks,first_opened_at,last_clicked_at,sent_at${truthful ? ',machine_opens' : ''}`).eq('campaign_id', request.params.id).order('sent_at', { ascending: false })
   if (error) return response.status(500).json({ error: 'Analytics could not be loaded.' })
   const list = sends || []
   const delivered = list.filter((row) => row.status === 'sent')
@@ -930,6 +1161,7 @@ app.get('/api/admin/campaigns/:id/analytics', async (request, response) => {
     failed: list.filter((row) => row.status === 'failed').length,
     opened: delivered.filter((row) => row.opens > 0).length,
     clicked: delivered.filter((row) => row.clicks > 0).length,
+    machineOpens: list.reduce((sum, row) => sum + (row.machine_opens || 0), 0),
     recipients: list,
   })
 })
@@ -1243,7 +1475,7 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
 // ------------------------------------------------------------------
 app.post('/api/stripe/create-event-checkout', async (request, response) => {
   if (!stripe || !supabase) return response.status(503).json({ error: 'Ticketing is not configured on the server.' })
-  const { eventId, tierId, quantity, buyerName, buyerEmail } = request.body || {}
+  const { eventId, tierId, quantity, buyerName, buyerEmail, attendeeNames = [] } = request.body || {}
   const qty = Math.floor(Number(quantity))
   if (!eventId || !tierId || !Number.isInteger(qty) || qty < 1 || qty > 20 || !buyerName?.trim() || !/.+@.+\..+/.test(buyerEmail || '')) {
     return response.status(400).json({ error: 'Event, ticket tier, quantity (1-20), and your name and email are required.' })
@@ -1256,6 +1488,11 @@ app.post('/api/stripe/create-event-checkout', async (request, response) => {
   const unitAmount = Math.round(Number(tier.pricePence))
   const bundleSize = Math.max(1, Math.floor(Number(tier.bundleSize) || 1))
   if (!Number.isInteger(unitAmount) || unitAmount < 30) return response.status(400).json({ error: 'This ticket tier is not priced correctly yet.' })
+  const ticketCount = qty * bundleSize
+  // One name per ticket (bundles included); blank slots fall back to the buyer's
+  // name so every seat on the door list has a name attached.
+  const cleanNames = (Array.isArray(attendeeNames) ? attendeeNames : []).map((name) => String(name || '').trim())
+  const finalNames = Array.from({ length: ticketCount }, (_, index) => cleanNames[index] || buyerName.trim())
 
   const tierDescription = [bundleSize > 1 ? `${bundleSize} tickets per purchase` : '', event.event_date ? `Event date: ${event.event_date}` : ''].filter(Boolean).join(' · ')
   // Return to the host the buyer actually used (works through the Codespaces forwarded
@@ -1287,6 +1524,7 @@ app.post('/api/stripe/create-event-checkout', async (request, response) => {
       total_pence: String(unitAmount * qty),
       buyer_name: buyerName.trim(),
       buyer_email: buyerEmail.trim(),
+      attendee_names: JSON.stringify(finalNames),
     },
     success_url: `${clientUrl}?ticket=success&session_id={CHECKOUT_SESSION_ID}#event/${event.id}`,
     cancel_url: `${clientUrl}#event/${event.id}`,
@@ -1309,6 +1547,7 @@ app.get('/api/stripe/event-order/:sessionId', async (request, response) => {
       location: orderEvent?.location || '',
       tierName: order.tier_name,
       tickets: order.tickets,
+      attendeeNames: order.attendee_names || [],
       totalPence: order.total_pence,
       buyerName: order.buyer_name,
       buyerEmail: order.buyer_email,
