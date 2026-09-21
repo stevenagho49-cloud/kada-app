@@ -35,6 +35,12 @@ services:
         sync: false
       - key: ADMIN_NOTIFICATION_EMAIL
         sync: false
+      # --- Runtime: AI email design (Anthropic / Claude) ---
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # --- Runtime: inbound email -> Contacts webhook secret ---
+      - key: INBOUND_EMAIL_SECRET
+        sync: false
       # --- Runtime: app config ---
       - key: APP_URL
         sync: false

@@ -264,3 +264,72 @@ export function Toggle({ checked, onChange, disabled = false, label }) {
     </button>
   )
 }
+
+/* ------------------------------------------------------------------ */
+/* ImageField — pick a photo/file, resize it in the browser, and hand  */
+/* back a data URL (stored in site_content/app_settings jsonb — no     */
+/* extra storage bucket needed). JPEG for photos, PNG for logos so     */
+/* transparency survives.                                              */
+/* ------------------------------------------------------------------ */
+function fileToDataUrl(file, { maxWidth = 1200, format = 'jpeg', quality = 0.82 } = {}) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('That file could not be read.'))
+    reader.onload = () => {
+      const img = new Image()
+      img.onerror = () => reject(new Error('That file is not an image.'))
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width)
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.round(img.width * scale)
+        canvas.height = Math.round(img.height * scale)
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height)
+        resolve(canvas.toDataURL(format === 'png' ? 'image/png' : 'image/jpeg', quality))
+      }
+      img.src = reader.result
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+export function ImageField({ label, value, onChange, defaultSrc = '', shape = 'rect', hint = '' }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const preview = value || defaultSrc
+  const isLogo = shape === 'logo'
+  const pick = async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    setBusy(true)
+    setError('')
+    try {
+      const dataUrl = await fileToDataUrl(file, { maxWidth: isLogo ? 640 : 1200, format: isLogo ? 'png' : 'jpeg' })
+      onChange(dataUrl)
+    } catch (err) {
+      setError(err.message)
+    }
+    setBusy(false)
+  }
+  const frame = shape === 'circle'
+    ? { width: 84, height: 84, borderRadius: '50%' }
+    : isLogo
+      ? { width: 'auto', maxWidth: 200, height: 56, objectFit: 'contain' }
+      : { width: 140, height: 84, objectFit: 'cover', borderRadius: 8 }
+  return (
+    <div style={{ marginBottom: 10 }}>
+      {label && <span style={{ display: 'block', fontSize: 12, fontWeight: 700, color: OPS_COLORS.emerald, marginBottom: 4 }}>{label}</span>}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        {preview
+          ? <img src={preview} alt={label || 'image'} style={{ ...frame, border: `1px solid ${OPS_COLORS.rule}`, background: OPS_COLORS.ivory }} />
+          : <div style={{ ...frame, border: `1px dashed ${OPS_COLORS.rule}`, display: 'grid', placeItems: 'center', fontSize: 11, color: OPS_COLORS.muted, background: OPS_COLORS.ivory }}>No image</div>}
+        <label style={{ fontSize: 12.5, color: OPS_COLORS.emerald, fontWeight: 700, cursor: 'pointer' }}>
+          {busy ? 'Processing…' : value ? 'Replace photo' : 'Upload photo'}
+          <input type="file" accept="image/*" style={{ display: 'none' }} disabled={busy} onChange={pick} />
+        </label>
+        {value && defaultSrc && <button type="button" onClick={() => onChange('')} style={{ border: 0, background: 'none', color: OPS_COLORS.warn, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit' }}>Reset to default</button>}
+      </div>
+      {hint && <span style={{ display: 'block', fontSize: 11.5, color: OPS_COLORS.muted, marginTop: 4 }}>{hint}</span>}
+      {error && <span style={{ display: 'block', fontSize: 12, color: OPS_COLORS.warn, marginTop: 4 }}>{error}</span>}
+    </div>
+  )
+}

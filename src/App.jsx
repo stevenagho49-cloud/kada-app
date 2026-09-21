@@ -14,6 +14,7 @@ import { TeamPage } from './ops/TeamPage'
 import { SettingsPage } from './ops/SettingsPage'
 import { CampaignsPage } from './ops/CampaignsPage'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
+import { applySiteFavicon } from './lib/useSiteLogo'
 
 // Routable screens loaded on demand — the public homepage bundle doesn't pay for them.
 const EventTicketPage = lazy(() => import('./EventTicketPage').then((module) => ({ default: module.EventTicketPage })))
@@ -871,6 +872,11 @@ function App() {
     })
     return () => { mounted = false }
   }, [view])
+
+  // A custom logo (Settings > Branding) also replaces the browser tab icon.
+  useEffect(() => {
+    applySiteFavicon(siteContent.branding?.logoUrl)
+  }, [siteContent.branding?.logoUrl])
 
   // Weekly class schedule — guests/parents get bookable (active) sessions for the
   // public booking form; admins get every row for the Class schedule page.

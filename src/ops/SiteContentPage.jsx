@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { OpsButton, OPS_COLORS, opsInputStyle } from './ui'
+import { ImageField, OpsButton, OPS_COLORS, opsInputStyle } from './ui'
 
 /* ------------------------------------------------------------------ */
 /* Operations > Site > Site content — edit homepage copy, team,        */
@@ -100,15 +100,33 @@ export function SiteContentPage({ content, onSave }) {
         <TextField label="Button label" value={d('classes').ctaLabel || ''} onChange={(value) => edit('classes', { ctaLabel: value })} />
       </ContentSection>
 
-      <ContentSection title="Team" description="Names and roles on the public site. Photos are replaced via file upload — ask your developer to swap the image files." dirty={dirty.team} saving={savingKey === 'team'} onSave={() => save('team')}>
+      <ContentSection title="Team" description="People shown in Meet the team. Upload each person's photo here, add new members, or remove anyone." dirty={dirty.team} saving={savingKey === 'team'} onSave={() => save('team')}>
         <TextField label="Section eyebrow" value={d('team').eyebrow || ''} onChange={(value) => edit('team', { eyebrow: value })} />
         <TextField label="Section title" value={d('team').title || ''} onChange={(value) => edit('team', { title: value })} />
         {(d('team').members || []).map((member, index) => (
-          <div key={index} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, borderTop: `1px solid ${OPS_COLORS.rule}`, paddingTop: 10, marginTop: 6 }}>
-            <TextField label={`Member ${index + 1} name`} value={member.name || ''} onChange={(value) => editTeamMember(index, { name: value })} />
-            <TextField label="Role" value={member.role || ''} onChange={(value) => editTeamMember(index, { role: value })} />
+          <div key={index} style={{ borderTop: `1px solid ${OPS_COLORS.rule}`, paddingTop: 10, marginTop: 6 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <strong style={{ fontSize: 13, color: OPS_COLORS.emerald }}>Member {index + 1}</strong>
+              <button type="button" onClick={() => edit('team', { members: (drafts.team?.members || []).filter((_, i) => i !== index) })} style={{ border: 0, background: 'none', color: OPS_COLORS.warn, fontSize: 12.5, cursor: 'pointer', fontFamily: 'inherit' }}>Remove</button>
+            </div>
+            <ImageField label="Photo" shape="circle" value={member.photo || ''} hint="Square photos look best." onChange={(dataUrl) => editTeamMember(index, { photo: dataUrl })} />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <TextField label="Name" value={member.name || ''} onChange={(value) => editTeamMember(index, { name: value })} />
+              <TextField label="Role" value={member.role || ''} onChange={(value) => editTeamMember(index, { role: value })} />
+            </div>
           </div>
         ))}
+        <OpsButton small variant="ghost" onClick={() => edit('team', { members: [...(drafts.team?.members || []), { name: '', role: '', photo: '' }] })}>+ Add team member</OpsButton>
+      </ContentSection>
+
+      <ContentSection title="Homepage photos" description="The big images across the site — hero, about section, and the workshop/class feature blocks. Upload a replacement and it goes live when you save." dirty={dirty.images} saving={savingKey === 'images'} onSave={() => save('images')}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+          <ImageField label="Hero photo (top of homepage)" value={d('images').hero || ''} defaultSrc="/images/hero-workshop.jpeg" onChange={(dataUrl) => edit('images', { hero: dataUrl })} />
+          <ImageField label="Hero accent photo (small overlay)" value={d('images').heroFloat || ''} defaultSrc="/images/nVgB0rjQ.jpeg" onChange={(dataUrl) => edit('images', { heroFloat: dataUrl })} />
+          <ImageField label="About section photo" value={d('images').about || ''} defaultSrc="/images/about-kada.jpeg" onChange={(dataUrl) => edit('images', { about: dataUrl })} />
+          <ImageField label="Workshops block photo" value={d('images').workshopsBg || ''} defaultSrc="/images/u.dance sunday warm up2.JPG" onChange={(dataUrl) => edit('images', { workshopsBg: dataUrl })} />
+          <ImageField label="Classes block photo" value={d('images').classesBg || ''} defaultSrc="/images/u.dance saturday20.JPG" onChange={(dataUrl) => edit('images', { classesBg: dataUrl })} />
+        </div>
       </ContentSection>
 
       <ContentSection title="Contact details" description="Shown in the Contact section, the footer of invoices, and used for reply-to details." dirty={dirty.contact} saving={savingKey === 'contact'} onSave={() => save('contact')}>

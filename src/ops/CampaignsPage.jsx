@@ -41,6 +41,7 @@ export function CampaignsPage({ session }) {
   const [aiTone, setAiTone] = useState('warm')
   const [aiBusy, setAiBusy] = useState(false)
   const [preview, setPreview] = useState(false)
+  const [previewTemplate, setPreviewTemplate] = useState(null)
 
   const authedFetch = async (path, options = {}) => {
     const response = await fetch(path, {
@@ -145,10 +146,14 @@ export function CampaignsPage({ session }) {
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8 }}>
           {templatesInCategory.map((template) => (
-            <button key={template.name} type="button" onClick={() => applyTemplate(template)} style={{ textAlign: 'left', border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: '10px 12px', background: OPS_COLORS.cream, cursor: 'pointer', fontFamily: 'inherit' }}>
+            <div key={template.name} style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: '10px 12px', background: OPS_COLORS.cream }}>
               <div style={{ fontWeight: 700, fontSize: 13, color: OPS_COLORS.emerald }}>{template.name}</div>
-              <div style={{ fontSize: 12, color: OPS_COLORS.muted, marginTop: 2 }}>{template.subject}</div>
-            </button>
+              <div style={{ fontSize: 12, color: OPS_COLORS.muted, margin: '2px 0 8px' }}>{template.subject}</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <OpsButton small variant="ghost" onClick={() => setPreviewTemplate(template)}>Preview</OpsButton>
+                <OpsButton small variant="gold" onClick={() => applyTemplate(template)}>Edit & use</OpsButton>
+              </div>
+            </div>
           ))}
         </div>
       </div>
@@ -168,7 +173,9 @@ export function CampaignsPage({ session }) {
           </label>
           <OpsButton variant="ghost" disabled={aiBusy} onClick={designWithAi}>{aiBusy ? 'Designing…' : '✨ Design with AI'}</OpsButton>
         </div>
-        <p style={{ fontSize: 12, color: OPS_COLORS.muted, margin: '8px 0 0' }}>Powered by Claude — set ANTHROPIC_API_KEY on the server to enable.</p>
+        <p style={{ fontSize: 12, color: OPS_COLORS.muted, margin: '8px 0 0' }}>
+          Powered by Claude (Anthropic). To enable: get a key at <strong>console.anthropic.com → API Keys</strong>, then in Render open the <strong>kada-app</strong> service → <strong>Environment</strong> → add <code>ANTHROPIC_API_KEY</code> and save (Render redeploys automatically). Until then this button shows "not configured".
+        </p>
       </div>
 
       <div style={sectionStyle}>
@@ -228,6 +235,22 @@ export function CampaignsPage({ session }) {
           ))}
         </div>
       </div>
+
+      {previewTemplate && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(35,35,35,0.55)', zIndex: 60, display: 'grid', placeItems: 'center', padding: 20 }} onClick={(event) => { if (event.target === event.currentTarget) setPreviewTemplate(null) }}>
+          <div style={{ background: OPS_COLORS.cream, borderRadius: 12, padding: 22, width: '100%', maxWidth: 640, maxHeight: '88vh', overflowY: 'auto', boxShadow: '0 18px 60px rgba(0,0,0,0.3)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
+              <h3 style={{ margin: 0, fontFamily: "'Iowan Old Style', Georgia, serif", color: OPS_COLORS.emerald, fontWeight: 400 }}>{previewTemplate.name}</h3>
+              <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>Subject: {previewTemplate.subject}</span>
+            </div>
+            <div style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, overflow: 'hidden', margin: '10px 0 14px' }} dangerouslySetInnerHTML={{ __html: previewTemplate.body.replace(/{{name}}/g, 'Sarah') }} />
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <OpsButton variant="ghost" onClick={() => setPreviewTemplate(null)}>Close</OpsButton>
+              <OpsButton variant="gold" onClick={() => { applyTemplate(previewTemplate); setPreviewTemplate(null) }}>Edit & use this template</OpsButton>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

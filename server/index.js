@@ -511,12 +511,58 @@ app.get('/api/admin/team', async (request, response) => {
   response.json({ members: (profiles || []).map((item) => ({ id: item.id, name: item.full_name || '', email: emailById.get(item.id) || '', role: item.role, jobTitle: item.job_title || '', permissions: item.permissions || [] })) })
 })
 
+/* NB: registered BEFORE /api/admin/team/:userId so 'invite' is not swallowed  */
+/* by the :userId param (Express matches routes in registration order).        */
+app.post('/api/admin/team/invite', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { name = '', email = '', role = 'staff', jobTitle = '', permissions = [] } = request.body || {}
+  const cleanName = String(name).trim().slice(0, 120)
+  const cleanEmail = String(email).trim().toLowerCase().slice(0, 200)
+  const cleanRole = ['staff', 'instructor', 'parent', 'school', 'admin'].includes(role) ? role : 'staff'
+  if (!cleanName || !/.+@.+\..+/.test(cleanEmail)) return response.status(400).json({ error: 'A name and a valid email are required.' })
+  // The Supabase invite email lets the new member set their own password; the
+  // handle_new_user trigger creates their profile from this metadata.
+  const { error: inviteError } = await supabase.auth.admin.inviteUserByEmail(cleanEmail, { data: { role: cleanRole, full_name: cleanName }, redirectTo: `${APP_URL}/#ops` })
+  const alreadyRegistered = inviteError && /already|registered|exists/i.test(inviteError.message)
+  if (inviteError && !alreadyRegistered) return response.status(500).json({ error: `Invite could not be sent: ${inviteError.message}` })
+  const users = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 })
+  const target = (users.data?.users || []).find((item) => item.email?.toLowerCase() === cleanEmail)
+  if (target) {
+    const update = { role: cleanRole, full_name: cleanName, job_title: String(jobTitle).trim().slice(0, 80), permissions: cleanPermissions(permissions) }
+    if (cleanRole === 'instructor') {
+      const { data: instructor } = await supabase.from('instructors').select('id').ilike('email', cleanEmail).maybeSingle()
+      if (instructor) update.instructor_id = instructor.id
+    }
+    await supabase.from('profiles').update(update).eq('id', target.id)
+    await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status: target.email_confirmed_at ? 'account_created' : 'accepted', invited_by: user.id, user_id: target.id, account_created_at: target.email_confirmed_at || null }, { onConflict: 'email' })
+  } else {
+    await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status: 'sent', invited_by: user.id }, { onConflict: 'email' })
+  }
+  // Branded welcome alongside Supabase's plain invite email — explains who
+  // invited them, what their role can do, and where to sign in.
+  const roleIntros = {
+    staff: 'manage the parts of KADA Operations your admin has given you access to',
+    instructor: 'view your assigned bookings, the job board and your DBS uploads',
+    parent: 'book classes, manage your children\'s details and your membership',
+    school: 'request workshops and track your bookings with KADA',
+    admin: 'manage the whole KADA Operations dashboard',
+  }
+  const esc = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  await sendEmail({
+    to: cleanEmail,
+    subject: 'You\'re invited to King\'s Ark Dance Academy',
+    html: `<div style="font-family:Arial,sans-serif;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;font-family:Georgia,serif">Welcome to KADA, ${esc(cleanName)}.</h2><p>You've been invited to join King's Ark Dance Academy as <strong>${cleanRole}</strong> — you'll be able to ${roleIntros[cleanRole]}.</p><p><strong>Next step:</strong> open the invite email from Supabase (check spam too), click the link and set your password. Then sign in any time at <a href="${APP_URL}">${APP_URL}</a> → Operations.</p><p style="color:#767066;font-size:12px">If you weren't expecting this invite, you can ignore it.</p></div>`,
+  })
+  response.json({ invited: true, alreadyRegistered })
+})
+
 app.post('/api/admin/team/:userId', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
   const { userId } = request.params
   const { role = 'staff', jobTitle = '', permissions = [] } = request.body || {}
-  if (!['admin', 'staff'].includes(role)) return response.status(400).json({ error: 'Role must be admin or staff.' })
+  if (!['admin', 'staff', 'instructor', 'parent', 'school'].includes(role)) return response.status(400).json({ error: 'Unknown role.' })
   if (userId === user.id && role !== 'admin') return response.status(400).json({ error: 'You cannot remove your own admin role.' })
   const { error } = await supabase.from('profiles').update({ role, job_title: String(jobTitle).trim().slice(0, 80), permissions: cleanPermissions(permissions) }).eq('id', userId)
   if (error) return response.status(500).json({ error: 'Team member could not be saved.' })
@@ -603,35 +649,6 @@ app.post('/api/parent/settings', async (request, response) => {
     if (savedStudent) savedStudents.push(savedStudent)
   }
   response.json({ family: savedFamily, students: savedStudents })
-})
-
-app.post('/api/admin/team/invite', async (request, response) => {
-  const user = await requireAdmin(request, response)
-  if (!user) return
-  const { name = '', email = '', role = 'staff', jobTitle = '', permissions = [] } = request.body || {}
-  const cleanName = String(name).trim().slice(0, 120)
-  const cleanEmail = String(email).trim().toLowerCase().slice(0, 200)
-  const cleanRole = ['staff', 'instructor', 'parent', 'school', 'admin'].includes(role) ? role : 'staff'
-  if (!cleanName || !/.+@.+\..+/.test(cleanEmail)) return response.status(400).json({ error: 'A name and a valid email are required.' })
-  // The invite email lets the new member set their own password. The
-  // handle_new_user trigger creates their profile from this metadata.
-  const { error: inviteError } = await supabase.auth.admin.inviteUserByEmail(cleanEmail, { data: { role: cleanRole, full_name: cleanName }, redirectTo: `${APP_URL}/` })
-  const alreadyRegistered = inviteError && /already|registered|exists/i.test(inviteError.message)
-  if (inviteError && !alreadyRegistered) return response.status(500).json({ error: `Invite could not be sent: ${inviteError.message}` })
-  const users = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 })
-  const target = (users.data?.users || []).find((item) => item.email?.toLowerCase() === cleanEmail)
-  if (target) {
-    const update = { role: cleanRole, full_name: cleanName, job_title: String(jobTitle).trim().slice(0, 80), permissions: cleanPermissions(permissions) }
-    if (cleanRole === 'instructor') {
-      const { data: instructor } = await supabase.from('instructors').select('id').ilike('email', cleanEmail).maybeSingle()
-      if (instructor) update.instructor_id = instructor.id
-    }
-    await supabase.from('profiles').update(update).eq('id', target.id)
-    await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status: target.email_confirmed_at ? 'account_created' : 'accepted', invited_by: user.id, user_id: target.id, account_created_at: target.email_confirmed_at || null }, { onConflict: 'email' })
-  } else {
-    await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status: 'sent', invited_by: user.id }, { onConflict: 'email' })
-  }
-  response.json({ invited: true, alreadyRegistered })
 })
 
 app.get('/api/admin/invitations', async (request, response) => {

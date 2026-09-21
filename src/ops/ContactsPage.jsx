@@ -139,11 +139,21 @@ export function ContactsPage() {
   const [expanded, setExpanded] = useState(false)
   const [notice, setNotice] = useState('')
 
+  // PostgREST caps responses at 1,000 rows — paginate so large imports still
+  // show everything and dedupe stays accurate.
   const load = async () => {
     setLoading(true)
-    const { data, error } = await supabase.from('contacts').select('*').order('created_at', { ascending: false })
-    if (error) setLoadError(error.message)
-    else setContacts(data || [])
+    const all = []
+    let from = 0
+    let done = false
+    while (!done) {
+      const { data, error } = await supabase.from('contacts').select('*').order('created_at', { ascending: false }).range(from, from + 999) // eslint-disable-line no-await-in-loop
+      if (error) { setLoadError(error.message); break }
+      all.push(...(data || []))
+      if (!data || data.length < 1000) done = true
+      else from += 1000
+    }
+    if (all.length) setContacts(all)
     setLoading(false)
   }
   useEffect(() => { void load() }, [])
@@ -310,7 +320,7 @@ export function ContactsPage() {
         <ImportWizard
           existingCount={contacts.length}
           onClose={() => setShowImport(false)}
-          onDone={async (summary) => { setShowImport(false); setNotice(`Import finished — ${summary.added} added, ${summary.updated} updated, ${summary.skipped} skipped${summary.errors ? `, ${summary.errors} failed` : ''}.`); await load() }}
+          onDone={async (summary) => { setNotice(`Import finished — ${summary.added} added, ${summary.updated} updated, ${summary.skipped} skipped${summary.errors ? `, ${summary.errors} failed` : ''}.`); await load() }}
           upsertOne={upsertOne}
         />
       )}
@@ -339,6 +349,18 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
   const [importing, setImporting] = useState(false)
   const [importMode, setImportMode] = useState('merge') // merge | addNew | replace
   const [progress, setProgress] = useState({ done: 0, total: 0 })
+  const [result, setResult] = useState(null) // { summary, errors } — results screen
+
+  /* Turn a database error message into a plain-English fix. */
+  const explainError = (message) => {
+    const m = String(message || '').toLowerCase()
+    if (m.includes('duplicate key')) return 'These emails already exist in Contacts. Choose "Only add new" to skip them, or "Replace duplicates" to overwrite.'
+    if (m.includes('row-level security')) return 'Your account is not allowed to write contacts — sign in as an admin (or staff with Contacts access), and confirm 20260921_crm_contacts.sql has been applied in Supabase.'
+    if (m.includes('does not exist') || m.includes('could not find') || m.includes('schema cache')) return 'The contacts table is missing — apply supabase/migrations/20260921_crm_contacts.sql in Supabase Dashboard → SQL Editor.'
+    if (m.includes('invalid input') || m.includes('syntax')) return 'Some values could not be read — save the sheet as CSV and import that instead.'
+    if (m.includes('failed to fetch') || m.includes('network')) return 'The connection dropped mid-import. Completed rows are already saved — run it again with "Only add new" to continue where it stopped.'
+    return 'If this keeps happening, export the sheet as CSV and try again, or ask your developer to check the server logs.'
+  }
 
   const acceptRows = (grid) => {
     if (!grid.length) { setParseError('No rows found in that data.'); return }
@@ -369,12 +391,16 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
   const runImport = async () => {
     if (mapping.name === '' && mapping.email === '') { setParseError('Map at least the Name or Email column before importing.'); return }
     setImporting(true)
+    setResult(null)
     const summary = { added: 0, updated: 0, skipped: 0, errors: 0 }
-    const seenEmails = new Set() // catch duplicates inside the file itself
-    setProgress({ done: 0, total: rows.length })
-    for (const row of rows) {
+    const errorRows = []
+
+    // 1. Build clean drafts, dropping empty rows and in-file duplicates.
+    const drafts = []
+    const seenEmails = new Set()
+    rows.forEach((row) => {
       const pick = (key) => (mapping[key] === '' ? '' : String(row[mapping[key]] ?? '').trim())
-      const email = pick('email')
+      const email = pick('email').toLowerCase()
       const draft = {
         kind: inferKind(email, pick('organisation'), pick('kind')),
         name: pick('name') || (email ? email.split('@')[0].replace(/[._-]+/g, ' ') : ''),
@@ -385,16 +411,119 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
         tags: pick('tags') ? pick('tags').split(/[;,]/) : [],
         notes: pick('notes'),
       }
-      const emailKey = email.toLowerCase()
-      if (!draft.name && !emailKey) { summary.skipped += 1; setProgress((p) => ({ ...p, done: p.done + 1 })); continue }
-      if (emailKey && seenEmails.has(emailKey)) { summary.skipped += 1; setProgress((p) => ({ ...p, done: p.done + 1 })); continue }
-      if (emailKey) seenEmails.add(emailKey)
-      const result = await upsertOne(draft, 'import', importMode) // eslint-disable-line no-await-in-loop
-      summary[result.status === 'error' ? 'errors' : result.status] += 1
-      setProgress((p) => ({ ...p, done: p.done + 1 }))
+      if (!draft.name && !email) { summary.skipped += 1; return }
+      if (email && seenEmails.has(email)) { summary.skipped += 1; return }
+      if (email) seenEmails.add(email)
+      drafts.push(draft)
+    })
+    setProgress({ done: 0, total: drafts.length })
+
+    // 2. Look up which emails already exist — against the whole table, in
+    //    chunks (never trust the on-screen list: it may hold only a page).
+    const existingByEmail = new Map()
+    const emails = [...seenEmails]
+    for (let i = 0; i < emails.length; i += 200) {
+      const { data, error } = await supabase.from('contacts').select('id,email,notes,tags,name,organisation,phone,address,kind').in('email', emails.slice(i, i + 200)) // eslint-disable-line no-await-in-loop
+      if (error) {
+        summary.errors += drafts.length
+        errorRows.push({ detail: `Duplicate check failed: ${error.message}`, fix: explainError(error.message) })
+        setResult({ summary, errors: errorRows })
+        setImporting(false)
+        onDone(summary)
+        return
+      }
+      ;(data || []).forEach((contact) => existingByEmail.set(contact.email, contact))
     }
+
+    // 3. Split into new inserts vs matched rows.
+    const toInsert = []
+    const matched = []
+    drafts.forEach((draft) => {
+      const row = { ...toDbRow(draft), source: 'import' }
+      const existing = draft.email ? existingByEmail.get(draft.email) : null
+      if (existing) {
+        if (importMode === 'addNew') summary.skipped += 1
+        else matched.push({ existing, row })
+      } else {
+        toInsert.push(row)
+      }
+    })
+
+    // 4a. Batch inserts — 200 rows per request instead of one-by-one.
+    for (let i = 0; i < toInsert.length; i += 200) {
+      const chunk = toInsert.slice(i, i + 200)
+      const { error } = await supabase.from('contacts').insert(chunk) // eslint-disable-line no-await-in-loop
+      if (error) {
+        summary.errors += chunk.length
+        errorRows.push({ detail: `${chunk.length} new rows failed: ${error.message}`, fix: explainError(error.message) })
+      } else summary.added += chunk.length
+      setProgress({ done: Math.min(i + 200, toInsert.length), total: drafts.length })
+    }
+
+    // 4b. Matched rows — replace = batch upsert over the email key; merge =
+    //     per-row gap-fill so existing notes/details are never wiped.
+    if (importMode === 'replace') {
+      for (let i = 0; i < matched.length; i += 200) {
+        const chunk = matched.slice(i, i + 200).map(({ row }) => ({ ...row, updated_at: new Date().toISOString() }))
+        const { error } = await supabase.from('contacts').upsert(chunk, { onConflict: 'email' }) // eslint-disable-line no-await-in-loop
+        if (error) {
+          summary.errors += chunk.length
+          errorRows.push({ detail: `${chunk.length} updates failed: ${error.message}`, fix: explainError(error.message) })
+        } else summary.updated += chunk.length
+        setProgress({ done: toInsert.length + Math.min(i + 200, matched.length), total: drafts.length })
+      }
+    } else {
+      for (const { existing, row } of matched) {
+        const fill = {}
+        Object.entries(row).forEach(([key, value]) => {
+          if (value === null || value === '' || (Array.isArray(value) && !value.length)) return
+          if (key === 'notes' && existing.notes) { if (!String(existing.notes).includes(String(value))) fill.notes = `${existing.notes}\n${value}`; return }
+          if (key === 'tags') { fill.tags = [...new Set([...(existing.tags || []), ...value])]; return }
+          fill[key] = value
+        })
+        fill.updated_at = new Date().toISOString()
+        const { error } = await supabase.from('contacts').update(fill).eq('id', existing.id) // eslint-disable-line no-await-in-loop
+        if (error) {
+          summary.errors += 1
+          errorRows.push({ detail: `${existing.email}: ${error.message}`, fix: explainError(error.message) })
+        } else summary.updated += 1
+        setProgress((p) => ({ ...p, done: p.done + 1 }))
+      }
+    }
+
+    setResult({ summary, errors: errorRows })
     setImporting(false)
     onDone(summary)
+  }
+
+  if (result) {
+    return (
+      <div style={overlayStyle}>
+        <div style={{ ...modalStyle, maxWidth: 560 }}>
+          <h3 style={{ margin: '0 0 6px', fontFamily: "'Iowan Old Style', Georgia, serif", color: OPS_COLORS.emerald, fontWeight: 400 }}>Import finished</h3>
+          <p style={{ fontSize: 14, color: OPS_COLORS.ink, margin: '0 0 12px' }}>
+            <strong>{result.summary.added}</strong> added · <strong>{result.summary.updated}</strong> updated · <strong>{result.summary.skipped}</strong> skipped
+            {result.summary.errors > 0 && <> · <strong style={{ color: OPS_COLORS.warn }}>{result.summary.errors} failed</strong></>}
+          </p>
+          {result.errors.length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              <span style={labelStyle}>Why some rows failed — and how to fix it</span>
+              <div style={{ display: 'grid', gap: 8, maxHeight: 260, overflowY: 'auto' }}>
+                {result.errors.slice(0, 20).map((item, index) => (
+                  <div key={index} style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: '8px 12px', background: OPS_COLORS.ivory, fontSize: 12.5 }}>
+                    <div style={{ color: OPS_COLORS.warn, fontWeight: 700 }}>{item.detail}</div>
+                    {item.fix && <div style={{ color: OPS_COLORS.ink, marginTop: 4 }}>Fix: {item.fix}</div>}
+                  </div>
+                ))}
+                {result.errors.length > 20 && <p style={{ fontSize: 12, color: OPS_COLORS.muted }}>…and {result.errors.length - 20} more, same causes.</p>}
+              </div>
+            </div>
+          )}
+          <p style={{ fontSize: 12.5, color: OPS_COLORS.muted }}>Rows that failed were not lost from your file — fix the cause above and run the import again with <strong>Only add new</strong>; anything already saved is skipped automatically.</p>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}><OpsButton onClick={onClose}>Close</OpsButton></div>
+        </div>
+      </div>
+    )
   }
 
   return (

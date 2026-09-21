@@ -4,6 +4,8 @@
 // These are practical starter documents, not legal advice — have them reviewed
 // before relying on them formally.
 
+import { useSiteLogo } from './lib/useSiteLogo'
+
 const emerald = '#0b3d2e'
 const gold = '#c9a227'
 const cream = '#f6f3ea'
@@ -158,13 +160,14 @@ const LEGAL_CONTENT = {
 }
 
 export function LegalPage({ page, onBack }) {
+  const logoUrl = useSiteLogo()
   const content = LEGAL_CONTENT[page] || LEGAL_CONTENT.privacy
   return (
     <div style={{ minHeight: '100vh', background: cream, fontFamily: sans, color: ink }}>
       <header style={{ background: emerald, color: ivory }}>
         <div style={{ maxWidth: 820, margin: '0 auto', padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <img src="/images/logo-mark.png" alt="King's Ark Dance Academy logo" style={{ width: 34, height: 34, objectFit: 'contain' }} />
+            <img src={logoUrl} alt="King's Ark Dance Academy logo" style={{ width: 34, height: 34, objectFit: 'contain' }} />
             <div>
               <div style={{ fontFamily: 'Fraunces, Georgia, serif', fontSize: 18, fontWeight: 700, lineHeight: 1.1 }}>King's Ark</div>
               <div style={{ fontSize: 11.5, color: '#d5a443', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Dance Academy</div>

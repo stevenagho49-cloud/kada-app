@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from './lib/supabase'
+import { useSiteLogo } from './lib/useSiteLogo'
 import { normalizeEvent, formatTierPrice, formatEventTimeRange, flyerPublicUrl } from './ops/EventsPage'
 
 const emerald = '#0b3d2e'
@@ -23,6 +24,7 @@ function formatEventDate(value) {
 }
 
 export function EventTicketPage({ eventId, onBack }) {
+  const logoUrl = useSiteLogo()
   const [event, setEvent] = useState(null)
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
@@ -110,7 +112,7 @@ export function EventTicketPage({ eventId, onBack }) {
       <header style={{ background: emerald, color: ivory }}>
         <div style={{ maxWidth: 1040, margin: '0 auto', padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <img src="/images/logo-mark.png" alt="King's Ark Dance Academy logo" style={{ width: 34, height: 34, objectFit: 'contain' }} />
+            <img src={logoUrl} alt="King's Ark Dance Academy logo" style={{ width: 34, height: 34, objectFit: 'contain' }} />
             <div>
               <div style={{ fontFamily: 'Fraunces, Georgia, serif', fontSize: 18, fontWeight: 700, lineHeight: 1.1 }}>King's Ark</div>
               <div style={{ fontSize: 11.5, color: '#d5a443', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Dance Academy</div>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { OpsButton, OPS_COLORS, opsInputStyle } from './ui'
+import { ImageField, OpsButton, OPS_COLORS, opsInputStyle } from './ui'
 
 /* ------------------------------------------------------------------ */
 /* Operations > Administration > Settings — everything the business    */
@@ -89,8 +89,6 @@ export function SettingsPage({ content, onSaveContent }) {
     setDirty((current) => ({ ...current, notifications: true }))
   }
 
-  const logoPreview = branding.logoUrl || '/images/logo-mark.png'
-
   return (
     <div className="panel">
       <div className="panel-head"><h3>Settings</h3></div>
@@ -131,16 +129,19 @@ export function SettingsPage({ content, onSaveContent }) {
 
       <Section
         title="Branding"
-        description="Replace the header logo across the site. Upload your new logo file to the public/images folder (or any image host) and paste its URL here. Leave blank to use the built-in logo."
+        description="Upload your logo once — it replaces the logo in the site header, browser tab icon, ticket and legal pages, all at once. Use a PNG with a transparent background for the cleanest result."
         dirty={dirty.branding}
         saving={savingKey === 'branding'}
         onSave={() => saveContent('branding', branding)}
       >
-        <TextField label="Logo image URL" placeholder="/images/logo-mark.png" value={branding.logoUrl} onChange={(value) => { setBranding({ ...branding, logoUrl: value }); setDirty((c) => ({ ...c, branding: true })) }} />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
-          <img src={logoPreview} alt="Logo preview" style={{ height: 44, maxWidth: 180, objectFit: 'contain', background: 'rgba(250,246,236,0.92)', border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 6, padding: 4 }} />
-          <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>Preview on the site's cream header background</span>
-        </div>
+        <ImageField
+          label="Site logo"
+          shape="logo"
+          value={branding.logoUrl}
+          defaultSrc="/images/logo-mark.png"
+          hint="Upload from your photos or files. 'Reset to default' brings back the built-in KADA mark."
+          onChange={(dataUrl) => { setBranding({ ...branding, logoUrl: dataUrl }); setDirty((c) => ({ ...c, branding: true })) }}
+        />
       </Section>
 
       <Section

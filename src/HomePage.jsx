@@ -190,6 +190,12 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
     { label: 'Facebook', url: social.facebook },
   ].filter((link) => link.url)
   const prices = siteContent.prices || {}
+  const images = siteContent.images || {}
+  const heroImg = images.hero || '/images/hero-workshop.jpeg'
+  const heroFloatImg = images.heroFloat || '/images/nVgB0rjQ.jpeg'
+  const aboutImg = images.about || '/images/about-kada.jpeg'
+  const workshopsImg = images.workshopsBg || '/images/u.dance sunday warm up2.JPG'
+  const classesImg = images.classesBg || '/images/u.dance saturday20.JPG'
   const membershipPounds = (prices.membershipPence ?? 2500) / 100
   const dayPassPounds = (prices.dayPassPence ?? 1000) / 100
   const teamMembers = Array.isArray(team.members) && team.members.length ? team.members : [
@@ -228,7 +234,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
                   <a href="#workshops" className="btn btn-outline">School Workshops</a>
                 </div>
               </div>
-              <div className="hero-visual-wrap"><div className="hero-visual reveal in" style={{ backgroundImage: "url('/images/hero-workshop.jpeg')" }}></div><div className="hero-float" aria-hidden="true" style={{ backgroundImage: "url('/images/nVgB0rjQ.jpeg')" }}></div></div>
+              <div className="hero-visual-wrap"><div className="hero-visual reveal in" style={{ backgroundImage: `url('${heroImg}')` }}></div><div className="hero-float" aria-hidden="true" style={{ backgroundImage: `url('${heroFloatImg}')` }}></div></div>
               </div>
             </div>
           </section>
@@ -247,7 +253,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
         return (
           <section className="about" id="about" key="about">
             <div className="wrap about-grid">
-              <div className="about-img reveal" style={{ backgroundImage: "url('/images/about-kada.jpeg')" }}></div>
+              <div className="about-img reveal" style={{ backgroundImage: `url('${aboutImg}')` }}></div>
               <div className="about-copy reveal reveal-delay-1">
                 <div className="eyebrow wine">About KADA</div>
                 <h2 className="display section-title">{about.title || 'More than dance.'} <em>{about.titleEmphasis || "It's a movement."}</em></h2>
@@ -282,7 +288,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
       case 'workshops':
         return (
           <section className="service dark" id="workshops" key="workshops">
-            <div className="service-bg" style={{ backgroundImage: "url('/images/u.dance sunday warm up2.JPG')" }}></div>
+            <div className="service-bg" style={{ backgroundImage: `url('${workshopsImg}')` }}></div>
             <div className="wrap"><div className="service-card reveal">
               <span className="eyebrow">{workshops.eyebrow || 'For Schools'}</span>
               <h2 className="display">{workshops.title || 'Bring your school to life through Afrobeats.'}</h2>
@@ -295,7 +301,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
         return (
           <React.Fragment key="classes">
             <section className="service light" id="classes">
-              <div className="service-bg" style={{ backgroundImage: "url('/images/u.dance saturday20.JPG')" }}></div>
+              <div className="service-bg" style={{ backgroundImage: `url('${classesImg}')` }}></div>
               <div className="wrap"><div className="service-card reveal">
                 <span className="eyebrow">{classes.eyebrow || 'For Families'}</span>
                 <h2 className="display">{classes.title || 'Saturday classes, ages 5 to 15.'}</h2>
@@ -397,6 +403,9 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
           </React.Fragment>
         )
       case 'events':
+        // No published, homepage-flagged events → hide the section completely
+        // rather than showing an empty "Upcoming events" block.
+        if (!siteEvents.length) return null
         return (
           <section className="events" id="events" key="events">
             <div className="wrap">
@@ -404,9 +413,6 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
                 <span className="eyebrow">What's On</span>
                 <h2 className="display">Upcoming <em>events.</em></h2>
               </div>
-              {siteEvents.length === 0 ? (
-                <p style={{ color: '#767066', fontSize: 14, marginTop: 20 }}>New events are announced here soon.</p>
-              ) : (
               <div className="event-row reveal">
                 {siteEvents.map((siteEvent) => (
                   <div className="event-card" key={siteEvent.id}>
@@ -424,7 +430,6 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
                   </div>
                 ))}
               </div>
-              )}
             </div>
           </section>
         )
