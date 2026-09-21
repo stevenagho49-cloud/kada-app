@@ -698,14 +698,34 @@ app.post('/api/admin/invitations/:id/resend', async (request, response) => {
 /* Each send creates individual campaign_sends rows so every recipient   */
 /* gets their own Resend email (proper deliverability, no To: lists).    */
 /* ------------------------------------------------------------------ */
-const CAMPAIGN_AUDIENCES = ['all', 'school', 'parent', 'client', 'partner', 'other']
+const CAMPAIGN_AUDIENCES = ['all', 'school', 'parent', 'client', 'partner', 'other', 'custom']
 const RECURRENCE_MS = { none: 0, daily: 86400000, weekly: 604800000, monthly: 2592000000 }
 
-async function campaignRecipients(audience) {
-  let query = supabase.from('contacts').select('id,name,email,kind')
-  if (audience !== 'all') query = query.eq('kind', audience)
-  const { data } = await query
-  return (data || []).filter((contact) => contact.email)
+/* Normalise a hand-entered list into unique, valid, lowercased addresses. */
+function cleanEmailList(value) {
+  const list = Array.isArray(value) ? value : String(value || '').split(/[\n,;]+/)
+  return [...new Set(list.map((item) => String(item).trim().toLowerCase()).filter((item) => /.+@.+\..+/.test(item)))]
+}
+
+async function campaignRecipients(audience, customEmails = []) {
+  const recipients = []
+  const seen = new Set()
+  const add = (contact) => {
+    if (!contact.email) return
+    const email = contact.email.toLowerCase()
+    if (seen.has(email)) return
+    seen.add(email)
+    recipients.push({ id: contact.id || null, name: contact.name || '', email })
+  }
+  if (audience !== 'custom') {
+    let query = supabase.from('contacts').select('id,name,email,kind')
+    if (audience !== 'all') query = query.eq('kind', audience)
+    const { data } = await query
+    ;(data || []).forEach(add)
+  }
+  // One-off list always sends, whether it is the audience or extra addresses.
+  cleanEmailList(customEmails).forEach((email) => add({ email, name: email.split('@')[0].replace(/[._-]+/g, ' ') }))
+  return recipients
 }
 
 async function runDueCampaigns() {
@@ -715,7 +735,7 @@ async function runDueCampaigns() {
     .in('status', ['scheduled', 'active']).lte('scheduled_at', now.toISOString())
   let sent = 0
   for (const campaign of (due || [])) {
-    const recipients = await campaignRecipients(campaign.audience)
+    const recipients = await campaignRecipients(campaign.audience, campaign.custom_emails)
     const rows = []
     for (const recipient of recipients) {
       const result = await sendEmail({ to: recipient.email, subject: campaign.subject, html: campaign.body_html.replace(/{{name}}/g, recipient.name || 'there') })
@@ -733,11 +753,13 @@ setInterval(() => { runDueCampaigns().catch((error) => console.error('Campaign s
 app.post('/api/admin/campaigns', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
-  const { name, subject, previewText = '', bodyHtml = '', audience = 'all', recurrence = 'none', scheduledAt = null } = request.body || {}
+  const { name, subject, previewText = '', bodyHtml = '', audience = 'all', recurrence = 'none', scheduledAt = null, customEmails = [] } = request.body || {}
   if (!name || !subject || !bodyHtml) return response.status(400).json({ error: 'Name, subject and body are required.' })
   if (!CAMPAIGN_AUDIENCES.includes(audience)) return response.status(400).json({ error: 'Unknown audience.' })
   if (!Object.keys(RECURRENCE_MS).includes(recurrence)) return response.status(400).json({ error: 'Unknown schedule.' })
-  const { data, error } = await supabase.from('campaigns').insert({ name, subject, preview_text: previewText, body_html: bodyHtml, audience, recurrence, scheduled_at: scheduledAt, status: scheduledAt ? 'scheduled' : 'draft', created_by: user.id }).select().maybeSingle()
+  const emails = cleanEmailList(customEmails)
+  if (audience === 'custom' && !emails.length) return response.status(400).json({ error: 'Add at least one email address for a one-off list.' })
+  const { data, error } = await supabase.from('campaigns').insert({ name, subject, preview_text: previewText, body_html: bodyHtml, audience, custom_emails: emails, recurrence, scheduled_at: scheduledAt, status: scheduledAt ? 'scheduled' : 'draft', created_by: user.id }).select().maybeSingle()
   if (error) return response.status(500).json({ error: 'Campaign could not be saved.' })
   response.json({ campaign: data })
 })
@@ -745,7 +767,7 @@ app.post('/api/admin/campaigns', async (request, response) => {
 app.get('/api/admin/campaigns', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
-  const { data, error } = await supabase.from('campaigns').select('id,name,subject,audience,status,recurrence,scheduled_at,updated_at').order('updated_at', { ascending: false })
+  const { data, error } = await supabase.from('campaigns').select('id,name,subject,audience,custom_emails,status,recurrence,scheduled_at,updated_at').order('updated_at', { ascending: false })
   if (error) return response.status(500).json({ error: 'Campaigns could not be loaded.' })
   const counts = {}
   const { data: sendRows } = await supabase.from('campaign_sends').select('campaign_id,status')

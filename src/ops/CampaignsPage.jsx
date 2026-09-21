@@ -10,12 +10,13 @@ import { VisualEmailEditor } from './VisualEmailEditor'
 /* ------------------------------------------------------------------ */
 
 const AUDIENCES = [
-  { value: 'all', label: 'Everyone' },
+  { value: 'all', label: 'Everyone (all contacts)' },
   { value: 'school', label: 'Schools' },
   { value: 'parent', label: 'Parents' },
   { value: 'client', label: 'Clients' },
   { value: 'partner', label: 'Partners' },
   { value: 'other', label: 'Other' },
+  { value: 'custom', label: 'One-off email list (type the addresses)' },
 ]
 const RECURRENCE = [
   { value: 'none', label: 'Send once' },
@@ -28,7 +29,7 @@ const STATUS_TONES = { draft: 'default', scheduled: 'gold', active: 'green', pau
 const labelStyle = { display: 'block', fontSize: 12, fontWeight: 700, color: OPS_COLORS.emerald, marginBottom: 4 }
 const sectionStyle = { border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 10, padding: 16, background: OPS_COLORS.ivory, marginBottom: 14 }
 
-const emptyDraft = { name: '', subject: '', previewText: '', bodyHtml: '', audience: 'all', recurrence: 'none', scheduledAt: '' }
+const emptyDraft = { name: '', subject: '', previewText: '', bodyHtml: '', audience: 'all', recurrence: 'none', scheduledAt: '', customEmails: '' }
 
 export function CampaignsPage({ session }) {
   const [campaigns, setCampaigns] = useState([])
@@ -99,6 +100,7 @@ export function CampaignsPage({ session }) {
           previewText: draft.previewText,
           bodyHtml: draft.bodyHtml,
           audience: draft.audience,
+          customEmails: draft.customEmails,
           recurrence: draft.recurrence,
           scheduledAt: draft.scheduledAt ? new Date(draft.scheduledAt).toISOString() : null,
         }),
@@ -194,6 +196,13 @@ export function CampaignsPage({ session }) {
           <label style={{ display: 'block' }}><span style={labelStyle}>Subject line</span><input style={opsInputStyle} value={draft.subject} onChange={(event) => setDraft({ ...draft, subject: event.target.value })} /></label>
           <label style={{ display: 'block' }}><span style={labelStyle}>Inbox preview text</span><input style={opsInputStyle} value={draft.previewText} onChange={(event) => setDraft({ ...draft, previewText: event.target.value })} /></label>
         </div>
+        {draft.audience === 'custom' && (
+          <label style={{ display: 'block', marginTop: 10 }}>
+            <span style={labelStyle}>One-off email list ,  one or many addresses</span>
+            <textarea style={{ ...opsInputStyle, minHeight: 90, fontFamily: 'monospace', fontSize: 12.5 }} placeholder={'jane@oakridge.sch.uk\nmrsmith@stmarys.org, temi@kingsarkdance.com'} value={draft.customEmails} onChange={(event) => setDraft({ ...draft, customEmails: event.target.value })} />
+            <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>Separate addresses with commas, semicolons or new lines. Anyone already in Contacts is only emailed once.</span>
+          </label>
+        )}
         <div style={{ marginTop: 10 }}>
           <span style={labelStyle}>Email content ,  edit it like a document ({'{{name}}'} inserts the recipient's name). Use Preview to see the finished email.</span>
           {preview
@@ -224,7 +233,7 @@ export function CampaignsPage({ session }) {
               <div style={{ flex: 1, minWidth: 200 }}>
                 <strong>{campaign.name}</strong>
                 <div style={{ fontSize: 12, color: OPS_COLORS.muted }}>
-                  {AUDIENCES.find((audience) => audience.value === campaign.audience)?.label} · {RECURRENCE.find((option) => option.value === campaign.recurrence)?.label}
+                  {AUDIENCES.find((audience) => audience.value === campaign.audience)?.label}{campaign.audience === 'custom' && campaign.custom_emails?.length ? ` (${campaign.custom_emails.length} address${campaign.custom_emails.length === 1 ? '' : 'es'})` : ''} · {RECURRENCE.find((option) => option.value === campaign.recurrence)?.label}
                   {campaign.scheduled_at ? ` · ${new Date(campaign.scheduled_at).toLocaleString('en-GB')}` : ''}
                   {campaign.sentCount ? ` · ${campaign.sentCount} sent` : ''}{campaign.failedCount ? ` · ${campaign.failedCount} failed` : ''}
                 </div>
