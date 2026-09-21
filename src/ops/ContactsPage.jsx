@@ -33,6 +33,22 @@ function normalizeKind(value) {
   return KIND_OPTIONS.some((option) => option.value === v) ? v : 'other'
 }
 
+/* Guess the contact type from the email domain and name when no explicit     */
+/* Type column is mapped — school domains (.sch.uk, .edu, academy, college),  */
+/* generic personal inboxes (gmail/outlook…) → parent, companies → client.    */
+const PERSONAL_DOMAINS = /^(gmail|googlemail|outlook|hotmail|live|yahoo|icloud|aol|btinternet|btopenworld|sky|talktalk|virginmedia|proton|msn)\./i
+function inferKind(email, organisation, explicitKind) {
+  const explicit = normalizeKind(explicitKind)
+  if (explicit !== 'other') return explicit
+  const domain = String(email || '').split('@')[1] || ''
+  const org = String(organisation || '')
+  if (/\.(sch|school|academy)\.|\.sch\.|\.edu(\.|$)|\.ac\.|college|academy|school/i.test(domain) || /school|academy|college|academy|primary|secondary/i.test(org)) return 'school'
+  if (/council|gov\.|nhs\.|church|diocese|cathedral/i.test(domain)) return 'partner'
+  if (PERSONAL_DOMAINS.test(domain)) return 'parent'
+  if (domain) return 'client'
+  return 'other'
+}
+
 /* RFC-4180-ish delimited parser — handles quoted cells, commas/tabs and     */
 /* embedded newlines, so pasted Excel ranges and exported CSVs both work.    */
 function parseDelimited(text) {
@@ -142,10 +158,11 @@ export function ContactsPage() {
     })
   }, [contacts, search, kindFilter])
 
-  /* Shared dedupe path: match by email, else by name+organisation. Updates  */
-  /* only fill fields the new data actually provides — imports never blank   */
-  /* out existing notes or details.                                          */
-  const upsertOne = async (draft, source) => {
+  /* Shared dedupe path: match by email, else by name+organisation. mode:     */
+  /*   'merge' (default) — update existing, filling only provided fields      */
+  /*   'addNew' — only insert brand-new contacts, skip anything that matches  */
+  /*   'replace' — overwrite matching contacts with the imported values       */
+  const upsertOne = async (draft, source, mode = 'merge') => {
     const row = toDbRow(draft)
     if (!row.name && !row.email) return { status: 'skipped' }
     const email = row.email
@@ -153,12 +170,15 @@ export function ContactsPage() {
       || contacts.find((contact) => contact.name.toLowerCase() === row.name.toLowerCase()
         && (contact.organisation || '').toLowerCase() === (row.organisation || '').toLowerCase())
     if (existing) {
+      if (mode === 'addNew') return { status: 'skipped' }
       const fill = {}
       Object.entries(row).forEach(([key, value]) => {
         if (value === null || value === '' || (Array.isArray(value) && !value.length)) return
-        if (key === 'notes' && existing.notes && String(existing.notes).includes(String(value))) return
-        if (key === 'notes' && existing.notes) { fill.notes = `${existing.notes}\n${value}`; return }
-        if (key === 'tags') { fill.tags = [...new Set([...(existing.tags || []), ...value])]; return }
+        if (mode !== 'replace') {
+          if (key === 'notes' && existing.notes && String(existing.notes).includes(String(value))) return
+          if (key === 'notes' && existing.notes) { fill.notes = `${existing.notes}\n${value}`; return }
+          if (key === 'tags') { fill.tags = [...new Set([...(existing.tags || []), ...value])]; return }
+        }
         fill[key] = value
       })
       fill.updated_at = new Date().toISOString()
@@ -290,7 +310,7 @@ export function ContactsPage() {
         <ImportWizard
           existingCount={contacts.length}
           onClose={() => setShowImport(false)}
-          onDone={async (summary) => { setShowImport(false); setNotice(`Import complete — ${summary.added} added, ${summary.updated} updated, ${summary.skipped} skipped.`); await load() }}
+          onDone={async (summary) => { setShowImport(false); setNotice(`Import finished — ${summary.added} added, ${summary.updated} updated, ${summary.skipped} skipped${summary.errors ? `, ${summary.errors} failed` : ''}.`); await load() }}
           upsertOne={upsertOne}
         />
       )}
@@ -317,6 +337,8 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
   const [parseError, setParseError] = useState('')
   const [pasteText, setPasteText] = useState('')
   const [importing, setImporting] = useState(false)
+  const [importMode, setImportMode] = useState('merge') // merge | addNew | replace
+  const [progress, setProgress] = useState({ done: 0, total: 0 })
 
   const acceptRows = (grid) => {
     if (!grid.length) { setParseError('No rows found in that data.'); return }
@@ -349,24 +371,27 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
     setImporting(true)
     const summary = { added: 0, updated: 0, skipped: 0, errors: 0 }
     const seenEmails = new Set() // catch duplicates inside the file itself
+    setProgress({ done: 0, total: rows.length })
     for (const row of rows) {
       const pick = (key) => (mapping[key] === '' ? '' : String(row[mapping[key]] ?? '').trim())
+      const email = pick('email')
       const draft = {
-        kind: normalizeKind(pick('kind')),
-        name: pick('name') || (pick('email') ? pick('email').split('@')[0].replace(/[._-]+/g, ' ') : ''),
+        kind: inferKind(email, pick('organisation'), pick('kind')),
+        name: pick('name') || (email ? email.split('@')[0].replace(/[._-]+/g, ' ') : ''),
         organisation: pick('organisation'),
-        email: pick('email'),
+        email,
         phone: pick('phone'),
         address: pick('address'),
         tags: pick('tags') ? pick('tags').split(/[;,]/) : [],
         notes: pick('notes'),
       }
-      const emailKey = draft.email.toLowerCase()
-      if (!draft.name && !emailKey) { summary.skipped += 1; continue }
-      if (emailKey && seenEmails.has(emailKey)) { summary.skipped += 1; continue }
+      const emailKey = email.toLowerCase()
+      if (!draft.name && !emailKey) { summary.skipped += 1; setProgress((p) => ({ ...p, done: p.done + 1 })); continue }
+      if (emailKey && seenEmails.has(emailKey)) { summary.skipped += 1; setProgress((p) => ({ ...p, done: p.done + 1 })); continue }
       if (emailKey) seenEmails.add(emailKey)
-      const result = await upsertOne(draft, 'import') // eslint-disable-line no-await-in-loop
+      const result = await upsertOne(draft, 'import', importMode) // eslint-disable-line no-await-in-loop
       summary[result.status === 'error' ? 'errors' : result.status] += 1
+      setProgress((p) => ({ ...p, done: p.done + 1 }))
     }
     setImporting(false)
     onDone(summary)
@@ -419,13 +444,37 @@ function ImportWizard({ existingCount, onClose, onDone, upsertOne }) {
               </table>
             </div>
             {rows.length > 5 && <p style={{ fontSize: 12, color: OPS_COLORS.muted, marginTop: -8, marginBottom: 12 }}>Preview shows the first 5 of {rows.length} rows.</p>}
+
+            <div style={{ marginBottom: 12 }}>
+              <span style={labelStyle}>Duplicates ({existingCount} contacts already in the database)</span>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {[
+                  { value: 'merge', label: 'Merge into existing', hint: 'fill in gaps, keep notes' },
+                  { value: 'addNew', label: 'Only add new', hint: 'skip anything that matches' },
+                  { value: 'replace', label: 'Replace duplicates', hint: 'overwrite with imported values' },
+                ].map((option) => (
+                  <button key={option.value} type="button" onClick={() => setImportMode(option.value)} title={option.hint} style={{ border: `1px solid ${importMode === option.value ? OPS_COLORS.emerald : OPS_COLORS.rule}`, background: importMode === option.value ? OPS_COLORS.emerald : 'transparent', color: importMode === option.value ? OPS_COLORS.ivory : OPS_COLORS.ink, borderRadius: 20, padding: '6px 12px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}>
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {importing && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ height: 8, background: OPS_COLORS.rule, borderRadius: 6, overflow: 'hidden' }}>
+                  <div style={{ width: progress.total ? `${Math.round((progress.done / progress.total) * 100)}%` : '0%', height: '100%', background: OPS_COLORS.emerald, transition: 'width 0.2s' }} />
+                </div>
+                <p style={{ fontSize: 12, color: OPS_COLORS.muted, margin: '6px 0 0' }}>Importing {progress.done} of {progress.total}…</p>
+              </div>
+            )}
           </>
         )}
 
         {parseError && <p style={{ color: OPS_COLORS.warn, fontSize: 13 }}>{parseError}</p>}
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-          <OpsButton variant="ghost" onClick={onClose}>Cancel</OpsButton>
-          {headers.length > 0 && <OpsButton disabled={importing} onClick={runImport}>{importing ? 'Importing…' : `Import ${rows.length} rows`}</OpsButton>}
+          <OpsButton variant="ghost" onClick={onClose} disabled={importing}>Cancel</OpsButton>
+          {headers.length > 0 && <OpsButton disabled={importing} onClick={runImport}>{importing ? `Importing ${progress.done}/${progress.total}…` : `Import ${rows.length} rows`}</OpsButton>}
         </div>
       </div>
     </div>

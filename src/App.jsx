@@ -12,6 +12,7 @@ import { ClassSchedulePage } from './ops/ClassSchedulePage'
 import { ContactsPage } from './ops/ContactsPage'
 import { TeamPage } from './ops/TeamPage'
 import { SettingsPage } from './ops/SettingsPage'
+import { CampaignsPage } from './ops/CampaignsPage'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
 
 // Routable screens loaded on demand — the public homepage bundle doesn't pay for them.
@@ -747,7 +748,9 @@ function App() {
         setTab(opsMatch[1])
         if (opsMatch[2]) pendingOpsRecord.current = { tab: opsMatch[1], id: opsMatch[2] }
         setView('ops')
-        window.history.replaceState(null, '', window.location.pathname + window.location.search)
+        // Keep the tab in the hash so a refresh lands back on the same page;
+        // only strip the optional record id.
+        if (opsMatch[2]) window.history.replaceState(null, '', `${window.location.pathname + window.location.search}#ops/${opsMatch[1]}`)
       }
     }
     loadSession()
@@ -757,6 +760,7 @@ function App() {
       if (!nextSession) {
         setProfile(null)
         setView('site')
+        window.history.replaceState(null, '', window.location.pathname + window.location.search)
       }
     })
 
@@ -1368,6 +1372,7 @@ function App() {
       label: 'Administration',
       children: [
         { key: 'team', label: 'Team & access' },
+        { key: 'campaigns', label: 'Email campaigns' },
         { key: 'settings', label: 'Settings' },
       ],
     }] : []),
@@ -1379,6 +1384,8 @@ function App() {
       return
     }
     setTab(key)
+    // Persist the open tab in the hash so refresh/back keeps you on it.
+    window.history.replaceState(null, '', `#ops/${key}`)
   }
   const opsHeading = isAdmin ? 'Operations dashboard' : isStaff ? 'Team dashboard' : isInstructor ? 'Instructor dashboard' : 'School dashboard'
 
@@ -1491,6 +1498,7 @@ function App() {
           {tab === 'invoice-settings' && (isAdmin || can('sales')) && <InvoiceSettings settings={invoiceSettings} onSave={saveInvoiceSettings} saving={invoiceSettingsSaving} />}
           {tab === 'contacts' && can('contacts') && <ContactsPage />}
           {tab === 'team' && isAdmin && session && <TeamPage session={session} />}
+          {tab === 'campaigns' && isAdmin && session && <CampaignsPage session={session} />}
           {tab === 'settings' && isAdmin && <SettingsPage content={siteContent} onSaveContent={saveSiteContent} />}
           {tab === 'jobs' && (isAdmin || isInstructor) && <JobBoardView jobs={isInstructor ? jobs.filter((job) => job.status === 'open' || job.claimedBy === profile.instructor_id) : jobs} bookings={bookings} schools={schools} instructors={instructors} isAdmin={isAdmin} onClaim={claimJob} onDecision={decideJob} onGoToBookings={() => setTab('bookings')} />}
 

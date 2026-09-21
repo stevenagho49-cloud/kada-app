@@ -40,10 +40,11 @@ function PermissionGrid({ value, onChange, disabled = false }) {
 
 export function TeamPage({ session }) {
   const [members, setMembers] = useState([])
+  const [invitations, setInvitations] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-  const [invite, setInvite] = useState({ name: '', email: '', jobTitle: '', permissions: [] })
+  const [invite, setInvite] = useState({ name: '', email: '', role: 'staff', jobTitle: '', permissions: [] })
   const [inviting, setInviting] = useState(false)
   const [drafts, setDrafts] = useState({}) // id → { role, jobTitle, permissions }
   const [savingId, setSavingId] = useState('')
@@ -64,6 +65,8 @@ export function TeamPage({ session }) {
     try {
       const result = await authedFetch('/api/admin/team')
       setMembers(result.members || [])
+      const invites = await authedFetch('/api/admin/invitations')
+      setInvitations(invites.invitations || [])
     } catch (loadErr) {
       setError(loadErr.message)
     }
@@ -75,18 +78,28 @@ export function TeamPage({ session }) {
   const editDraft = (member, changes) => setDrafts((current) => ({ ...current, [member.id]: { ...draftFor(member), ...changes } }))
 
   const sendInvite = async () => {
-    if (!invite.name.trim() || !/.+@.+\..+/.test(invite.email)) { setError('Add the team member\'s name and a valid email to send an invite.'); return }
+    if (!invite.name.trim() || !/.+@.+\..+/.test(invite.email)) { setError('Add their name and a valid email to send an invite.'); return }
     setInviting(true)
     setError('')
     try {
       await authedFetch('/api/admin/team/invite', { method: 'POST', body: JSON.stringify(invite) })
       setNotice(`Invite emailed to ${invite.email}. They set their own password from the link.`)
-      setInvite({ name: '', email: '', jobTitle: '', permissions: [] })
+      setInvite({ name: '', email: '', role: 'staff', jobTitle: '', permissions: [] })
       await load()
     } catch (inviteErr) {
       setError(inviteErr.message)
     }
     setInviting(false)
+  }
+
+  const resendInvite = async (invitation) => {
+    try {
+      await authedFetch(`/api/admin/invitations/${invitation.id}/resend`, { method: 'POST' })
+      setNotice(`Invite re-sent to ${invitation.email}.`)
+      await load()
+    } catch (resendErr) {
+      setError(resendErr.message)
+    }
   }
 
   const saveMember = async (member) => {
@@ -124,16 +137,54 @@ export function TeamPage({ session }) {
       </p>
 
       <div style={sectionStyle}>
-        <h4 style={{ margin: '0 0 12px', fontSize: 15, color: OPS_COLORS.emerald }}>Invite a team member</h4>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, marginBottom: 12 }}>
+        <h4 style={{ margin: '0 0 12px', fontSize: 15, color: OPS_COLORS.emerald }}>Invite someone</h4>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10, marginBottom: 12 }}>
           <label style={{ display: 'block' }}><span style={labelStyle}>Full name</span><input style={opsInputStyle} value={invite.name} onChange={(event) => setInvite({ ...invite, name: event.target.value })} /></label>
           <label style={{ display: 'block' }}><span style={labelStyle}>Email</span><input type="email" style={opsInputStyle} value={invite.email} onChange={(event) => setInvite({ ...invite, email: event.target.value })} /></label>
-          <label style={{ display: 'block' }}><span style={labelStyle}>Job title</span><input style={opsInputStyle} placeholder="e.g. Programme coordinator" value={invite.jobTitle} onChange={(event) => setInvite({ ...invite, jobTitle: event.target.value })} /></label>
+          <label style={{ display: 'block' }}><span style={labelStyle}>They will join as</span>
+            <select style={opsInputStyle} value={invite.role} onChange={(event) => setInvite({ ...invite, role: event.target.value })}>
+              <option value="staff">Staff (you choose their access below)</option>
+              <option value="instructor">Instructor</option>
+              <option value="parent">Parent</option>
+              <option value="school">School</option>
+              <option value="admin">Admin (full access)</option>
+            </select>
+          </label>
+          {invite.role === 'staff' && <label style={{ display: 'block' }}><span style={labelStyle}>Job title</span><input style={opsInputStyle} placeholder="e.g. Programme coordinator" value={invite.jobTitle} onChange={(event) => setInvite({ ...invite, jobTitle: event.target.value })} /></label>}
         </div>
-        <span style={labelStyle}>Access to</span>
-        <PermissionGrid value={invite.permissions} onChange={(permissions) => setInvite({ ...invite, permissions })} />
+        {invite.role === 'staff' && <>
+          <span style={labelStyle}>Access to</span>
+          <PermissionGrid value={invite.permissions} onChange={(permissions) => setInvite({ ...invite, permissions })} />
+        </>}
         <div style={{ marginTop: 12 }}><OpsButton disabled={inviting} onClick={sendInvite}>{inviting ? 'Sending…' : 'Send invite email'}</OpsButton></div>
       </div>
+
+      {invitations.length > 0 && (
+        <div style={sectionStyle}>
+          <h4 style={{ margin: '0 0 10px', fontSize: 15, color: OPS_COLORS.emerald }}>Invitation progress</h4>
+          <div style={{ display: 'grid', gap: 6 }}>
+            {invitations.map((invitation) => {
+              const stage = invitation.status === 'account_created' ? 3 : invitation.status === 'accepted' ? 2 : invitation.status === 'sent' ? 1 : 0
+              const steps = ['Invite sent', 'Accepted', 'Account created']
+              return (
+                <div key={invitation.id} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', fontSize: 13 }}>
+                  <div style={{ minWidth: 220 }}><strong>{invitation.full_name || invitation.email}</strong> <span style={{ color: OPS_COLORS.muted }}>· {invitation.role}</span></div>
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    {steps.map((step, index) => (
+                      <span key={step} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ width: 18, height: 18, borderRadius: '50%', display: 'grid', placeItems: 'center', fontSize: 10, background: index < stage ? OPS_COLORS.okGreen : OPS_COLORS.rule, color: index < stage ? '#fff' : OPS_COLORS.muted }}>{index < stage ? '✓' : index + 1}</span>
+                        <span style={{ color: index < stage ? OPS_COLORS.ink : OPS_COLORS.muted }}>{step}</span>
+                        {index < steps.length - 1 && <span style={{ width: 16, height: 1, background: OPS_COLORS.rule, margin: '0 2px' }} />}
+                      </span>
+                    ))}
+                  </div>
+                  {invitation.status === 'sent' && <OpsButton small variant="ghost" onClick={() => resendInvite(invitation)}>Resend</OpsButton>}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {error && <p style={{ color: OPS_COLORS.warn, fontSize: 13 }}>{error}</p>}
       {notice && <p style={{ color: OPS_COLORS.okGreen, fontSize: 13 }}>{notice}</p>}

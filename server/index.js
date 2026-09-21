@@ -511,26 +511,6 @@ app.get('/api/admin/team', async (request, response) => {
   response.json({ members: (profiles || []).map((item) => ({ id: item.id, name: item.full_name || '', email: emailById.get(item.id) || '', role: item.role, jobTitle: item.job_title || '', permissions: item.permissions || [] })) })
 })
 
-app.post('/api/admin/team/invite', async (request, response) => {
-  const user = await requireAdmin(request, response)
-  if (!user) return
-  const { name = '', email = '', jobTitle = '', permissions = [] } = request.body || {}
-  const cleanName = String(name).trim().slice(0, 120)
-  const cleanEmail = String(email).trim().toLowerCase().slice(0, 200)
-  if (!cleanName || !/.+@.+\..+/.test(cleanEmail)) return response.status(400).json({ error: 'A name and a valid email are required.' })
-  // The invite email lets the new staff member set their own password. The
-  // handle_new_user trigger creates their staff profile from this metadata.
-  const { error: inviteError } = await supabase.auth.admin.inviteUserByEmail(cleanEmail, { data: { role: 'staff', full_name: cleanName }, redirectTo: `${APP_URL}/` })
-  const alreadyRegistered = inviteError && /already|registered|exists/i.test(inviteError.message)
-  if (inviteError && !alreadyRegistered) return response.status(500).json({ error: `Invite could not be sent: ${inviteError.message}` })
-  const users = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 })
-  const target = (users.data?.users || []).find((item) => item.email?.toLowerCase() === cleanEmail)
-  if (!target) return response.status(502).json({ error: 'The invite was sent but the new profile is not visible yet — try again in a moment.' })
-  const { error } = await supabase.from('profiles').update({ role: 'staff', full_name: cleanName, job_title: String(jobTitle).trim().slice(0, 80), permissions: cleanPermissions(permissions) }).eq('id', target.id)
-  if (error) return response.status(500).json({ error: 'Profile could not be updated.' })
-  response.json({ invited: true, alreadyRegistered })
-})
-
 app.post('/api/admin/team/:userId', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
@@ -623,6 +603,182 @@ app.post('/api/parent/settings', async (request, response) => {
     if (savedStudent) savedStudents.push(savedStudent)
   }
   response.json({ family: savedFamily, students: savedStudents })
+})
+
+app.post('/api/admin/team/invite', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { name = '', email = '', role = 'staff', jobTitle = '', permissions = [] } = request.body || {}
+  const cleanName = String(name).trim().slice(0, 120)
+  const cleanEmail = String(email).trim().toLowerCase().slice(0, 200)
+  const cleanRole = ['staff', 'instructor', 'parent', 'school', 'admin'].includes(role) ? role : 'staff'
+  if (!cleanName || !/.+@.+\..+/.test(cleanEmail)) return response.status(400).json({ error: 'A name and a valid email are required.' })
+  // The invite email lets the new member set their own password. The
+  // handle_new_user trigger creates their profile from this metadata.
+  const { error: inviteError } = await supabase.auth.admin.inviteUserByEmail(cleanEmail, { data: { role: cleanRole, full_name: cleanName }, redirectTo: `${APP_URL}/` })
+  const alreadyRegistered = inviteError && /already|registered|exists/i.test(inviteError.message)
+  if (inviteError && !alreadyRegistered) return response.status(500).json({ error: `Invite could not be sent: ${inviteError.message}` })
+  const users = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 })
+  const target = (users.data?.users || []).find((item) => item.email?.toLowerCase() === cleanEmail)
+  if (target) {
+    const update = { role: cleanRole, full_name: cleanName, job_title: String(jobTitle).trim().slice(0, 80), permissions: cleanPermissions(permissions) }
+    if (cleanRole === 'instructor') {
+      const { data: instructor } = await supabase.from('instructors').select('id').ilike('email', cleanEmail).maybeSingle()
+      if (instructor) update.instructor_id = instructor.id
+    }
+    await supabase.from('profiles').update(update).eq('id', target.id)
+    await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status: target.email_confirmed_at ? 'account_created' : 'accepted', invited_by: user.id, user_id: target.id, account_created_at: target.email_confirmed_at || null }, { onConflict: 'email' })
+  } else {
+    await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status: 'sent', invited_by: user.id }, { onConflict: 'email' })
+  }
+  response.json({ invited: true, alreadyRegistered })
+})
+
+app.get('/api/admin/invitations', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { data, error } = await supabase.from('invitations').select('*').order('created_at', { ascending: false }).limit(200)
+  if (error) return response.status(500).json({ error: 'Invitations could not be loaded.' })
+  response.json({ invitations: data || [] })
+})
+
+app.post('/api/admin/invitations/:id/resend', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { data: invite } = await supabase.from('invitations').select('*').eq('id', request.params.id).maybeSingle()
+  if (!invite) return response.status(404).json({ error: 'Invitation not found.' })
+  const { error: resendError } = await supabase.auth.admin.inviteUserByEmail(invite.email, { data: { role: invite.role, full_name: invite.full_name }, redirectTo: `${APP_URL}/` })
+  if (resendError && !/already|registered|exists/i.test(resendError.message)) return response.status(500).json({ error: resendError.message })
+  await supabase.from('invitations').update({ status: 'sent', accepted_at: null }).eq('id', invite.id)
+  response.json({ resent: true })
+})
+
+/* ------------------------------------------------------------------ */
+/* Email campaigns — design, audience, schedule (one-off or recurring). */
+/* Each send creates individual campaign_sends rows so every recipient   */
+/* gets their own Resend email (proper deliverability, no To: lists).    */
+/* ------------------------------------------------------------------ */
+const CAMPAIGN_AUDIENCES = ['all', 'school', 'parent', 'client', 'partner', 'other']
+const RECURRENCE_MS = { none: 0, daily: 86400000, weekly: 604800000, monthly: 2592000000 }
+
+async function campaignRecipients(audience) {
+  let query = supabase.from('contacts').select('id,name,email,kind')
+  if (audience !== 'all') query = query.eq('kind', audience)
+  const { data } = await query
+  return (data || []).filter((contact) => contact.email)
+}
+
+async function runDueCampaigns() {
+  if (!supabase) return { sent: 0 }
+  const now = new Date()
+  const { data: due } = await supabase.from('campaigns').select('*')
+    .in('status', ['scheduled', 'active']).lte('scheduled_at', now.toISOString())
+  let sent = 0
+  for (const campaign of (due || [])) {
+    const recipients = await campaignRecipients(campaign.audience)
+    const rows = []
+    for (const recipient of recipients) {
+      const result = await sendEmail({ to: recipient.email, subject: campaign.subject, html: campaign.body_html.replace(/{{name}}/g, recipient.name || 'there') })
+      rows.push({ campaign_id: campaign.id, contact_id: recipient.id, email: recipient.email, status: result.sent ? 'sent' : 'failed', error: result.sent ? null : result.reason, sent_at: result.sent ? new Date().toISOString() : null })
+      if (result.sent) sent += 1
+    }
+    if (rows.length) await supabase.from('campaign_sends').insert(rows)
+    const next = campaign.recurrence !== 'none' ? new Date(now.getTime() + (RECURRENCE_MS[campaign.recurrence] || 0)) : null
+    await supabase.from('campaigns').update({ status: next ? 'active' : 'done', scheduled_at: next ? next.toISOString() : null, updated_at: now.toISOString() }).eq('id', campaign.id)
+  }
+  return { sent }
+}
+setInterval(() => { runDueCampaigns().catch((error) => console.error('Campaign scheduler error:', error)) }, 60000)
+
+app.post('/api/admin/campaigns', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { name, subject, previewText = '', bodyHtml = '', audience = 'all', recurrence = 'none', scheduledAt = null } = request.body || {}
+  if (!name || !subject || !bodyHtml) return response.status(400).json({ error: 'Name, subject and body are required.' })
+  if (!CAMPAIGN_AUDIENCES.includes(audience)) return response.status(400).json({ error: 'Unknown audience.' })
+  if (!Object.keys(RECURRENCE_MS).includes(recurrence)) return response.status(400).json({ error: 'Unknown schedule.' })
+  const { data, error } = await supabase.from('campaigns').insert({ name, subject, preview_text: previewText, body_html: bodyHtml, audience, recurrence, scheduled_at: scheduledAt, status: scheduledAt ? 'scheduled' : 'draft', created_by: user.id }).select().maybeSingle()
+  if (error) return response.status(500).json({ error: 'Campaign could not be saved.' })
+  response.json({ campaign: data })
+})
+
+app.get('/api/admin/campaigns', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { data, error } = await supabase.from('campaigns').select('id,name,subject,audience,status,recurrence,scheduled_at,updated_at').order('updated_at', { ascending: false })
+  if (error) return response.status(500).json({ error: 'Campaigns could not be loaded.' })
+  const counts = {}
+  const { data: sendRows } = await supabase.from('campaign_sends').select('campaign_id,status')
+  ;(sendRows || []).forEach((row) => {
+    counts[row.campaign_id] = counts[row.campaign_id] || { sent: 0, failed: 0 }
+    counts[row.campaign_id][row.status === 'sent' ? 'sent' : 'failed'] += 1
+  })
+  response.json({ campaigns: (data || []).map((campaign) => ({ ...campaign, sentCount: counts[campaign.id]?.sent || 0, failedCount: counts[campaign.id]?.failed || 0 })) })
+})
+
+app.post('/api/admin/campaigns/:id/schedule', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { scheduledAt, recurrence = 'none' } = request.body || {}
+  if (!scheduledAt) return response.status(400).json({ error: 'Pick a date and time.' })
+  const { data, error } = await supabase.from('campaigns').update({ scheduled_at: new Date(scheduledAt).toISOString(), recurrence, status: 'scheduled', updated_at: new Date().toISOString() }).eq('id', request.params.id).select().maybeSingle()
+  if (error) return response.status(500).json({ error: 'Campaign could not be scheduled.' })
+  response.json({ campaign: data })
+})
+
+app.post('/api/admin/campaigns/:id/send-now', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { data: campaign } = await supabase.from('campaigns').select('*').eq('id', request.params.id).maybeSingle()
+  if (!campaign) return response.status(404).json({ error: 'Campaign not found.' })
+  await supabase.from('campaigns').update({ status: 'scheduled', scheduled_at: new Date().toISOString() }).eq('id', campaign.id)
+  const result = await runDueCampaigns()
+  response.json(result)
+})
+
+app.post('/api/admin/campaigns/:id/pause', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { error } = await supabase.from('campaigns').update({ status: 'paused', updated_at: new Date().toISOString() }).eq('id', request.params.id)
+  if (error) return response.status(500).json({ error: 'Campaign could not be paused.' })
+  response.json({ paused: true })
+})
+
+app.post('/api/admin/campaigns/:id/delete', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { error } = await supabase.from('campaigns').delete().eq('id', request.params.id)
+  if (error) return response.status(500).json({ error: 'Campaign could not be deleted.' })
+  response.json({ deleted: true })
+})
+
+/* AI email design — Anthropic (Claude). Set ANTHROPIC_API_KEY in the server  */
+/* environment. Returns a ready-to-edit HTML block using the brand palette.    */
+app.post('/api/admin/campaigns/ai-design', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  if (!process.env.ANTHROPIC_API_KEY) return response.status(503).json({ error: 'AI design is not configured — set ANTHROPIC_API_KEY on the server.' })
+  const { prompt = '', tone = 'warm' } = request.body || {}
+  if (!prompt.trim()) return response.status(400).json({ error: 'Describe the email you want.' })
+  try {
+    const ai = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
+        max_tokens: 1500,
+        system: "You design marketing emails for King's Ark Dance Academy (KADA), a Gospel Afrobeats dance school for children aged 5-16 in Birmingham. Brand colours: emerald #0b3d2e, gold #c9a227, cream #f6f3ea. Return ONLY a valid JSON object (no markdown fences, no commentary) with keys: name (campaign name), subject (subject line, under 60 chars), previewText (inbox preview, under 90 chars), bodyHtml (a single <div> of inline-styled email-safe HTML — table-free, no <html>/<body>/<style> tags, inline styles only, brand colours, one clear call-to-action button linking to https://kingsarkdance.com). Use {{name}} where the recipient's first name should go.",
+        messages: [{ role: 'user', content: `Design a ${tone} marketing email: ${prompt}` }],
+      }),
+    })
+    const result = await ai.json()
+    if (!ai.ok) return response.status(502).json({ error: result.error?.message || 'AI design failed.' })
+    const text = (result.content || []).map((block) => block.text || '').join('')
+    const parsed = JSON.parse(text.replace(/^[^{]*/, '').replace(/[^}]*$/, ''))
+    response.json(parsed)
+  } catch (error) {
+    response.status(502).json({ error: `AI design failed: ${error.message}` })
+  }
 })
 
 function invoiceOverrides(booking, overrides = {}) {
