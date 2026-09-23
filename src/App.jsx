@@ -727,7 +727,7 @@ function App() {
   useEffect(() => {
     const onHashChange = () => {
       const hash = window.location.hash || ''
-      if (hash.includes('access_token=')) return // Supabase is consuming the auth hash
+      if (hash.includes('access_token=') || hash.includes('token_hash=')) return // Supabase/invite auth hash being consumed
       setEventPageId(hash.match(/^#event\/([\w-]+)/)?.[1] || null)
       setLegalPageId(hash.match(/^#(privacy|terms|accessibility)$/)?.[1] || null)
     }
@@ -771,8 +771,15 @@ function App() {
       // Invite / password-setup links arrive with the token in the URL hash , 
       // give the Supabase client a moment to turn it into a real session.
       const rawHash = window.location.hash || ''
-      const authHash = rawHash.includes('access_token=')
+      const hashParams = new URLSearchParams(rawHash.slice(1))
+      const tokenHash = hashParams.get('token_hash')
+      const authHash = rawHash.includes('access_token=') || Boolean(tokenHash)
       const isRecoveryLink = rawHash.includes('type=recovery') || rawHash.includes('type=invite')
+      // token_hash links (our invite/resend emails) need an explicit exchange ,
+      // access_token links (Supabase's own default templates) resolve themselves.
+      if (tokenHash) {
+        await supabase.auth.verifyOtp({ token_hash: tokenHash, type: hashParams.get('type') || 'recovery' })
+      }
       const { data } = await supabase.auth.getSession()
       let sessionNow = data.session
       if (!sessionNow && authHash) {

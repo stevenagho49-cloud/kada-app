@@ -618,11 +618,12 @@ app.post('/api/admin/team/invite', async (request, response) => {
 
   // Build the set-password link ourselves: same domain as the app, no
   // dependence on Supabase's Site URL (which produced the localhost:3000
-  // otp_expired redirect). The hash-token form is consumed client-side.
+  // otp_expired redirect). token_hash is verified client-side with verifyOtp
+  // ,  it is NOT an access_token, so it must never be put in an access_token= slot.
   const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({ type: 'recovery', email: cleanEmail })
   const tokenHash = linkData?.properties?.hashed_token
   if (linkError || !tokenHash) return response.status(502).json({ error: `Setup link could not be generated: ${linkError?.message || 'unknown error'}` })
-  const setupUrl = `${APP_URL}/#access_token=${tokenHash}&type=recovery`
+  const setupUrl = `${APP_URL}/#token_hash=${tokenHash}&type=recovery`
   const emailResult = await sendInviteEmail({ email: cleanEmail, name: cleanName, role: cleanRole, setupUrl })
   if (!emailResult.sent) return response.status(502).json({ error: `Invite email could not be sent: ${emailResult.reason || 'email not configured'}` })
 
@@ -751,7 +752,7 @@ app.post('/api/admin/invitations/:id/resend', async (request, response) => {
   const { data: linkData, error: linkError } = await supabase.auth.admin.generateLink({ type: 'recovery', email: invite.email })
   const tokenHash = linkData?.properties?.hashed_token
   if (linkError || !tokenHash) return response.status(502).json({ error: `Setup link could not be generated: ${linkError?.message || 'unknown error'}` })
-  const emailResult = await sendInviteEmail({ email: invite.email, name: invite.full_name || invite.email, role: invite.role, setupUrl: `${APP_URL}/#access_token=${tokenHash}&type=recovery` })
+  const emailResult = await sendInviteEmail({ email: invite.email, name: invite.full_name || invite.email, role: invite.role, setupUrl: `${APP_URL}/#token_hash=${tokenHash}&type=recovery` })
   if (!emailResult.sent) return response.status(502).json({ error: `Invite email could not be sent: ${emailResult.reason || 'email not configured'}` })
   await supabase.from('invitations').update({ status: 'sent', accepted_at: null }).eq('id', invite.id)
   response.json({ resent: true })
