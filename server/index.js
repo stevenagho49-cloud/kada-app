@@ -135,7 +135,7 @@ async function notificationSettings() {
 
 async function notifyAdmin(subject, html, type = '') {
   const settings = await notificationSettings()
-  const toggleKey = { 'new-booking': 'newBooking', contact: 'newContact', jobs: 'jobAlerts' }[type]
+  const toggleKey = { 'new-booking': 'newBooking', contact: 'newContact', jobs: 'jobAlerts', 'event-ticket': 'eventSales' }[type]
   if (settings && toggleKey && settings[toggleKey] === false) return { sent: false, reason: `${toggleKey} alerts disabled in Settings` }
   const to = settings?.notifyEmail || ADMIN_EMAIL
   if (!to) return { sent: false, reason: 'ADMIN_NOTIFICATION_EMAIL not set' }
@@ -258,6 +258,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
           await supabase.from('event_ticket_orders').update({ confirmation_sent_at: null }).eq('stripe_checkout_session_id', session.id)
           console.error('Confirmation email failed:', emailResult.reason)
         }
+        await notifyAdmin('New event ticket sale', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New event ticket sale</h2><p><strong>Event:</strong> ${orderEvent?.title || 'Event'}<br><strong>Buyer:</strong> ${metadata.buyer_name || session.customer_details?.name || 'Guest'} (${buyerEmail})<br><strong>Tickets:</strong> ${metadata.tickets}<br><strong>Amount:</strong> ${money(metadata.total_pence)}</p>${dashboardButton('events-published', 'View event', metadata.event_id)}</div>`, 'event-ticket')
       }
       return response.json({ received: true })
     }

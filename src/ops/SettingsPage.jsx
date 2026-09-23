@@ -57,7 +57,7 @@ export function SettingsPage({ content, onSaveContent }) {
   const [savingKey, setSavingKey] = useState('')
 
   // app_settings-backed notifications (admin-only, read by the server)
-  const [notifications, setNotifications] = useState({ notifyEmail: '', newBooking: true, newContact: true, jobAlerts: true })
+  const [notifications, setNotifications] = useState({ notifyEmail: '', newBooking: true, newContact: true, jobAlerts: true, eventSales: true })
   const [notificationsLoaded, setNotificationsLoaded] = useState(false)
 
   useEffect(() => {
@@ -122,7 +122,7 @@ export function SettingsPage({ content, onSaveContent }) {
 
       <Section
         title="Notifications"
-        description="Where admin alert emails go (new bookings, website messages, job claims). Leave the email blank to use the server default. Alert types can be switched off individually."
+        description="Where admin alert emails go (new bookings, event ticket sales, website messages, job claims). Leave the email blank to use the server default. Alert types can be switched off individually."
         dirty={dirty.notifications}
         saving={savingKey === 'notifications'}
         onSave={saveNotifications}
@@ -131,6 +131,7 @@ export function SettingsPage({ content, onSaveContent }) {
         {notificationsLoaded && (
           <>
             <Toggle label="New booking / enquiry alerts" checked={notifications.newBooking} onChange={(value) => editNotifications({ newBooking: value })} />
+            <Toggle label="Event ticket sales" checked={notifications.eventSales} onChange={(value) => editNotifications({ eventSales: value })} />
             <Toggle label="Website contact form messages" checked={notifications.newContact} onChange={(value) => editNotifications({ newContact: value })} />
             <Toggle label="Job board & DBS alerts" hint="Instructor claims and certificate uploads" checked={notifications.jobAlerts} onChange={(value) => editNotifications({ jobAlerts: value })} />
           </>

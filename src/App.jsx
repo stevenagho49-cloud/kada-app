@@ -1586,11 +1586,13 @@ function App() {
               <div className="panel-label">Upcoming bookings</div>
               <strong>{stats.upcomingCount}</strong>
             </div>
-            <div className="panel stat-panel">
-              <div className="panel-label">Total revenue</div>
-              <strong>{formatCurrency(stats.confirmedRevenue)}</strong>
-              <div style={{ color: muted, fontSize: 12, marginTop: 4 }}>Classes {formatCurrency(stats.classRevenue)} · Events {formatCurrency(stats.eventRevenue)}</div>
-            </div>
+            {isAdmin && (
+              <div className="panel stat-panel">
+                <div className="panel-label">Total revenue</div>
+                <strong>{formatCurrency(stats.confirmedRevenue)}</strong>
+                <div style={{ color: muted, fontSize: 12, marginTop: 4 }}>Classes {formatCurrency(stats.classRevenue)} · Events {formatCurrency(stats.eventRevenue)}</div>
+              </div>
+            )}
             <div className="panel stat-panel">
               <div className="panel-label">Unpaid / pending</div>
               <strong>{stats.unpaidInvoices}</strong>
