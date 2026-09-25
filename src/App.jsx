@@ -1023,9 +1023,9 @@ function App() {
     return () => { mounted = false }
   }, [tab, profile?.role])
 
-  // Re-runs when async data mounts new sections (e.g. Upcoming events only renders once
-  // the events fetch returns) ,  otherwise their .reveal elements are never observed and
-  // stay at opacity 0 forever.
+  // Re-runs whenever new .reveal elements can appear: async data mounting a section (e.g.
+  // Upcoming events only renders once the events fetch returns), or HomePage remounting
+  // after an event/legal page closes. Otherwise they're never observed and stay at opacity 0.
   useEffect(() => {
     if (view !== 'site' || !authReady) return undefined
     const revealItems = document.querySelectorAll('.site-public .reveal:not(.in)')
@@ -1053,7 +1053,7 @@ function App() {
       observer.disconnect()
       window.removeEventListener('scroll', onScroll)
     }
-  }, [view, authReady, siteEvents, sectionLayout])
+  }, [view, authReady, siteEvents, sectionLayout, eventPageId, legalPageId])
 
   const conflicts = useMemo(() => {
     const map = {}
