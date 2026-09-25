@@ -1262,6 +1262,14 @@ app.post('/api/admin/campaigns/ai-design', async (request, response) => {
   }
 })
 
+// Invoicing: admins, staff with the 'sales' area (labelled "Sales (subscriptions &
+// invoices)" in Team & access), or the legacy per-user can_send_invoices flag.
+// Must match canIssueInvoices in App.jsx, or staff see the Invoice button but every
+// preview/download/send is rejected here.
+const canIssueInvoices = (profile) => profile?.role === 'admin'
+  || (profile?.role === 'staff' && (profile.permissions || []).includes('sales'))
+  || Boolean(profile?.can_send_invoices)
+
 function invoiceOverrides(booking, overrides = {}) {
   const invoiceDescription = typeof overrides.description === 'string' ? overrides.description : overrides.invoiceDescription
   const invoiceRate = overrides.rate ?? overrides.invoiceRate
@@ -1279,8 +1287,8 @@ function invoiceOverrides(booking, overrides = {}) {
 app.get('/api/invoices/pdf/:bookingId', async (request, response) => {
   const user = await authenticatedUser(request)
   if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
-  const { data: profile } = await supabase.from('profiles').select('role,can_send_invoices,full_name').eq('id', user.id).maybeSingle()
-  if (profile?.role !== 'admin' && !profile?.can_send_invoices) return response.status(403).json({ error: 'You do not have permission to generate invoices.' })
+  const { data: profile } = await supabase.from('profiles').select('role,permissions,can_send_invoices,full_name').eq('id', user.id).maybeSingle()
+  if (!canIssueInvoices(profile)) return response.status(403).json({ error: 'You do not have permission to generate invoices.' })
   const { data: booking, error: bookingError } = await supabase.from('bookings').select('*').eq('id', request.params.bookingId).single()
   if (bookingError || !booking) return response.status(404).json({ error: 'Booking not found.' })
   const { data: school } = booking.school_id ? await supabase.from('schools').select('*').eq('id', booking.school_id).maybeSingle() : { data: null }
@@ -1303,8 +1311,8 @@ app.post('/api/invoices/send', async (request, response) => {
   if (!accessToken) return response.status(401).json({ error: 'Authentication is required.' })
   const { data: userData } = await supabase.auth.getUser(accessToken)
   if (!userData.user) return response.status(401).json({ error: 'Your session is not valid.' })
-  const { data: profile } = await supabase.from('profiles').select('role,can_send_invoices,full_name').eq('id', userData.user.id).maybeSingle()
-  if (profile?.role !== 'admin' && !profile?.can_send_invoices) return response.status(403).json({ error: 'You do not have permission to send invoices.' })
+  const { data: profile } = await supabase.from('profiles').select('role,permissions,can_send_invoices,full_name').eq('id', userData.user.id).maybeSingle()
+  if (!canIssueInvoices(profile)) return response.status(403).json({ error: 'You do not have permission to send invoices.' })
 
   const { booking, school } = request.body || {}
   const recipient = school?.email || booking?.contactEmail
