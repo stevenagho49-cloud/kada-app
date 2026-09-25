@@ -1023,9 +1023,12 @@ function App() {
     return () => { mounted = false }
   }, [tab, profile?.role])
 
+  // Re-runs when async data mounts new sections (e.g. Upcoming events only renders once
+  // the events fetch returns) ,  otherwise their .reveal elements are never observed and
+  // stay at opacity 0 forever.
   useEffect(() => {
     if (view !== 'site' || !authReady) return undefined
-    const revealItems = document.querySelectorAll('.site-public .reveal')
+    const revealItems = document.querySelectorAll('.site-public .reveal:not(.in)')
     const observer = new IntersectionObserver((entries) => {
       entries.forEach((entry) => {
         if (!entry.isIntersecting) return
@@ -1050,7 +1053,7 @@ function App() {
       observer.disconnect()
       window.removeEventListener('scroll', onScroll)
     }
-  }, [view, authReady])
+  }, [view, authReady, siteEvents, sectionLayout])
 
   const conflicts = useMemo(() => {
     const map = {}
