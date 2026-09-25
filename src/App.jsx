@@ -1242,7 +1242,7 @@ function App() {
       const response = await fetch('/api/invoices/send', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ booking: { ...booking, invoiceOverrides }, school }) })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Invoice could not be sent.')
-      const sentBooking = { ...booking, invoiceStatus: 'Sent' }
+      const sentBooking = { ...booking, invoiceStatus: 'Sent', invoiceNumber: result.invoiceNumber || booking.invoiceNumber }
       const next = bookings.some((item) => item.id === sentBooking.id) ? bookings.map((item) => item.id === sentBooking.id ? sentBooking : item) : [sentBooking, ...bookings]
       setBookings(next)
       setInvoiceBooking(sentBooking)
@@ -1468,6 +1468,13 @@ function App() {
     const params = new URLSearchParams({ description: invoiceBooking.invoiceDescription ?? invoiceBooking.sessionType ?? '', rate: String(invoiceBooking.invoiceRate ?? invoiceBooking.price ?? 0), amount: String(invoiceBooking.invoiceAmount ?? invoiceBooking.price ?? 0), discountPercent: String(invoiceBooking.discountPercent ?? 0) })
     fetch(`/api/invoices/pdf/${encodeURIComponent(invoiceBooking.id)}?${params}`, { headers: { Authorization: `Bearer ${session.access_token}` } }).then(async (response) => {
       if (!response.ok) throw new Error('Invoice PDF could not be generated.')
+      // The server numbers the invoice on first preview; keep local state in step so the
+      // next bookings save doesn't write the old blank number back over it.
+      const invoiceNumber = response.headers.get('X-Invoice-Number')
+      if (active && invoiceNumber && invoiceNumber !== invoiceBooking.invoiceNumber) {
+        setBookings((current) => current.map((item) => item.id === invoiceBooking.id ? { ...item, invoiceNumber } : item))
+        setInvoiceBooking((current) => current && current.id === invoiceBooking.id ? { ...current, invoiceNumber } : current)
+      }
       const blob = await response.blob()
       objectUrl = URL.createObjectURL(blob)
       if (active) setInvoicePdfUrl(objectUrl)

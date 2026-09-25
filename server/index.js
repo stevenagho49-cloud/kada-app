@@ -1270,6 +1270,39 @@ const canIssueInvoices = (profile) => profile?.role === 'admin'
   || (profile?.role === 'staff' && (profile.permissions || []).includes('sales'))
   || Boolean(profile?.can_send_invoices)
 
+// Invoice numbers (KADA-0001, KADA-0002…) are assigned the first time an invoice is
+// previewed, downloaded or sent, and never change after that.
+async function ensureInvoiceNumber(bookingId) {
+  const { data: current } = await supabase.from('bookings').select('invoice_number').eq('id', bookingId).maybeSingle()
+  if (current?.invoice_number) return current.invoice_number
+  const { data: numbered } = await supabase.from('bookings').select('invoice_number').like('invoice_number', 'KADA-%')
+  const highest = Math.max(0, ...(numbered || []).map((row) => Number(row.invoice_number.slice(5)) || 0))
+  const invoiceNumber = `KADA-${String(highest + 1).padStart(4, '0')}`
+  const { data: claimed } = await supabase.from('bookings').update({ invoice_number: invoiceNumber }).eq('id', bookingId).or('invoice_number.is.null,invoice_number.eq.').select('invoice_number')
+  if (claimed?.length) return invoiceNumber
+  // Another request numbered it first ,  use theirs.
+  const { data: latest } = await supabase.from('bookings').select('invoice_number').eq('id', bookingId).maybeSingle()
+  return latest?.invoice_number || ''
+}
+
+// Same logo as the site header: the Settings > Branding upload, else the bundled mark.
+// PDFKit only embeds PNG/JPEG, so anything else falls back to the bundled file.
+async function invoiceLogo() {
+  const bundled = ['public/images/logo-mark.png', 'dist/images/logo-mark.png'].map((candidate) => path.resolve(process.cwd(), candidate)).find((candidate) => fs.existsSync(candidate)) || null
+  const { data } = await supabase.from('site_content').select('value').eq('key', 'branding').maybeSingle()
+  const logoUrl = data?.value?.logoUrl || ''
+  try {
+    if (/^data:image\/(png|jpe?g);base64,/.test(logoUrl)) return Buffer.from(logoUrl.slice(logoUrl.indexOf(',') + 1), 'base64')
+    if (/^https?:\/\//.test(logoUrl)) {
+      const logoResponse = await fetch(logoUrl)
+      if (logoResponse.ok && /image\/(png|jpe?g)/.test(logoResponse.headers.get('content-type') || '')) return Buffer.from(await logoResponse.arrayBuffer())
+    }
+  } catch (error) {
+    console.error('Invoice logo could not be loaded, using bundled logo:', error.message)
+  }
+  return bundled
+}
+
 function invoiceOverrides(booking, overrides = {}) {
   const invoiceDescription = typeof overrides.description === 'string' ? overrides.description : overrides.invoiceDescription
   const invoiceRate = overrides.rate ?? overrides.invoiceRate
@@ -1291,12 +1324,13 @@ app.get('/api/invoices/pdf/:bookingId', async (request, response) => {
   if (!canIssueInvoices(profile)) return response.status(403).json({ error: 'You do not have permission to generate invoices.' })
   const { data: booking, error: bookingError } = await supabase.from('bookings').select('*').eq('id', request.params.bookingId).single()
   if (bookingError || !booking) return response.status(404).json({ error: 'Booking not found.' })
+  const invoiceNumber = await ensureInvoiceNumber(booking.id)
   const { data: school } = booking.school_id ? await supabase.from('schools').select('*').eq('id', booking.school_id).maybeSingle() : { data: null }
   const { data: settings, error: settingsError } = await supabase.from('invoice_settings').select('account_name,sort_code,account_number').eq('id', 'default').single()
   if (settingsError) return response.status(500).json({ error: 'Invoice payment details could not be loaded.' })
-  const invoiceBooking = invoiceOverrides({ ...booking, studentCount: booking.student_count, sessionType: booking.session_type, contactName: booking.contact_name, contactEmail: booking.contact_email, invoiceNumber: booking.invoice_number, price: booking.price }, request.query)
+  const invoiceBooking = invoiceOverrides({ ...booking, studentCount: booking.student_count, sessionType: booking.session_type, contactName: booking.contact_name, contactEmail: booking.contact_email, invoiceNumber, price: booking.price }, request.query)
   const pdf = await generateInvoicePdf({ booking: invoiceBooking, school: school ? { name: school.name, contactName: school.contact_name, email: school.email } : null, settings, preparedBy: profile.full_name || user.email })
-  response.type('application/pdf').set('Content-Disposition', `attachment; filename="${booking.invoice_number || booking.id}.pdf"`).send(pdf)
+  response.type('application/pdf').set({ 'Content-Disposition': `attachment; filename="${invoiceNumber || booking.id}.pdf"`, 'X-Invoice-Number': invoiceNumber }).send(pdf)
 })
 
 function invoiceHtml({ booking, school }) {
@@ -1323,6 +1357,7 @@ app.post('/api/invoices/send', async (request, response) => {
   const { data: settings, error: settingsError } = await supabase.from('invoice_settings').select('account_name,sort_code,account_number').eq('id', 'default').single()
   if (settingsError) return response.status(500).json({ error: 'Invoice payment details could not be loaded.' })
 
+  booking.invoiceNumber = await ensureInvoiceNumber(booking.id)
   const pdf = await generateInvoicePdf({ booking: invoiceOverrides(booking, booking.invoiceOverrides), school, settings, preparedBy: profile.full_name || userData.user.email })
   const resendResponse = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -1342,7 +1377,7 @@ app.post('/api/invoices/send', async (request, response) => {
   const { error: bookingUpdateError } = await supabase.from('bookings').update({ invoice_status: 'Sent' }).eq('id', booking.id)
   if (bookingUpdateError) return response.status(500).json({ error: 'Invoice was sent, but booking status could not be updated.' })
 
-  response.json({ id: result.id, recipient })
+  response.json({ id: result.id, recipient, invoiceNumber: booking.invoiceNumber })
 })
 
 async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
@@ -1369,12 +1404,17 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
   document.rect(0, 0, pageWidth, 130.39).fill(emerald)
   document.rect(0, 130.39, pageWidth, 3.4).fill(gold)
   document.circle(margin + 28.35, 65.2, 31.75).fill(ivory)
-  const logoPath = ['public/images/logo-mark.png', 'dist/images/logo-mark.png'].map((candidate) => path.resolve(process.cwd(), candidate)).find((candidate) => fs.existsSync(candidate))
-  if (logoPath) document.image(logoPath, margin + 5.67, 42.52, { fit: [45.36, 45.36], align: 'center', valign: 'center' })
+  // Centred on the ivory disc; the wide box lets the branded 16:9 badge render at the same size as the old square mark.
+  const logo = await invoiceLogo()
+  try {
+    if (logo) document.image(logo, margin + 28.35 - 50, 65.2 - 28, { fit: [100, 56], align: 'center', valign: 'center' })
+  } catch (error) {
+    console.error('Invoice logo could not be drawn:', error.message)
+  }
   document.font('Times-Bold').fontSize(17).fillColor(ivory).text("King's Ark Dance Academy", margin + 68.03, 56.69)
   document.font('Helvetica').fontSize(8.5).fillColor(gold).text('GOSPEL AFROBEATS  ·  BIRMINGHAM', margin + 68.03, 72.28)
   document.font('Times-BoldItalic').fontSize(22).fillColor(ivory).text('Invoice', pageWidth - margin - 100, 56.69, { width: 100, align: 'right' })
-  document.font('Helvetica').fontSize(9).fillColor(gold).text(booking.invoiceNumber || 'Invoice', pageWidth - margin - 140, 72.28, { width: 140, align: 'right' })
+  document.font('Helvetica').fontSize(9).fillColor(gold).text(booking.invoiceNumber || 'Invoice', pageWidth - margin - 140, 84, { width: 140, align: 'right' })
 
   let y = 164.41
   document.font('Helvetica-Bold').fontSize(8.5).fillColor(muted).text('BILL TO', margin, y)
