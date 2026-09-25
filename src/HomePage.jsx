@@ -7,6 +7,14 @@ import { ClassDatePicker, DAY_NAMES, classEndedOnDate, nextClassDate, startOfTod
 const SITE_MEDIA_URL = `${import.meta.env.VITE_SUPABASE_URL}/storage/v1/object/public/site-media`
 const videoAsset = (file) => `${SITE_MEDIA_URL}/videos/${file}`
 
+// Client-side navigation to a real URL path (/event/<id>, /privacy, etc.) without a full
+// page reload. Dispatches a synthetic popstate so App's route-sync effect ,  the single
+// owner of eventPageId / legalPageId ,  picks up the change.
+function navigateTo(path) {
+  window.history.pushState(null, '', path)
+  window.dispatchEvent(new PopStateEvent('popstate'))
+}
+
 export const HOME_SECTIONS = [
   { key: 'hero', label: 'Hero' },
   { key: 'stats', label: 'Stats strip' },
@@ -334,7 +342,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
                     <h3 className="display">{siteEvent.title}</h3>
                     {siteEvent.description && <p>{siteEvent.description}</p>}
                     {siteEvent.location && <div className="event-loc">📍 {siteEvent.location}</div>}
-                    {siteEvent.ticketingEnabled && <a href={`#event/${siteEvent.id}`} className="btn btn-gold" style={{ display: 'inline-block', marginTop: 12 }}>Get tickets</a>}
+                    {siteEvent.ticketingEnabled && <a href={`/event/${siteEvent.id}`} className="btn btn-gold" onClick={(event) => { event.preventDefault(); navigateTo(`/event/${siteEvent.id}`) }} style={{ display: 'inline-block', marginTop: 12 }}>Get tickets</a>}
                   </div>
                 ))}
               </div>
@@ -435,9 +443,9 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
             </div>
           </div>
           <div className="f-links">
-            <a href="#terms">Terms &amp; Conditions</a>
-            <a href="#privacy">Privacy Policy</a>
-            <a href="#accessibility">Accessibility</a>
+            <a href="/terms" onClick={(event) => { event.preventDefault(); navigateTo('/terms') }}>Terms &amp; Conditions</a>
+            <a href="/privacy" onClick={(event) => { event.preventDefault(); navigateTo('/privacy') }}>Privacy Policy</a>
+            <a href="/accessibility" onClick={(event) => { event.preventDefault(); navigateTo('/accessibility') }}>Accessibility</a>
           </div>
         </div>
 

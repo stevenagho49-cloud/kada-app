@@ -245,7 +245,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       if (shouldSend) {
         const { data: orderEvent } = await supabase.from('events').select('*').eq('id', metadata.event_id).maybeSingle()
         const buyerEmail = session.customer_details?.email || metadata.buyer_email
-        const eventPageUrl = `${PUBLIC_BASE_URL}#event/${metadata.event_id}`
+        const eventPageUrl = `${PUBLIC_BASE_URL}/event/${metadata.event_id}`
         const calendarUrl = `${PUBLIC_BASE_URL}/api/stripe/event-order/${session.id}/calendar.ics`
         const emailResult = await sendEmail({
           to: buyerEmail,
@@ -543,7 +543,7 @@ app.post('/api/admin/invoice-permissions', async (request, response) => {
 /* accounts. Roles/permissions/job titles live on profiles; emails     */
 /* come from auth.users (service role only).                           */
 /* ------------------------------------------------------------------ */
-const TEAM_PERMISSIONS = ['bookings', 'contacts', 'students', 'events', 'messages', 'site', 'sales']
+const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'events', 'messages', 'site', 'sales']
 const cleanPermissions = (value) => (Array.isArray(value) ? value.filter((item) => TEAM_PERMISSIONS.includes(item)) : [])
 
 async function requireAdmin(request, response) {
@@ -1569,8 +1569,8 @@ app.post('/api/stripe/create-event-checkout', async (request, response) => {
       buyer_email: buyerEmail.trim(),
       attendee_names: JSON.stringify(finalNames),
     },
-    success_url: `${clientUrl}?ticket=success&session_id={CHECKOUT_SESSION_ID}#event/${event.id}`,
-    cancel_url: `${clientUrl}#event/${event.id}`,
+    success_url: `${clientUrl}/event/${event.id}?ticket=success&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${clientUrl}/event/${event.id}`,
   })
   response.json({ url: session.url })
 })
@@ -1605,7 +1605,7 @@ app.get('/api/stripe/event-order/:sessionId/calendar.ics', async (request, respo
   if (!order) return response.status(404).json({ error: 'Order not found.' })
   const { data: orderEvent } = await supabase.from('events').select('*').eq('id', order.event_id).maybeSingle()
   if (!orderEvent?.event_date) return response.status(400).json({ error: 'Event date is not set.' })
-  const ics = buildIcs({ title: orderEvent.title, date: orderEvent.event_date, startTime: orderEvent.event_time, endTime: orderEvent.event_end_time, location: orderEvent.location, description: orderEvent.description, url: `${PUBLIC_BASE_URL}#event/${order.event_id}` })
+  const ics = buildIcs({ title: orderEvent.title, date: orderEvent.event_date, startTime: orderEvent.event_time, endTime: orderEvent.event_end_time, location: orderEvent.location, description: orderEvent.description, url: `${PUBLIC_BASE_URL}/event/${order.event_id}` })
   response.type('text/calendar').set('Content-Disposition', 'attachment; filename="event.ics"').send(ics)
 })
 
@@ -1789,7 +1789,7 @@ async function sendDueReminders() {
       to: order.buyer_email,
       subject: `Reminder: ${eventRow.title} is tomorrow`,
           html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>See you soon! ⏰</h2><p>Hi ${(order.buyer_name || 'there').split(' ')[0]},</p><p>This is a reminder that <strong>${eventRow.title}</strong> is coming up.</p><p><strong>Date:</strong> ${formatDateGB(eventRow.event_date)}${eventRow.event_time ? ` · ${eventRow.event_time.slice(0, 5)}` : ''}${eventRow.event_end_time ? `  to  ${eventRow.event_end_time.slice(0, 5)}` : ''}<br><strong>Venue:</strong> ${eventRow.location || 'To be confirmed'}<br><strong>Your tickets:</strong> ${order.tier_name} × ${order.tickets}</p><p>Add it to your calendar so you don't miss it. The attachment drops straight in.</p><p>See you there!</p></div>`,
-      attachments: [{ filename: 'event.ics', content: Buffer.from(buildIcs({ title: eventRow.title, date: eventRow.event_date, startTime: eventRow.event_time, endTime: eventRow.event_end_time, location: eventRow.location, description: eventRow.description, url: `${PUBLIC_BASE_URL}#event/${order.event_id}` })).toString('base64') }],
+      attachments: [{ filename: 'event.ics', content: Buffer.from(buildIcs({ title: eventRow.title, date: eventRow.event_date, startTime: eventRow.event_time, endTime: eventRow.event_end_time, location: eventRow.location, description: eventRow.description, url: `${PUBLIC_BASE_URL}/event/${order.event_id}` })).toString('base64') }],
     })
     if (result.sent || !process.env.RESEND_API_KEY) {
       await supabase.from('event_ticket_orders').update({ reminder_sent_at: new Date().toISOString() }).eq('id', order.id)

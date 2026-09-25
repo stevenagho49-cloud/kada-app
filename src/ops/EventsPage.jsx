@@ -117,7 +117,7 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
   const [copiedId, setCopiedId] = useState('')
 
   const copyShareLink = async (event) => {
-    const link = `${window.location.origin}/#event/${event.id}`
+    const link = `${window.location.origin}/event/${event.id}`
     try {
       await navigator.clipboard.writeText(link)
     } catch {
@@ -168,7 +168,7 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
             )}
             {event.status === 'published' && (
               <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center' }}>
-                <a href={`#event/${event.id}`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: OPS_COLORS.emerald, fontWeight: 600 }}>View ticket page ↗</a>
+                <a href={`/event/${event.id}`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: OPS_COLORS.emerald, fontWeight: 600 }}>View ticket page ↗</a>
                 <button type="button" onClick={() => copyShareLink(event)} style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', fontSize: 11.5, color: OPS_COLORS.muted, fontWeight: 600 }}>
                   {copiedId === event.id ? '✓ Link copied' : '🔗 Copy share link'}
                 </button>

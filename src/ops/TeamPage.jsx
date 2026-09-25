@@ -12,6 +12,7 @@ import { OpsButton, Pill, OPS_COLORS, opsInputStyle } from './ui'
 export const PERMISSION_AREAS = [
   { key: 'bookings', label: 'Bookings & calendar' },
   { key: 'contacts', label: 'Contacts (CRM)' },
+  { key: 'schools', label: 'Schools' },
   { key: 'students', label: 'Students & class schedule' },
   { key: 'events', label: 'Events & ticketing' },
   { key: 'messages', label: 'Messages' },

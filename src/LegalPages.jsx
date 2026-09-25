@@ -1,5 +1,5 @@
-// Public legal pages ,  reachable by guests at #privacy, #terms and #accessibility
-// (hash-routed from App.jsx, same pattern as the event ticket pages).
+// Public legal pages ,  reachable by guests at /privacy, /terms and /accessibility
+// (path-routed from App.jsx, same pattern as the event ticket pages).
 //
 // These are practical starter documents, not legal advice ,  have them reviewed
 // before relying on them formally.

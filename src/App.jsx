@@ -114,6 +114,35 @@ const parseStored = (key, fallback) => {
   }
 }
 
+// Public event and legal pages live at real URL paths (/event/<id>, /privacy, /terms,
+// /accessibility) so they survive being shared on Instagram etc., which encodes a bare
+// # as %23 and breaks hash-based links. Old #event/<id> / #privacy-style links (already
+// shared before this change) still resolve: parseRoute falls back to the hash, and the
+// route-sync effect below rewrites the URL to its real path with history.replaceState.
+function parseRoute() {
+  if (typeof window === 'undefined') return { eventId: null, legalId: null }
+  const pathname = window.location.pathname
+  const hash = window.location.hash || ''
+  // 1. Real URL path ,  the current, shareable format.
+  let eventId = pathname.match(/^\/event\/([\w-]+)/)?.[1] || null
+  let legalId = pathname.match(/^\/(privacy|terms|accessibility)$/)?.[1] || null
+  if (eventId || legalId) return { eventId, legalId }
+  // 2. A genuine hash fragment from an old #event/<id> link opened directly (rare ,
+  // most browsers/apps preserve a real #, so this only fires for hand-typed/pasted links).
+  eventId = hash.match(/^#event\/([\w-]+)/)?.[1] || null
+  legalId = hash.match(/^#(privacy|terms|accessibility)$/)?.[1] || null
+  if (eventId || legalId) return { eventId, legalId }
+  // 3. Instagram (and similar link-in-bio tools) percent-encode a bare # as %23 when
+  // rendering a bio/story link, so an old .../#event/<id> link arrives here as a
+  // literal "/%23event/<id>" *pathname* ,  no real fragment at all ,  rather than a hash.
+  // This is the exact breakage this migration fixes; a real path has no # to mangle.
+  let decodedPath = pathname
+  try { decodedPath = decodeURIComponent(pathname) } catch { /* malformed sequence, ignore */ }
+  eventId = decodedPath.match(/^\/#event\/([\w-]+)/)?.[1] || null
+  legalId = decodedPath.match(/^\/#(privacy|terms|accessibility)$/)?.[1] || null
+  return { eventId, legalId }
+}
+
 const supabaseReady = Boolean(supabase)
 
 function normalizeBooking(row = {}) {
@@ -674,8 +703,8 @@ function App() {
   const [events, setEvents] = useState([])
   const [ticketOrders, setTicketOrders] = useState([])
   const [eventModal, setEventModal] = useState(null)
-  const [eventPageId, setEventPageId] = useState(() => window.location.hash.match(/^#event\/([\w-]+)/)?.[1] || null)
-  const [legalPageId, setLegalPageId] = useState(() => window.location.hash.match(/^#(privacy|terms|accessibility)$/)?.[1] || null)
+  const [eventPageId, setEventPageId] = useState(() => parseRoute().eventId)
+  const [legalPageId, setLegalPageId] = useState(() => parseRoute().legalId)
   const [siteEvents, setSiteEvents] = useState([])
   const [sectionLayout, setSectionLayout] = useState([])
   const [siteContent, setSiteContent] = useState({})
@@ -710,29 +739,45 @@ function App() {
       fetch('/api/track/pageview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: window.location.hash || '/', referrer: document.referrer || '' }),
+        body: JSON.stringify({ path: window.location.pathname !== '/' ? window.location.pathname : (window.location.hash || '/'), referrer: document.referrer || '' }),
         keepalive: true,
       }).catch(() => {})
     }
     track()
     window.addEventListener('hashchange', track)
-    return () => window.removeEventListener('hashchange', track)
+    window.addEventListener('popstate', track)
+    return () => {
+      window.removeEventListener('hashchange', track)
+      window.removeEventListener('popstate', track)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, eventPageId, legalPageId])
 
-  // Public pages live at #event/<id> (ticketed events) and #privacy / #terms /
-  // #accessibility (legal pages) ,  all reachable by guests without sign-in.
+  // Public pages live at /event/<id> (ticketed events) and /privacy /terms
+  // /accessibility (legal pages) ,  all reachable by guests without sign-in.
   // Supabase auth links (invite / password setup) arrive as
   // #access_token=…&type=recovery ,  the client signs in from the hash itself.
   useEffect(() => {
-    const onHashChange = () => {
+    const syncRoute = () => {
       const hash = window.location.hash || ''
       if (hash.includes('access_token=') || hash.includes('token_hash=')) return // Supabase/invite auth hash being consumed
-      setEventPageId(hash.match(/^#event\/([\w-]+)/)?.[1] || null)
-      setLegalPageId(hash.match(/^#(privacy|terms|accessibility)$/)?.[1] || null)
+      const { eventId, legalId } = parseRoute()
+      // Migrate an already-shared #event/<id> or #privacy-style link to its real
+      // URL path so old links keep working instead of breaking.
+      if (eventId && window.location.pathname !== `/event/${eventId}`) {
+        window.history.replaceState(null, '', `/event/${eventId}${window.location.search}`)
+      } else if (legalId && window.location.pathname !== `/${legalId}`) {
+        window.history.replaceState(null, '', `/${legalId}`)
+      }
+      setEventPageId(eventId)
+      setLegalPageId(legalId)
     }
-    window.addEventListener('hashchange', onHashChange)
-    return () => window.removeEventListener('hashchange', onHashChange)
+    window.addEventListener('hashchange', syncRoute)
+    window.addEventListener('popstate', syncRoute)
+    return () => {
+      window.removeEventListener('hashchange', syncRoute)
+      window.removeEventListener('popstate', syncRoute)
+    }
   }, [])
 
   // Class booking success ,  Stripe redirects back to ?payment=success&session_id=…
@@ -1440,7 +1485,8 @@ function App() {
         { key: 'calendar', label: 'Calendar' },
         { key: 'bookings', label: 'Bookings' },
         ...(can('contacts') ? [{ key: 'contacts', label: 'Contacts' }] : []),
-        ...(isAdmin ? [{ key: 'schools', label: 'Schools' }, { key: 'instructors', label: 'Instructors' }] : []),
+        ...(isAdmin || can('schools') ? [{ key: 'schools', label: 'Schools' }] : []),
+        ...(isAdmin ? [{ key: 'instructors', label: 'Instructors' }] : []),
         ...(isAdmin || can('students') ? [{ key: 'students', label: 'Students' }, { key: 'class-schedule', label: 'Class schedule' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'jobs', label: 'Job board' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'template', label: 'Workshop template' }] : []),
@@ -1493,8 +1539,8 @@ function App() {
   const routeFallback = <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', fontFamily: sans, background: cream, color: muted }}>Loading…</div>
 
   if (!authReady) return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', fontFamily: 'sans-serif' }}>Loading...</div>
-  if (eventPageId) return <Suspense fallback={routeFallback}><EventTicketPage eventId={eventPageId} onBack={() => { window.location.hash = '' }} /></Suspense>
-  if (legalPageId) return <Suspense fallback={routeFallback}><LegalPage page={legalPageId} onBack={() => { window.location.hash = '' }} /></Suspense>
+  if (eventPageId) return <Suspense fallback={routeFallback}><EventTicketPage eventId={eventPageId} onBack={() => { window.history.pushState(null, '', '/'); setEventPageId(null) }} /></Suspense>
+  if (legalPageId) return <Suspense fallback={routeFallback}><LegalPage page={legalPageId} onBack={() => { window.history.pushState(null, '', '/'); setLegalPageId(null) }} /></Suspense>
   if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
   if (view === 'ops' && session && needsPasswordSetup) return <AuthScreen requirePasswordSetup onAuthenticated={() => { setNeedsPasswordSetup(false); setView('ops') }} />
   if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
@@ -1636,7 +1682,7 @@ function App() {
             />
           </div>}
 
-          {isAdmin && tab === 'schools' && <div className="panel"><div className="panel-head"><h3>Schools</h3><Button small onClick={() => setSchoolModal(emptySchool())}>Add school</Button></div><input style={{ ...inputStyle, marginBottom: 12 }} placeholder="Search schools" value={schoolSearch} onChange={(event) => setSchoolSearch(event.target.value)} /><SchoolsTable schools={visibleSchools} bookings={bookings} expanded={showAllSchools} onToggleExpand={() => setShowAllSchools(!showAllSchools)} onSaveSchool={saveSchool} onView={setSchoolRecord} onMessage={(school) => setMessageTarget({ kind: 'school', id: school.id, name: school.name })} /></div>}
+          {(isAdmin || can('schools')) && tab === 'schools' && <div className="panel"><div className="panel-head"><h3>Schools</h3><Button small onClick={() => setSchoolModal(emptySchool())}>Add school</Button></div><input style={{ ...inputStyle, marginBottom: 12 }} placeholder="Search schools" value={schoolSearch} onChange={(event) => setSchoolSearch(event.target.value)} /><SchoolsTable schools={visibleSchools} bookings={bookings} expanded={showAllSchools} onToggleExpand={() => setShowAllSchools(!showAllSchools)} onSaveSchool={saveSchool} onView={setSchoolRecord} onMessage={(school) => setMessageTarget({ kind: 'school', id: school.id, name: school.name })} /></div>}
           {isAdmin && tab === 'instructors' && <div className="panel"><div className="panel-head"><h3>Instructors and assignments</h3><Button small onClick={() => setInstructorModal({ id: crypto.randomUUID(), name: '', email: '', phone: '', rate: 100, locationAreas: '', gender: '', dbsStatus: 'Missing' })}>Add instructor</Button></div><div style={{ display: 'grid', gridTemplateColumns: '1fr 180px', gap: 8, marginBottom: 12 }}><input style={inputStyle} placeholder="Search by name, location, gender" value={instructorSearch} onChange={(event) => setInstructorSearch(event.target.value)} /><select style={inputStyle} value={instructorSort} onChange={(event) => setInstructorSort(event.target.value)}><option value="name">Sort by name</option><option value="location">Sort by location</option><option value="gender">Sort by gender</option><option value="completed">Sort by completed</option></select></div><InstructorsTable instructors={visibleInstructors} expanded={showAllInstructors} onToggleExpand={() => setShowAllInstructors(!showAllInstructors)} completedBy={completedByInstructor} onSaveInstructor={saveInstructor} onMessage={(instructor) => setMessageTarget({ kind: 'instructor', id: instructor.id, name: instructor.name })} onEdit={setInstructorModal} onOpenDbs={openDbsFile} onReviewDbs={reviewDbs} /></div>}
           {can('events') && (tab === 'events-published' || tab === 'events-drafts' || tab === 'events-archived') && <EventsPage view={tab === 'events-published' ? 'published' : tab === 'events-archived' ? 'archived' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} session={session} />}
           {can('site') && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} />}
