@@ -751,6 +751,106 @@ app.post('/api/parent/settings', async (request, response) => {
   response.json({ family: savedFamily, students: savedStudents })
 })
 
+/* ------------------------------------------------------------------ */
+/* Awards. Session leaders (attendance permission) give a child an     */
+/* award from the register; the parent gets a celebration email with   */
+/* the badge. Badges are the static PNGs in public/badges/, served     */
+/* from APP_URL so they show in every mail client.                     */
+/* ------------------------------------------------------------------ */
+const AWARD_BADGES = ['star', 'team', 'growth', 'sun', 'heart', 'music', 'crown', 'bolt']
+
+async function requireAttendanceAccess(request, response) {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
+  const { data: profile } = await supabase.from('profiles').select('role,permissions,full_name').eq('id', user.id).maybeSingle()
+  const allowed = profile?.role === 'admin' || (profile?.role === 'staff' && (profile.permissions || []).includes('attendance'))
+  if (!allowed) { response.status(403).json({ error: 'You need the attendance permission to give awards.' }); return null }
+  return { user, profile }
+}
+
+function awardEmailHtml({ award, childName, parentFirstName, giverFirstName }) {
+  const first = escHtml((childName || '').split(' ')[0] || 'your child')
+  const badgeUrl = `${APP_URL}/badges/${AWARD_BADGES.includes(award.badge) ? award.badge : 'star'}.png`
+  const when = award.session_date ? formatDateGB(award.session_date) : formatDateGB(award.created_at.slice(0, 10))
+  const note = award.note ? `<div style="margin:22px auto 0;max-width:400px;background:#fffdf8;border:1px solid #ecdcae;border-radius:12px;padding:16px 20px;text-align:left"><p style="margin:0;font-family:Georgia,serif;font-size:17px;line-height:1.5;color:#232323;font-style:italic">“${escHtml(award.note)}”</p>${giverFirstName ? `<p style="margin:8px 0 0;font-size:13px;color:#8a6d10;font-weight:700">${escHtml(giverFirstName)}, KADA</p>` : ''}</div>` : ''
+  return `<div style="background:#f6f3ea;padding:28px 12px;font-family:Arial,sans-serif;color:#232323">
+<div style="max-width:560px;margin:0 auto;background:#fffdf8;border:1px solid #e4ddc9;border-radius:18px;overflow:hidden">
+<div style="height:6px;background:linear-gradient(90deg,#0b3d2e,#c9a227,#0b3d2e)"></div>
+<div style="padding:30px 26px 32px;text-align:center">
+<p style="margin:0;color:#a97e2b;font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700">King's Ark Dance Academy</p>
+<p style="margin:16px 0 0;font-size:15px;color:#555">Hi ${escHtml(parentFirstName || 'there')}, this one's for ${first} 🎉</p>
+<img src="${badgeUrl}" width="170" height="199" alt="${escHtml(award.award_name)} badge" style="display:block;margin:18px auto 6px;border:0">
+<p style="margin:0;color:#767066;font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700">${first} has earned</p>
+<h1 style="margin:6px 0 0;font-family:Georgia,serif;font-weight:500;font-size:34px;line-height:1.15;color:#0b3d2e">${escHtml(award.award_name)}</h1>
+${award.award_description ? `<p style="margin:10px auto 0;max-width:380px;font-size:15px;line-height:1.5;color:#444">${escHtml(award.award_description)}</p>` : ''}
+${note}
+<p style="margin:22px 0 0;font-size:13px;color:#767066">${escHtml(when)}${award.class_name ? ` · ${escHtml(award.class_name)}` : ''}</p>
+<p style="margin:24px 0 0"><a href="${APP_URL}/#ops/awards" style="background:#0b3d2e;color:#fffdf8;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">See ${first}'s awards →</a></p>
+<p style="margin:14px 0 0;font-size:12px;color:#999">Show this to ${first}! Every award is kept in your parent dashboard.</p>
+</div></div></div>`
+}
+
+// Send (or re-send) the celebration email for an award and record the outcome.
+async function sendAwardEmail(awardId) {
+  const { data: award } = await supabase.from('student_awards').select('*').eq('id', awardId).maybeSingle()
+  if (!award) return { sent: false, reason: 'Award not found.' }
+  const { data: student } = await supabase.from('students').select('name,parent_name,parent_email,family_id').eq('id', award.student_id).maybeSingle()
+  const { data: family } = student?.family_id ? await supabase.from('parent_families').select('guardian_name,guardian_email').eq('id', student.family_id).maybeSingle() : { data: null }
+  const to = family?.guardian_email || student?.parent_email
+  if (!to) {
+    await supabase.from('student_awards').update({ email_error: 'No parent email on file.' }).eq('id', awardId)
+    return { sent: false, reason: 'No parent email on file.' }
+  }
+  const childFirst = (student.name || '').split(' ')[0] || 'Your child'
+  const result = await sendEmail({
+    to,
+    subject: `🏅 ${childFirst} earned ${award.award_name} at KADA!`,
+    html: awardEmailHtml({ award, childName: student.name, parentFirstName: (family?.guardian_name || student.parent_name || '').split(' ')[0], giverFirstName: (award.given_by_name || '').split(' ')[0] }),
+  })
+  await supabase.from('student_awards').update(result.sent ? { email_sent_at: new Date().toISOString(), email_error: null } : { email_error: result.reason || 'Email failed.' }).eq('id', awardId)
+  return { ...result, to }
+}
+
+app.post('/api/awards', async (request, response) => {
+  const access = await requireAttendanceAccess(request, response)
+  if (!access) return
+  const { studentId, awardTypeId, note = '', className = null, sessionDate = null } = request.body || {}
+  const cleanNote = String(note || '').trim().slice(0, 280)
+  if (!studentId || !awardTypeId) return response.status(400).json({ error: 'Choose a child and an award.' })
+  if (sessionDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(sessionDate))) return response.status(400).json({ error: 'Invalid session date.' })
+  const [{ data: student }, { data: type, error: typeError }] = await Promise.all([
+    supabase.from('students').select('id,name').eq('id', studentId).maybeSingle(),
+    supabase.from('award_types').select('*').eq('id', awardTypeId).maybeSingle(),
+  ])
+  if (typeError && /award_types/.test(typeError.message)) return response.status(500).json({ error: 'Awards are not set up yet. Apply supabase/migrations/20260926_awards.sql in the Supabase SQL Editor.' })
+  if (!student) return response.status(404).json({ error: 'Child not found.' })
+  if (!type || !type.active) return response.status(400).json({ error: 'That award is not available.' })
+  const { data: award, error } = await supabase.from('student_awards').insert({
+    student_id: student.id,
+    student_name: student.name,
+    award_type_id: type.id,
+    award_name: type.name,
+    award_description: type.description || '',
+    badge: type.badge,
+    note: cleanNote || null,
+    class_name: className ? String(className).slice(0, 120) : null,
+    session_date: sessionDate || null,
+    given_by: access.user.id,
+    given_by_name: access.profile?.full_name || access.user.email,
+  }).select('*').single()
+  if (error) return response.status(500).json({ error: `The award could not be saved: ${error.message}` })
+  const email = await sendAwardEmail(award.id)
+  response.json({ award: { ...award, email_sent_at: email.sent ? new Date().toISOString() : null }, emailSent: email.sent, emailTo: email.to || '', emailError: email.sent ? '' : email.reason })
+})
+
+app.post('/api/awards/:id/resend', async (request, response) => {
+  const access = await requireAttendanceAccess(request, response)
+  if (!access) return
+  const email = await sendAwardEmail(request.params.id)
+  if (!email.sent) return response.status(502).json({ error: email.reason || 'The email could not be sent.' })
+  response.json({ emailSent: true, emailTo: email.to })
+})
+
 app.get('/api/admin/invitations', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return

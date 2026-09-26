@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 300" width="256" height="300">
+<defs>
+<linearGradient id="gold" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f1d77e"/><stop offset=".5" stop-color="#d4ae3c"/><stop offset="1" stop-color="#a97e2b"/></linearGradient>
+<radialGradient id="disc" cx=".38" cy=".32" r=".8"><stop offset="0" stop-color="#145c40"/><stop offset="1" stop-color="#0b3d2e"/></radialGradient>
+<linearGradient id="ribbon" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0b3d2e"/><stop offset="1" stop-color="#145c40"/></linearGradient>
+</defs>
+<polygon points="96,170 124,176 104,292 88,272 68,286" fill="url(#ribbon)"/>
+<polygon points="160,170 132,176 152,292 168,272 188,286" fill="url(#ribbon)"/>
+<polygon points="98,176 110,178 94,276 88,270" fill="#ffffff" opacity=".18"/>
+<polygon points="128.00,6.00 141.05,18.86 156.99,9.82 166.27,25.61 184.00,21.01 188.88,38.66 207.20,38.80 207.34,57.12 224.99,62.00 220.39,79.73 236.18,89.01 227.14,104.95 240.00,118.00 227.14,131.05 236.18,146.99 220.39,156.27 224.99,174.00 207.34,178.88 207.20,197.20 188.88,197.34 184.00,214.99 166.27,210.39 156.99,226.18 141.05,217.14 128.00,230.00 114.95,217.14 99.01,226.18 89.73,210.39 72.00,214.99 67.12,197.34 48.80,197.20 48.66,178.88 31.01,174.00 35.61,156.27 19.82,146.99 28.86,131.05 16.00,118.00 28.86,104.95 19.82,89.01 35.61,79.73 31.01,62.00 48.66,57.12 48.80,38.80 67.12,38.66 72.00,21.01 89.73,25.61 99.01,9.82 114.95,18.86" fill="url(#gold)" stroke="url(#gold)" stroke-width="8" stroke-linejoin="round"/>
+<circle cx="128" cy="118" r="90" fill="#fff8e6"/>
+<circle cx="128" cy="118" r="82" fill="url(#disc)"/>
+<circle cx="128" cy="118" r="74" fill="none" stroke="#e8c969" stroke-width="2" stroke-dasharray="2 6" stroke-linecap="round" opacity=".85"/>
+<g opacity=".25" transform="translate(0 3)"><polygon points="128.00,72.00 139.17,102.63 171.75,103.79 146.07,123.87 155.04,155.21 128.00,137.00 100.96,155.21 109.93,123.87 84.25,103.79 116.83,102.63" fill="#000000" stroke="#000000" stroke-width="4" stroke-linejoin="round"/></g>
+<polygon points="128.00,72.00 139.17,102.63 171.75,103.79 146.07,123.87 155.04,155.21 128.00,137.00 100.96,155.21 109.93,123.87 84.25,103.79 116.83,102.63" fill="#fff6dc" stroke="#fff6dc" stroke-width="4" stroke-linejoin="round"/>
+<ellipse cx="102" cy="72" rx="34" ry="16" transform="rotate(-28 102 72)" fill="#ffffff" opacity=".13"/>
+</svg>

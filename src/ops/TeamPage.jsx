@@ -14,7 +14,7 @@ export const PERMISSION_AREAS = [
   { key: 'contacts', label: 'Contacts (CRM)' },
   { key: 'schools', label: 'Schools' },
   { key: 'students', label: 'Students & class schedule' },
-  { key: 'attendance', label: 'Class attendance register' },
+  { key: 'attendance', label: 'Class register & awards' },
   { key: 'events', label: 'Events & ticketing' },
   { key: 'messages', label: 'Messages' },
   { key: 'site', label: 'Site content & layout' },

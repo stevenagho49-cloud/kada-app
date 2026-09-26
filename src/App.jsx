@@ -1580,7 +1580,7 @@ function App() {
   if (payLinkSlug) return <Suspense fallback={routeFallback}><PaymentLinkPage slug={payLinkSlug} onBack={() => { window.history.pushState(null, '', '/'); setPayLinkSlug(null) }} /></Suspense>
   if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
   if (view === 'ops' && session && needsPasswordSetup) return <AuthScreen requirePasswordSetup onAuthenticated={() => { setNeedsPasswordSetup(false); setView('ops') }} />
-  if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
+  if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard initialTab={tab} session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
 
   return (
     <div className="app-shell">
@@ -1725,7 +1725,7 @@ function App() {
           {can('site') && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} />}
           {can('site') && tab === 'site-content' && <SiteContentPage content={siteContent} onSave={saveSiteContent} />}
           {can('sales') && tab === 'payment-links' && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><PaymentLinksPage focusLinkId={paymentLinkFocus} onFocusHandled={() => setPaymentLinkFocus('')} /></Suspense>}
-          {can('attendance') && tab === 'attendance' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><AttendancePage session={session} /></Suspense>}
+          {can('attendance') && tab === 'attendance' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><AttendancePage session={session} isAdmin={isAdmin} /></Suspense>}
           {can('sales') && tab === 'arrears' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><ArrearsPage session={session} /></Suspense>}
           {(isAdmin || can('sales')) && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
           {(isAdmin || can('students')) && tab === 'class-schedule' && <ClassSchedulePage sessions={classSessions} onSave={saveClassSession} onAdd={addClassSession} onDelete={deleteClassSession} />}

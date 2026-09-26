@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { OpsButton, Pill, EmptyState, OPS_COLORS, OPS_SERIF, opsInputStyle } from './ui'
 import { useAttendanceRows, AttendanceDots, friendlyAttendanceError } from './attendanceShared'
 import { childStats, sessionStats, trend, overallByDate, formatRate } from './attendanceStats'
+import { GiveAwardSheet, AwardsTab, BadgeImage } from './awards'
 
 /* ------------------------------------------------------------------ */
 /* Operations > Attendance. A register built to be used on a phone     */
@@ -25,7 +26,7 @@ const latestClassDate = (dayOfWeek, today = londonToday()) => (dayOfWeek === nul
 const longDate = (value) => new Date(`${value}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
 const shortDate = (value) => new Date(`${value}T00:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
 
-export function AttendancePage({ session }) {
+export function AttendancePage({ session, isAdmin = false }) {
   const [view, setView] = useState('register')
   const tabStyle = (key) => ({ border: 0, borderBottom: `3px solid ${view === key ? OPS_COLORS.gold : 'transparent'}`, background: 'none', padding: '10px 4px', marginRight: 18, fontFamily: 'inherit', fontSize: 15, fontWeight: 700, color: view === key ? OPS_COLORS.emerald : OPS_COLORS.muted, cursor: 'pointer' })
   return (
@@ -34,8 +35,11 @@ export function AttendancePage({ session }) {
       <div role="tablist" style={{ borderBottom: `1px solid ${OPS_COLORS.rule}`, marginBottom: 14 }}>
         <button type="button" role="tab" aria-selected={view === 'register'} style={tabStyle('register')} onClick={() => setView('register')}>Register</button>
         <button type="button" role="tab" aria-selected={view === 'stats'} style={tabStyle('stats')} onClick={() => setView('stats')}>Statistics</button>
+        <button type="button" role="tab" aria-selected={view === 'awards'} style={tabStyle('awards')} onClick={() => setView('awards')}>Awards</button>
       </div>
-      {view === 'register' ? <Register session={session} /> : <Statistics />}
+      {view === 'register' && <Register session={session} />}
+      {view === 'stats' && <Statistics />}
+      {view === 'awards' && <AwardsTab session={session} isAdmin={isAdmin} />}
     </div>
   )
 }
@@ -50,6 +54,9 @@ function Register({ session }) {
   const [classStudents, setClassStudents] = useState([])
   const [error, setError] = useState('')
   const [savingIds, setSavingIds] = useState(new Set())
+  const [awards, setAwards] = useState([]) // awards given in this session
+  const [awardFor, setAwardFor] = useState(null)
+  const [notice, setNotice] = useState('')
   const requestRef = useRef(0)
 
   // Scheduled classes, plus any class that only exists in attendance history.
@@ -79,9 +86,10 @@ function Register({ session }) {
     const request = requestRef.current + 1
     requestRef.current = request
     setChildren(null)
-    const [roster, students] = await Promise.all([
+    const [roster, students, sessionAwards] = await Promise.all([
       supabase.rpc('attendance_roster', { p_class: className, p_date: date }),
       supabase.rpc('attendance_class_students', { p_class: className }),
+      supabase.from('student_awards').select('id,student_id,award_name,badge').eq('class_name', className).eq('session_date', date).order('created_at'),
     ])
     if (request !== requestRef.current) return // a newer class/date was picked meanwhile
     if (roster.error) {
@@ -92,6 +100,8 @@ function Register({ session }) {
     setError('')
     setChildren((roster.data || []).map((row) => ({ id: row.student_id, name: row.student_name, plan: row.plan, registered: row.registered, status: row.status || null, markedAt: row.marked_at, markedBy: row.marked_by_name })))
     setClassStudents(students.data || [])
+    setAwards(sessionAwards.data || []) // empty (not an error) until the awards migration is applied
+    setNotice('')
   }
   useEffect(() => { loadRoster() }, [className, date]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -174,6 +184,7 @@ function Register({ session }) {
         </div>
       </div>
 
+      {notice && <p role="status" style={{ background: '#e6f0e9', color: OPS_COLORS.okGreen, padding: '10px 12px', borderRadius: 6, fontSize: 14 }}>{notice}</p>}
       {error && <p role="alert" style={{ background: '#f7e9e4', color: OPS_COLORS.warn, padding: '10px 12px', borderRadius: 6, fontSize: 14 }}>{error}</p>}
 
       {children === null ? <p style={{ color: OPS_COLORS.muted }}>Loading register…</p> : (
@@ -201,12 +212,31 @@ function Register({ session }) {
                       {child.plan === 'membership' ? 'Member' : child.plan === 'day_pass' ? 'Day Pass' : 'Added to this register'}
                       {child.markedBy && child.status ? ` · ${child.markedBy}` : ''}
                     </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
+                      {awards.filter((award) => award.student_id === child.id).map((award) => <span key={award.id} title={award.award_name} style={{ display: 'inline-flex' }}><BadgeImage badge={award.badge} size={26} alt={award.award_name} /></span>)}
+                      <button type="button" aria-label={`Give ${child.name} an award`} onClick={() => setAwardFor(child)} style={{ minHeight: 40, padding: '0 12px', borderRadius: 20, border: `1px solid ${OPS_COLORS.rule}`, background: '#fbf1d3', color: '#6b5310', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, cursor: 'pointer', touchAction: 'manipulation' }}>🏅 Award</button>
+                    </div>
                   </div>
                   <StatusButton label="Present" icon="✓" active={child.status === 'present'} disabled={savingIds.has(child.id)} onClick={() => mark(child, 'present')} tone="present" name={child.name} />
                   <StatusButton label="Absent" icon="✕" active={child.status === 'absent'} disabled={savingIds.has(child.id)} onClick={() => mark(child, 'absent')} tone="absent" name={child.name} />
                 </li>
               ))}
             </ul>
+          )}
+
+          {awardFor && (
+            <GiveAwardSheet
+              child={awardFor}
+              className={className}
+              sessionDate={date}
+              session={session}
+              onClose={() => setAwardFor(null)}
+              onGiven={(result) => {
+                setAwards((current) => [...current, result.award])
+                setNotice(`🏅 ${result.award.award_name} given to ${awardFor.name}. ${result.emailSent ? `Celebration email sent to ${result.emailTo}.` : `The parent email wasn't sent: ${result.emailError || 'unknown error'}. Retry from the Awards tab.`}`)
+                setAwardFor(null)
+              }}
+            />
           )}
 
           {addable.length > 0 && (

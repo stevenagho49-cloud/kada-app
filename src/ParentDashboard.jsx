@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { OpsSidebar, DataTable, Pill, OpsButton, EmptyState } from './ops/ui'
 import { ClassDatePicker, DAY_NAMES, nextClassDate } from './lib/classDates'
 import { AddressAutocomplete } from './lib/AddressAutocomplete'
+import { AwardGallery, LatestAwardPanel, useParentAwards } from './ParentAwards'
 
 const emerald = '#0b3d2e'
 const muted = '#767066'
@@ -25,14 +26,15 @@ function Button({ children, onClick, type = 'button', disabled, variant = 'prima
   return <button type={type} disabled={disabled} onClick={onClick} style={{ ...styles[variant], borderRadius: 6, padding: small ? '6px 11px' : '9px 18px', fontFamily: 'inherit', fontSize: small ? 12 : 13.5, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1 }}>{children}</button>
 }
 
-function ParentDashboard({ session, family, bookings, students, classSessions = [], onBookClass, checkoutBusy, onCancelBooking, onBillingPortal, onCancelSubscription, onSaveSettings, onBack, onSignOut }) {
-  const [parentTab, setParentTab] = useState('dashboard')
+function ParentDashboard({ initialTab = '', session, family, bookings, students, classSessions = [], onBookClass, checkoutBusy, onCancelBooking, onBillingPortal, onCancelSubscription, onSaveSettings, onBack, onSignOut }) {
+  const [parentTab, setParentTab] = useState(['book-class', 'bookings', 'children', 'awards', 'settings'].includes(initialTab) ? initialTab : 'dashboard')
+  const { awards, error: awardsError } = useParentAwards(true)
   const [openGroups, setOpenGroups] = useState(() => new Set(['Your family']))
   const activeStudents = students.filter((student) => student.membershipStatus === 'active' || student.familyId === family?.id)
   const sidebarItems = [
     { key: 'dashboard', label: 'Dashboard' },
     { key: 'book-class', label: 'Book a class' },
-    { label: 'Your family', children: [{ key: 'bookings', label: 'Bookings' }, { key: 'children', label: 'Children' }, { key: 'settings', label: 'Settings' }] },
+    { label: 'Your family', children: [{ key: 'bookings', label: 'Bookings' }, { key: 'children', label: 'Children' }, { key: 'awards', label: `Awards${awards?.length ? ` (${awards.length})` : ''}` }, { key: 'settings', label: 'Settings' }] },
   ]
   const toggleGroup = (label) => setOpenGroups((previous) => {
     const next = new Set(previous)
@@ -84,6 +86,10 @@ function ParentDashboard({ session, family, bookings, students, classSessions = 
             {!family && <p style={{ color: muted, margin: 0 }}>Your plan appears here after a completed class booking.</p>}
           </div>
         </>}
+
+        {parentTab === 'dashboard' && <LatestAwardPanel awards={awards} onOpen={() => setParentTab('awards')} />}
+
+        {parentTab === 'awards' && <AwardGallery awards={awards} error={awardsError} students={activeStudents} />}
 
         {parentTab === 'book-class' && (
           <ParentBookingForm family={family} students={students} classSessions={classSessions} session={session} onBookClass={onBookClass} checkoutBusy={checkoutBusy} />
