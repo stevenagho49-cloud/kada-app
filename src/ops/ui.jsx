@@ -271,7 +271,7 @@ export function Toggle({ checked, onChange, disabled = false, label }) {
 /* extra storage bucket needed). JPEG for photos, PNG for logos so     */
 /* transparency survives.                                              */
 /* ------------------------------------------------------------------ */
-function fileToDataUrl(file, { maxWidth = 1200, format = 'jpeg', quality = 0.82 } = {}) {
+export function fileToDataUrl(file, { maxWidth = 1200, format = 'jpeg', quality = 0.82 } = {}) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onerror = () => reject(new Error('That file could not be read.'))

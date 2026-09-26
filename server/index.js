@@ -557,7 +557,7 @@ app.post('/api/admin/invoice-permissions', async (request, response) => {
 /* accounts. Roles/permissions/job titles live on profiles; emails     */
 /* come from auth.users (service role only).                           */
 /* ------------------------------------------------------------------ */
-const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'attendance', 'events', 'messages', 'site', 'sales']
+const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'attendance', 'homework', 'events', 'messages', 'site', 'sales']
 const cleanPermissions = (value) => (Array.isArray(value) ? value.filter((item) => TEAM_PERMISSIONS.includes(item)) : [])
 
 async function requireAdmin(request, response) {
@@ -600,7 +600,8 @@ const INVITE_ROLE_INTROS = {
   school: 'request workshops and track your bookings with KADA',
   admin: 'manage the whole KADA Operations dashboard',
 }
-const escHtml = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+// Quotes too, so values are safe inside attributes (alt="…") as well as text.
+const escHtml = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 
 /* Branded invite email with the actual set-password link inside ,  one email, */
 /* from KADA, through Resend. setupUrl is the magic recovery link.            */
@@ -849,6 +850,150 @@ app.post('/api/awards/:id/resend', async (request, response) => {
   const email = await sendAwardEmail(request.params.id)
   if (!email.sent) return response.status(502).json({ error: email.reason || 'The email could not be sent.' })
   response.json({ emailSent: true, emailTo: email.to })
+})
+
+/* ------------------------------------------------------------------ */
+/* Homework / practice tasks. Staff with the 'homework' permission set  */
+/* a task for a whole class or chosen children; each family is emailed  */
+/* once with the task; parents mark it done from their dashboard.       */
+/* ------------------------------------------------------------------ */
+const HOMEWORK_RECENT_DAY_PASS_DAYS = 28
+
+async function requireHomeworkAccess(request, response) {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
+  const { data: profile } = await supabase.from('profiles').select('role,permissions,full_name').eq('id', user.id).maybeSingle()
+  const allowed = profile?.role === 'admin' || (profile?.role === 'staff' && (profile.permissions || []).includes('homework'))
+  if (!allowed) { response.status(403).json({ error: 'You need the homework permission for this.' }); return null }
+  return { user, profile }
+}
+
+// youtube.com/watch?v=, youtu.be/, /shorts/, /embed/, /live/ → the 11-character video id.
+function youtubeId(url) {
+  try {
+    const parsed = new URL(String(url).trim())
+    const host = parsed.hostname.replace(/^(www|m|music)\./, '')
+    let id = ''
+    if (host === 'youtu.be') id = parsed.pathname.slice(1).split('/')[0]
+    else if (host === 'youtube.com' || host === 'youtube-nocookie.com') id = parsed.searchParams.get('v') || (parsed.pathname.match(/^\/(shorts|embed|live)\/([^/?]+)/) || [])[2] || ''
+    return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : ''
+  } catch {
+    return ''
+  }
+}
+
+const homeworkImageUrl = (imagePath) => (imagePath ? `${supabaseUrl}/storage/v1/object/public/homework-images/${imagePath.split('/').map(encodeURIComponent).join('/')}` : '')
+
+// Every active child, by class. "current" = a member, or a Day Pass within the
+// last four weeks or upcoming ,  who a "whole class" task goes to.
+app.get('/api/homework/children', async (request, response) => {
+  const access = await requireHomeworkAccess(request, response)
+  if (!access) return
+  const since = new Date(Date.parse(`${londonNow().date}T00:00:00Z`) - HOMEWORK_RECENT_DAY_PASS_DAYS * 86400000).toISOString().slice(0, 10)
+  const { data: students, error } = await supabase.from('students').select('id,name,class_name,term,family_id,booking_id,membership_status').eq('membership_status', 'active').order('name')
+  if (error) return response.status(500).json({ error: 'Children could not be loaded.' })
+  const bookingIds = [...new Set((students || []).map((student) => student.booking_id).filter(Boolean))]
+  const { data: bookings } = bookingIds.length ? await supabase.from('bookings').select('id,session_type,status').in('id', bookingIds) : { data: [] }
+  const bookingById = new Map((bookings || []).map((booking) => [booking.id, booking]))
+  const classes = new Map()
+  for (const student of students || []) {
+    const booking = bookingById.get(student.booking_id)
+    if (booking?.status === 'Cancelled') continue
+    const member = /\(monthly_membership\)$/.test(booking?.session_type || '')
+    const entry = classes.get(student.class_name || 'No class') || []
+    entry.push({ id: student.id, name: student.name, plan: member ? 'membership' : 'day_pass', current: member || String(student.term || '') >= since })
+    classes.set(student.class_name || 'No class', entry)
+  }
+  response.json({ classes: [...classes.entries()].map(([name, children]) => ({ name, children })).sort((a, b) => a.name.localeCompare(b.name)) })
+})
+
+function homeworkEmailHtml({ task, childNames, guardianFirstName }) {
+  const imageUrl = homeworkImageUrl(task.image_path)
+  const paragraphs = escHtml(task.description || '').split(/\n{2,}/).map((part) => part.trim()).filter(Boolean).map((part) => `<p style="margin:0 0 12px;font-size:15px;line-height:1.6">${part.replace(/\n/g, '<br>')}</p>`).join('')
+  const video = task.youtube_id ? `<div style="margin:18px 0 0"><a href="https://www.youtube.com/watch?v=${task.youtube_id}" style="display:block;text-decoration:none;color:#0b3d2e"><img src="https://img.youtube.com/vi/${task.youtube_id}/hqdefault.jpg" width="496" alt="Practice video on YouTube" style="display:block;width:100%;max-width:496px;height:auto;border-radius:10px;border:0"><span style="display:inline-block;margin-top:10px;background:#c9a227;color:#0b3d2e;padding:10px 18px;border-radius:8px;font-weight:700">▶ Watch on YouTube</span></a></div>` : ''
+  return `<div style="background:#f6f3ea;padding:28px 12px;font-family:Arial,sans-serif;color:#232323">
+<div style="max-width:560px;margin:0 auto;background:#fffdf8;border:1px solid #e4ddc9;border-radius:18px;overflow:hidden">
+<div style="height:6px;background:linear-gradient(90deg,#0b3d2e,#c9a227)"></div>
+<div style="padding:26px 26px 30px">
+<p style="margin:0;color:#a97e2b;font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700">King's Ark Dance Academy · Practice at home</p>
+<p style="margin:14px 0 0;font-size:15px;color:#555">Hi ${escHtml(guardianFirstName || 'there')}, here's something for ${escHtml(childNames)} to practise before the next class.</p>
+<h1 style="margin:12px 0 14px;font-family:Georgia,serif;font-weight:500;font-size:28px;line-height:1.2;color:#0b3d2e">${escHtml(task.title)}</h1>
+${paragraphs}
+${imageUrl ? `<img src="${imageUrl}" width="508" alt="Reference image for ${escHtml(task.title)}" style="display:block;width:100%;max-width:508px;height:auto;border-radius:10px;margin:6px 0 0;border:0">` : ''}
+${video}
+<p style="margin:24px 0 0"><a href="${APP_URL}/#ops/homework" style="background:#0b3d2e;color:#fffdf8;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Mark as done in your dashboard →</a></p>
+<p style="margin:12px 0 0;font-size:12px;color:#999">No scores or grades, just a quick tick so our teachers know what to build on next session.</p>
+</div></div></div>`
+}
+
+app.post('/api/homework', async (request, response) => {
+  const access = await requireHomeworkAccess(request, response)
+  if (!access) return
+  const { title = '', description = '', imagePath = '', youtubeUrl = '', className = '', studentIds = [] } = request.body || {}
+  const cleanTitle = String(title).trim().slice(0, 120)
+  const cleanDescription = String(description).trim().slice(0, 4000)
+  const cleanUrl = String(youtubeUrl || '').trim()
+  const videoId = cleanUrl ? youtubeId(cleanUrl) : ''
+  const ids = [...new Set((Array.isArray(studentIds) ? studentIds : []).map(String))].slice(0, 500)
+  if (!cleanTitle) return response.status(400).json({ error: 'Give the task a title.' })
+  if (cleanUrl && !videoId) return response.status(400).json({ error: "That doesn't look like a YouTube video link. Paste the link from the video's Share button." })
+  if (imagePath && !/^[\w-]+\/[\w.-]+$/.test(String(imagePath))) return response.status(400).json({ error: 'Invalid image.' })
+  if (!ids.length) return response.status(400).json({ error: 'Choose at least one child.' })
+
+  const { data: students, error: studentError } = await supabase.from('students').select('id,name,family_id,parent_name,parent_email').in('id', ids).eq('membership_status', 'active')
+  if (studentError) return response.status(500).json({ error: 'Children could not be loaded.' })
+  if (!students?.length) return response.status(400).json({ error: 'None of those children are active.' })
+  const familyIds = [...new Set(students.map((student) => student.family_id).filter(Boolean))]
+  const { data: families } = familyIds.length ? await supabase.from('parent_families').select('id,guardian_name,guardian_email').in('id', familyIds) : { data: [] }
+  const familyById = new Map((families || []).map((family) => [family.id, family]))
+
+  const { data: task, error: taskError } = await supabase.from('homework_tasks').insert({
+    title: cleanTitle,
+    description: cleanDescription,
+    image_path: imagePath || null,
+    youtube_url: cleanUrl || null,
+    youtube_id: videoId || null,
+    class_name: String(className || '').trim().slice(0, 120) || null,
+    created_by: access.user.id,
+    created_by_name: access.profile?.full_name || access.user.email,
+  }).select('*').single()
+  if (taskError) return response.status(500).json({ error: /homework_tasks/.test(taskError.message) ? 'Homework is not set up yet. Apply supabase/migrations/20260926_homework.sql in the Supabase SQL Editor.' : `The task could not be saved: ${taskError.message}` })
+  const { error: assignError } = await supabase.from('homework_assignments').insert(students.map((student) => ({
+    task_id: task.id,
+    student_id: student.id,
+    student_name: student.name,
+    family_id: student.family_id || null,
+    guardian_name: familyById.get(student.family_id)?.guardian_name || student.parent_name || '',
+  })))
+  if (assignError) {
+    await supabase.from('homework_tasks').delete().eq('id', task.id)
+    return response.status(500).json({ error: `The task could not be assigned: ${assignError.message}` })
+  }
+
+  // One email per family, naming all of their children the task is for.
+  const households = new Map()
+  for (const student of students) {
+    const family = familyById.get(student.family_id)
+    const email = (family?.guardian_email || student.parent_email || '').toLowerCase()
+    const key = email || `none:${student.id}`
+    const entry = households.get(key) || { email, guardianName: family?.guardian_name || student.parent_name || '', students: [] }
+    entry.students.push(student)
+    households.set(key, entry)
+  }
+  let emailed = 0
+  const failures = []
+  for (const household of households.values()) {
+    const studentIdsHere = household.students.map((student) => student.id)
+    const firstNames = household.students.map((student) => student.name.split(' ')[0])
+    const childNames = firstNames.length > 1 ? `${firstNames.slice(0, -1).join(', ')} and ${firstNames.at(-1)}` : firstNames[0]
+    const result = household.email
+      ? await sendEmail({ to: household.email, subject: `New practice for ${childNames}: ${cleanTitle}`, html: homeworkEmailHtml({ task, childNames, guardianFirstName: household.guardianName.split(' ')[0] }) }) // eslint-disable-line no-await-in-loop
+      : { sent: false, reason: 'No parent email on file.' }
+    if (result.sent) emailed += 1
+    else failures.push({ children: childNames, reason: result.reason })
+    await supabase.from('homework_assignments').update(result.sent ? { emailed_at: new Date().toISOString(), email_error: null } : { email_error: result.reason || 'Email failed.' }).eq('task_id', task.id).in('student_id', studentIdsHere) // eslint-disable-line no-await-in-loop
+  }
+  response.json({ task, assigned: students.length, skipped: ids.length - students.length, familiesEmailed: emailed, emailFailures: failures })
 })
 
 app.get('/api/admin/invitations', async (request, response) => {
