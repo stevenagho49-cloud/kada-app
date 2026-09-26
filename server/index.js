@@ -135,7 +135,7 @@ async function notificationSettings() {
 
 async function notifyAdmin(subject, html, type = '') {
   const settings = await notificationSettings()
-  const toggleKey = { 'new-booking': 'newBooking', contact: 'newContact', jobs: 'jobAlerts', 'event-ticket': 'eventSales', 'payment-link': 'paymentLinkSales' }[type]
+  const toggleKey = { 'new-booking': 'newBooking', contact: 'newContact', jobs: 'jobAlerts', 'event-ticket': 'eventSales', 'payment-link': 'paymentLinkSales', 'invoice-payment': 'invoicePayments' }[type]
   if (settings && toggleKey && settings[toggleKey] === false) return { sent: false, reason: `${toggleKey} alerts disabled in Settings` }
   const to = settings?.notifyEmail || ADMIN_EMAIL
   if (!to) return { sent: false, reason: 'ADMIN_NOTIFICATION_EMAIL not set' }
@@ -270,6 +270,13 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       return response.json({ received: true })
     }
 
+    // Invoice "Pay now" (/api/invoices/pay/<token>): marks the invoice booking paid.
+    if (metadata.kind === 'invoice_payment') {
+      const result = await recordInvoicePayment(session)
+      if (!result.ok) return response.status(500).json({ error: 'Invoice payment write failed' })
+      return response.json({ received: true })
+    }
+
     const planType = metadata.plan_type || 'day_pass'
     const { data: existingStudents } = await supabase.from('students').select('*').eq('booking_id', metadata.booking_id)
     const studentList = existingStudents || []
@@ -380,7 +387,7 @@ const tooMany = { error: 'Too many attempts. Please wait a few minutes, then try
 const checkoutLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 const lookupLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 const contactLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
-app.use(['/api/stripe/create-checkout-session', '/api/stripe/create-event-checkout', '/api/stripe/create-payment-link-checkout'], checkoutLimiter)
+app.use(['/api/stripe/create-checkout-session', '/api/stripe/create-event-checkout', '/api/stripe/create-payment-link-checkout', '/api/invoices/pay'], checkoutLimiter)
 app.use(['/api/stripe/event-order', '/api/stripe/class-booking', '/api/stripe/payment-link-order'], lookupLimiter)
 app.use('/api/public/contact', contactLimiter)
 
@@ -1324,6 +1331,49 @@ function invoiceOverrides(booking, overrides = {}) {
   }
 }
 
+// Subtotal, discount and total due, exactly as printed on the PDF.
+function invoiceTotals(booking) {
+  const subtotal = Number(booking.invoiceAmount ?? booking.price ?? 0)
+  const discountPercent = Math.min(100, Math.max(0, Number(booking.discountPercent || 0)))
+  const discount = subtotal * discountPercent / 100
+  return { subtotal, discountPercent, discount, totalDue: Math.max(0, subtotal - discount) }
+}
+
+// The edits made in the invoice preview, kept on the booking when it is sent so
+// Pay now, reminders and re-generated PDFs all show the same figures.
+const INVOICE_OVERRIDE_KEYS = ['description', 'rate', 'amount', 'discountPercent']
+function storableOverrides(overrides = {}) {
+  return Object.fromEntries(Object.entries(overrides || {}).filter(([key, value]) => INVOICE_OVERRIDE_KEYS.includes(key) && value !== undefined && value !== null && value !== ''))
+}
+
+// A stable link (not a Stripe session, which expires after 24h) that opens a
+// fresh Checkout for whatever is outstanding at the time it is clicked.
+const invoicePayUrl = (row) => (row?.invoice_pay_token ? `${APP_URL}/api/invoices/pay/${row.invoice_pay_token}` : '')
+
+// Rebuild an invoice as it was sent, from the stored booking row (+ its school row).
+function buildInvoice(row, school) {
+  const invoiceBooking = invoiceOverrides({ ...row, studentCount: row.student_count, sessionType: row.session_type, contactName: row.contact_name, contactEmail: row.contact_email, invoiceNumber: row.invoice_number, price: row.price }, row.invoice_overrides || {})
+  return {
+    row,
+    invoiceBooking,
+    school: school ? { name: school.name, contactName: school.contact_name, email: school.email } : null,
+    amountPence: Math.round(invoiceTotals(invoiceBooking).totalDue * 100),
+    recipient: school?.email || row.contact_email || '',
+    payerName: school?.name || row.contact_name || row.contact_email || 'Unknown',
+    contactName: school?.contact_name || row.contact_name || '',
+  }
+}
+
+async function loadInvoice({ bookingId, payToken }) {
+  const query = supabase.from('bookings').select('*')
+  const { data: row, error } = await (payToken ? query.eq('invoice_pay_token', payToken) : query.eq('id', bookingId)).maybeSingle()
+  if (error || !row) return null
+  const { data: school } = row.school_id ? await supabase.from('schools').select('*').eq('id', row.school_id).maybeSingle() : { data: null }
+  return buildInvoice(row, school)
+}
+
+const isInvoiceOutstanding = (row) => row.invoice_status !== 'Paid' && !row.invoice_paid_at && row.status !== 'Cancelled'
+
 app.get('/api/invoices/pdf/:bookingId', async (request, response) => {
   const user = await authenticatedUser(request)
   if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
@@ -1336,12 +1386,18 @@ app.get('/api/invoices/pdf/:bookingId', async (request, response) => {
   const { data: settings, error: settingsError } = await supabase.from('invoice_settings').select('account_name,sort_code,account_number').eq('id', 'default').single()
   if (settingsError) return response.status(500).json({ error: 'Invoice payment details could not be loaded.' })
   const invoiceBooking = invoiceOverrides({ ...booking, studentCount: booking.student_count, sessionType: booking.session_type, contactName: booking.contact_name, contactEmail: booking.contact_email, invoiceNumber, price: booking.price }, request.query)
-  const pdf = await generateInvoicePdf({ booking: invoiceBooking, school: school ? { name: school.name, contactName: school.contact_name, email: school.email } : null, settings, preparedBy: profile.full_name || user.email })
+  const pdf = await generateInvoicePdf({ booking: invoiceBooking, school: school ? { name: school.name, contactName: school.contact_name, email: school.email } : null, settings, preparedBy: profile.full_name || user.email, payUrl: isInvoiceOutstanding(booking) ? invoicePayUrl(booking) : '' })
   response.type('application/pdf').set({ 'Content-Disposition': `attachment; filename="${invoiceNumber || booking.id}.pdf"`, 'X-Invoice-Number': invoiceNumber }).send(pdf)
 })
 
-function invoiceHtml({ booking, school }) {
-  return `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><p><strong>Invoice:</strong> ${booking.invoiceNumber || 'To be assigned'}<br><strong>Workshop date:</strong> ${booking.date || 'To be confirmed'}<br><strong>Description:</strong> ${booking.sessionType || 'Dance workshop'}<br><strong>Amount due:</strong> £${Number(booking.price || 0).toLocaleString()}</p><p>Dear ${school?.contact_name || booking.contactName || 'School contact'},</p><p>Please find your invoice details above. Payment is due within 14 days.</p><p>Thank you for booking King's Ark Dance Academy.</p></div>`
+function payNowButton(payUrl, amountPence) {
+  if (!payUrl) return ''
+  return `<p style="margin:20px 0 6px"><a href="${payUrl}" style="background:#c9a227;color:#0b3d2e;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Pay ${money(amountPence)} now →</a></p><p style="color:#767066;font-size:12px;margin:0 0 14px">Secure card payment by Stripe. You can also pay by bank transfer using the details on the attached invoice.</p>`
+}
+
+function invoiceHtml({ booking, school, payUrl }) {
+  const amountPence = Math.round(invoiceTotals(booking).totalDue * 100)
+  return `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><p><strong>Invoice:</strong> ${booking.invoiceNumber || 'To be assigned'}<br><strong>Workshop date:</strong> ${booking.date || 'To be confirmed'}<br><strong>Description:</strong> ${escHtml(booking.invoiceDescription || booking.sessionType || 'Dance workshop')}<br><strong>Amount due:</strong> ${money(amountPence)}</p><p>Dear ${escHtml(school?.contactName || school?.contact_name || booking.contactName || 'School contact')},</p><p>Please find your invoice attached. Payment is due within 14 days.</p>${payNowButton(payUrl, amountPence)}<p>Thank you for booking King's Ark Dance Academy.</p></div>`
 }
 
 app.post('/api/invoices/send', async (request, response) => {
@@ -1365,7 +1421,12 @@ app.post('/api/invoices/send', async (request, response) => {
   if (settingsError) return response.status(500).json({ error: 'Invoice payment details could not be loaded.' })
 
   booking.invoiceNumber = await ensureInvoiceNumber(booking.id)
-  const pdf = await generateInvoicePdf({ booking: invoiceOverrides(booking, booking.invoiceOverrides), school, settings, preparedBy: profile.full_name || userData.user.email })
+  // Sent date, due date and pay token come from the stored row, not the client.
+  const { data: stored } = await supabase.from('bookings').select('status,invoice_status,invoice_sent_at,invoice_due_date,invoice_pay_token,invoice_paid_at').eq('id', booking.id).maybeSingle()
+  const overrides = storableOverrides(booking.invoiceOverrides)
+  const invoiceBooking = invoiceOverrides({ ...booking, ...(stored || {}) }, overrides)
+  const payUrl = stored && isInvoiceOutstanding(stored) ? invoicePayUrl(stored) : ''
+  const pdf = await generateInvoicePdf({ booking: invoiceBooking, school, settings, preparedBy: profile.full_name || userData.user.email, payUrl })
   const resendResponse = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
@@ -1374,20 +1435,21 @@ app.post('/api/invoices/send', async (request, response) => {
       to: [recipient],
       ...(process.env.ADMIN_NOTIFICATION_EMAIL ? { bcc: [process.env.ADMIN_NOTIFICATION_EMAIL] } : {}),
       subject: `Invoice ${booking.invoiceNumber || ''} - King's Ark Dance Academy`.replace('  ', ' '),
-      html: invoiceHtml({ booking, school }),
+      html: invoiceHtml({ booking: invoiceBooking, school, payUrl }),
       attachments: [{ filename: `${booking.invoiceNumber || booking.id}.pdf`, content: pdf.toString('base64') }],
     }),
   })
   const result = await resendResponse.json()
   if (!resendResponse.ok) return response.status(502).json({ error: result.message || 'Resend could not send the invoice.' })
 
-  const { error: bookingUpdateError } = await supabase.from('bookings').update({ invoice_status: 'Sent' }).eq('id', booking.id)
+  // The bookings_invoice_guard trigger stamps invoice_sent_at and the 14-day due date on first send.
+  const { error: bookingUpdateError } = await supabase.from('bookings').update({ invoice_status: 'Sent', invoice_overrides: overrides }).eq('id', booking.id)
   if (bookingUpdateError) return response.status(500).json({ error: 'Invoice was sent, but booking status could not be updated.' })
 
   response.json({ id: result.id, recipient, invoiceNumber: booking.invoiceNumber })
 })
 
-async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
+async function generateInvoicePdf({ booking, school, settings, preparedBy, payUrl = '' }) {
   const document = new PDFDocument({ size: 'A4', margin: 0 })
   const chunks = []
   document.on('data', (chunk) => chunks.push(chunk))
@@ -1402,11 +1464,11 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
   const ivory = '#faf6ec'
   const rule = '#ddd0aa'
   const money = (value) => `£${Number(value || 0).toFixed(2)}`
-  const subtotal = Number(booking.invoiceAmount ?? booking.price ?? 0)
-  const discountPercent = Math.min(100, Math.max(0, Number(booking.discountPercent || 0)))
-  const discount = subtotal * discountPercent / 100
-  const totalDue = Math.max(0, subtotal - discount)
+  const { subtotal, discountPercent, discount, totalDue } = invoiceTotals(booking)
   const formatDate = (value) => value ? new Date(`${value}T00:00:00`).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'To be confirmed'
+  // Once sent, the invoice keeps its original dates (reminders re-attach the same invoice).
+  const invoiceDate = booking.invoice_sent_at ? new Date(booking.invoice_sent_at) : new Date()
+  const dueDate = booking.invoice_due_date || new Date(invoiceDate.getTime() + 14 * 86400000).toISOString().slice(0, 10)
 
   document.rect(0, 0, pageWidth, 130.39).fill(emerald)
   document.rect(0, 130.39, pageWidth, 3.4).fill(gold)
@@ -1429,7 +1491,7 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
   y += 17.01
   document.font('Times-Bold').fontSize(12).fillColor(ink).text(school?.name || 'School contact', margin, y)
   let detailY = y
-  for (const [label, value] of [['Invoice date', formatDate(new Date().toISOString().slice(0, 10))], ['Due date', formatDate(new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10))], ['Workshop date', formatDate(booking.date)]]) {
+  for (const [label, value] of [['Invoice date', formatDate(invoiceDate.toISOString().slice(0, 10))], ['Due date', formatDate(dueDate)], ['Workshop date', formatDate(booking.date)]]) {
     document.font('Helvetica').fontSize(8.5).fillColor(muted).text(label, pageWidth / 2 + 14.17, detailY)
     document.font('Helvetica-Bold').fillColor(ink).text(value, pageWidth - margin - 120, detailY, { width: 120, align: 'right' })
     detailY += 15.59
@@ -1478,6 +1540,16 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
   document.text(`Sort code: ${settings.sort_code || 'Not configured'}   Account number: ${settings.account_number || 'Not configured'}`, margin + 14.17, boxY + 41)
   document.text(`Reference: ${booking.invoiceNumber || booking.id}`, pageWidth - margin - 160, boxY + 26, { width: 145, align: 'right' })
 
+  if (payUrl) {
+    const payY = boxY + 56.69 + 17
+    const buttonWidth = 150
+    document.roundedRect(margin, payY, buttonWidth, 28, 5.67).fill(gold)
+    document.font('Helvetica-Bold').fontSize(10).fillColor(ivory).text(`Pay ${money(totalDue)} now`, margin, payY + 9, { width: buttonWidth, align: 'center' })
+    document.link(margin, payY, buttonWidth, 28, payUrl)
+    document.font('Helvetica').fontSize(8.5).fillColor(muted).text('Pay securely by card online (Stripe), or by bank transfer using the details above.', margin + buttonWidth + 14, payY + 3, { width: pageWidth - margin * 2 - buttonWidth - 14 })
+    document.fillColor(emerald).text(payUrl, margin + buttonWidth + 14, payY + 15, { width: pageWidth - margin * 2 - buttonWidth - 14, link: payUrl, underline: true })
+  }
+
   const footY = pageHeight - margin - 39.69
   document.moveTo(margin, footY).lineTo(pageWidth - margin, footY).strokeColor(rule).stroke()
   document.font('Helvetica').fontSize(8).fillColor(muted).text("King's Ark Dance Academy  ·  395 College Rd, Birmingham B44 0HF", margin, footY + 14, { width: pageWidth - margin * 2, align: 'center' })
@@ -1487,6 +1559,418 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy }) {
   await done
   return Buffer.concat(chunks)
 }
+
+/* ------------------------------------------------------------------ */
+/* Arrears: "Pay now" on invoices, escalating reminders, arrears view. */
+/* Reminders escalate once and then stop: a friendly email on day 3     */
+/* overdue, a firmer one on day 10, and after that the invoice is only  */
+/* flagged for personal follow-up. Nothing here ever pauses, cancels or */
+/* blocks a booking or a child's attendance ,  that stays manual.       */
+/* ------------------------------------------------------------------ */
+const REMINDER_FRIENDLY_FROM_DAY = 3
+const REMINDER_FIRM_DAY = 10
+
+const DEFAULT_REMINDER_TEMPLATES = {
+  friendly: {
+    subject: 'Friendly reminder: invoice {{invoice_number}} is now due',
+    body: "Hi {{name}},\n\nJust a friendly reminder that invoice {{invoice_number}} for {{amount}} was due on {{due_date}}. If payment is already on its way, thank you, and please ignore this email.\n\nYou can pay online in a minute using the button below, or by bank transfer using the details on the attached invoice.\n\nThank you,\nKing's Ark Dance Academy",
+  },
+  firm: {
+    subject: 'Invoice {{invoice_number}} is now {{days_overdue}} days overdue',
+    body: "Hi {{name}},\n\nOur records show that invoice {{invoice_number}} for {{amount}}, due on {{due_date}}, is still unpaid and is now {{days_overdue}} days overdue.\n\nPlease arrange payment as soon as possible using the button below, or by bank transfer using the details on the attached invoice. If there is a problem with the invoice, or you would like to talk about arranging payment, just reply to this email.\n\nKind regards,\nKing's Ark Dance Academy",
+  },
+}
+const REMINDER_PLACEHOLDERS = ['name', 'payer', 'invoice_number', 'amount', 'due_date', 'days_overdue', 'pay_link']
+
+// Saved wording from Arrears > Reminder emails; blank fields fall back to the defaults.
+async function reminderTemplates() {
+  const { data } = await supabase.from('app_settings').select('value').eq('key', 'invoice_reminders').maybeSingle()
+  const saved = data?.value || {}
+  return Object.fromEntries(Object.entries(DEFAULT_REMINDER_TEMPLATES).map(([key, fallback]) => [key, {
+    subject: String(saved[key]?.subject || '').trim() || fallback.subject,
+    body: String(saved[key]?.body || '').trim() || fallback.body,
+  }]))
+}
+
+const fillPlaceholders = (text, values) => String(text).replace(/{{\s*(\w+)\s*}}/g, (match, key) => (key in values ? values[key] : match))
+
+// Whole days between the due date and today (UK), positive once overdue.
+function daysOverdue(dueDate, today = londonNow().date) {
+  if (!dueDate) return null
+  return Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${String(dueDate).slice(0, 10)}T00:00:00Z`)) / 86400000)
+}
+
+async function sendInvoiceReminder({ bookingId, template, kind = 'manual', sentBy = null }) {
+  const invoice = await loadInvoice({ bookingId })
+  if (!invoice) return { sent: false, status: 404, reason: 'Invoice not found.' }
+  const { row } = invoice
+  if (!isInvoiceOutstanding(row)) return { sent: false, status: 409, reason: 'This invoice is paid or cancelled, so there is nothing to chase.' }
+  if (row.invoice_status !== 'Sent') return { sent: false, status: 409, reason: 'Send the invoice before sending reminders for it.' }
+  if (!invoice.recipient) return { sent: false, status: 400, reason: 'There is no email address for this invoice. Add one to the school or booking.' }
+  const overdue = daysOverdue(row.invoice_due_date)
+
+  // Claim first: the unique index lets each automatic reminder go out at most once
+  // per invoice, even if two scheduler runs overlap.
+  const { data: claim, error: claimError } = await supabase.from('invoice_reminders')
+    .insert({ booking_id: row.id, kind, template, recipient: invoice.recipient, days_overdue: overdue, sent_by: sentBy })
+    .select('id').single()
+  if (claimError) {
+    if (claimError.code === '23505') return { sent: false, status: 409, reason: 'This reminder has already been sent.', duplicate: true }
+    console.error('Invoice reminder claim failed:', claimError)
+    return { sent: false, status: 500, reason: 'The reminder could not be logged, so it was not sent.' }
+  }
+
+  const templates = await reminderTemplates()
+  const { data: bankDetails } = await supabase.from('invoice_settings').select('account_name,sort_code,account_number').eq('id', 'default').maybeSingle()
+  const payUrl = invoicePayUrl(row)
+  const values = {
+    name: (invoice.contactName || '').split(' ')[0] || 'there',
+    payer: invoice.payerName,
+    invoice_number: row.invoice_number || 'your invoice',
+    amount: money(invoice.amountPence),
+    due_date: formatDateGB(row.invoice_due_date),
+    days_overdue: String(Math.max(0, overdue || 0)),
+    pay_link: payUrl,
+  }
+  const htmlValues = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, escHtml(value)]))
+  const paragraphs = escHtml(templates[template].body).split(/\n{2,}/).map((part) => part.trim()).filter(Boolean)
+  const bodyHtml = paragraphs.map((part) => `<p>${fillPlaceholders(part, htmlValues).replace(/\n/g, '<br>')}</p>`).join('')
+  const pdf = await generateInvoicePdf({ booking: invoice.invoiceBooking, school: invoice.school, settings: bankDetails || {}, preparedBy: "King's Ark Dance Academy", payUrl })
+  const result = await sendEmail({
+    to: invoice.recipient,
+    subject: fillPlaceholders(templates[template].subject, values),
+    html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2>${bodyHtml}${payNowButton(payUrl, invoice.amountPence)}</div>`,
+    attachments: [{ filename: `${row.invoice_number || row.id}.pdf`, content: pdf.toString('base64') }],
+  })
+
+  if (result.sent) {
+    await supabase.from('invoice_reminders').update({ status: 'sent', resend_id: result.id }).eq('id', claim.id)
+  } else if (kind === 'manual') {
+    await supabase.from('invoice_reminders').update({ status: 'failed', error: result.reason }).eq('id', claim.id)
+  } else {
+    // Release the automatic slot so the next scheduler run can retry.
+    await supabase.from('invoice_reminders').delete().eq('id', claim.id)
+  }
+  return { sent: result.sent, status: result.sent ? 200 : 502, reason: result.sent ? '' : `The email could not be sent: ${result.reason}`, recipient: invoice.recipient, daysOverdue: overdue }
+}
+
+// Day 3 to 9 overdue: the friendly reminder (once). Day 10: the firm one (once).
+// Past day 10 nothing is sent; the arrears view flags it for personal follow-up.
+async function runInvoiceReminders() {
+  if (!supabase) return { checked: 0, sent: [] }
+  const today = londonNow().date
+  const cutoff = new Date(Date.parse(`${today}T00:00:00Z`) - REMINDER_FRIENDLY_FROM_DAY * 86400000).toISOString().slice(0, 10)
+  const { data: rows, error } = await supabase.from('bookings')
+    .select('id,invoice_number,invoice_due_date,status')
+    .eq('invoice_status', 'Sent').is('invoice_paid_at', null).lte('invoice_due_date', cutoff)
+  if (error) {
+    console.error('Invoice reminder query failed:', error.message)
+    return { checked: 0, sent: [], error: error.message }
+  }
+  const due = (rows || [])
+    .filter((row) => row.status !== 'Cancelled')
+    .map((row) => ({ row, overdue: daysOverdue(row.invoice_due_date, today) }))
+    .filter(({ overdue }) => overdue >= REMINDER_FRIENDLY_FROM_DAY && overdue <= REMINDER_FIRM_DAY)
+  const { data: existing } = due.length
+    ? await supabase.from('invoice_reminders').select('booking_id,kind').in('booking_id', due.map(({ row }) => row.id)).in('kind', ['auto_friendly', 'auto_firm'])
+    : { data: [] }
+  const done = new Set((existing || []).map((item) => `${item.booking_id}:${item.kind}`))
+  const sent = []
+  for (const { row, overdue } of due) {
+    const kind = overdue === REMINDER_FIRM_DAY ? 'auto_firm' : 'auto_friendly'
+    if (done.has(`${row.id}:${kind}`)) continue
+    const result = await sendInvoiceReminder({ bookingId: row.id, template: kind === 'auto_firm' ? 'firm' : 'friendly', kind }) // eslint-disable-line no-await-in-loop
+    if (!result.duplicate) sent.push({ bookingId: row.id, invoiceNumber: row.invoice_number, kind, daysOverdue: overdue, sent: result.sent, reason: result.reason || undefined })
+    if (!result.sent && !result.duplicate) console.error(`Invoice reminder (${kind}) for ${row.invoice_number || row.id} failed:`, result.reason)
+  }
+  return { checked: due.length, sent }
+}
+
+const INVOICE_REMINDER_INTERVAL_MS = Number(process.env.INVOICE_REMINDER_INTERVAL_MS || 3600000)
+setInterval(() => { runInvoiceReminders().catch((error) => console.error('Invoice reminder scheduler error:', error)) }, INVOICE_REMINDER_INTERVAL_MS)
+setTimeout(() => { runInvoiceReminders().catch((error) => console.error('Invoice reminder scheduler error:', error)) }, 30000)
+
+// Webhook handler for kind=invoice_payment. Returns { ok: false } on a failed
+// write so the webhook answers non-200 and Stripe retries.
+async function recordInvoicePayment(session) {
+  const bookingId = session.metadata?.invoice_booking_id
+  if (!bookingId) {
+    console.error('Invoice payment webhook without invoice_booking_id:', session.id)
+    return { ok: true } // nothing we could ever write; don't make Stripe retry forever
+  }
+  const { data: before, error: loadError } = await supabase.from('bookings').select('id,invoice_status,invoice_number,invoice_payment_session_id').eq('id', bookingId).maybeSingle()
+  if (loadError) {
+    console.error('Invoice payment lookup failed:', loadError)
+    return { ok: false }
+  }
+  const amountPence = Number(session.amount_total ?? session.metadata?.amount_pence ?? 0)
+  const invoiceLabel = before?.invoice_number || session.metadata?.invoice_number || bookingId
+  if (!before) {
+    console.error('Invoice payment for a booking that no longer exists:', bookingId, session.id)
+    await notifyAdmin(`Payment for missing invoice ${invoiceLabel}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Payment received for an invoice that no longer exists</h2><p><strong>Invoice:</strong> ${escHtml(invoiceLabel)}<br><strong>Amount:</strong> ${money(amountPence)}<br><strong>Stripe session:</strong> ${escHtml(session.id)}</p><p>The booking was deleted. Check the payment in Stripe.</p></div>`, 'invoice-payment')
+    return { ok: true }
+  }
+
+  // Only the first payment is recorded; a redelivery of the same event matches nothing.
+  const { data: claimed, error } = await supabase.from('bookings')
+    .update({ invoice_status: 'Paid', payment_status: 'paid', invoice_paid_at: new Date().toISOString(), invoice_paid_amount_pence: amountPence, invoice_payment_session_id: session.id })
+    .eq('id', bookingId).is('invoice_paid_at', null).select('id')
+  if (error) {
+    console.error('Invoice payment write failed:', error)
+    return { ok: false }
+  }
+  if (!claimed?.length) {
+    // Already paid online. A different session means the payer paid twice.
+    if (before.invoice_payment_session_id && before.invoice_payment_session_id !== session.id) {
+      await notifyAdmin(`Possible double payment: invoice ${invoiceLabel}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Invoice ${escHtml(invoiceLabel)} was paid online twice</h2><p>A second card payment of ${money(amountPence)} arrived (Stripe session ${escHtml(session.id)}). Refund one of them in the Stripe dashboard.</p>${dashboardButton('arrears', 'Open arrears')}</div>`, 'invoice-payment')
+    }
+    return { ok: true }
+  }
+
+  const invoice = await loadInvoice({ bookingId })
+  const payerEmail = session.customer_details?.email || invoice?.recipient
+  const emailResult = await sendEmail({
+    to: payerEmail,
+    subject: `Payment received: invoice ${invoiceLabel}`,
+    html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml((invoice?.contactName || '').split(' ')[0] || 'there')},</p><p>Thank you. We've received your payment of <strong>${money(amountPence)}</strong> for invoice <strong>${escHtml(invoiceLabel)}</strong>, and it is now marked as paid.</p><p>Stripe will also email you a card receipt.</p><p>Thank you for booking King's Ark Dance Academy.</p></div>`,
+  })
+  if (!emailResult.sent) console.error('Invoice payment receipt email failed:', emailResult.reason)
+  const alreadyMarkedPaid = before.invoice_status === 'Paid'
+  await notifyAdmin(`Invoice paid: ${invoiceLabel}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Invoice ${escHtml(invoiceLabel)} paid online</h2><p><strong>From:</strong> ${escHtml(invoice?.payerName || '')} (${escHtml(payerEmail || '')})<br><strong>Amount:</strong> ${money(amountPence)}</p>${alreadyMarkedPaid ? '<p style="color:#a3401f"><strong>Note:</strong> this invoice had already been marked paid by hand. If it was also paid by bank transfer, refund one payment in Stripe.</p>' : ''}${dashboardButton('arrears', 'Open arrears')}</div>`, 'invoice-payment')
+  return { ok: true }
+}
+
+/* Public pay pages. The token in the link is the only credential: it is */
+/* random per invoice and only lets someone pay that invoice.            */
+function invoicePayPage(response, { title, body, status = 200 }) {
+  response.status(status).type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${escHtml(title)} · King's Ark Dance Academy</title></head><body style="margin:0;background:#f6f3ea;font-family:Arial,sans-serif;color:#232323;line-height:1.6"><div style="max-width:520px;margin:40px auto;padding:0 16px"><div style="background:#fffdf8;border:1px solid #e4ddc9;border-radius:14px;overflow:hidden"><div style="height:6px;background:linear-gradient(90deg,#0b3d2e,#c9a227)"></div><div style="padding:26px"><p style="margin:0 0 4px;color:#a97e2b;font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:700">King's Ark Dance Academy</p><h1 style="font-family:Georgia,serif;font-weight:500;color:#0b3d2e;margin:0 0 14px;font-size:26px">${escHtml(title)}</h1>${body}</div></div><p style="text-align:center;color:#767066;font-size:12px">Questions? Email <a href="mailto:bookings@kingsarkdance.com" style="color:#0b3d2e">bookings@kingsarkdance.com</a></p></div></body></html>`)
+}
+
+// Checks shared by the pay page and the checkout POST. Returns the invoice, or
+// renders the right explanation page and returns null.
+async function payableInvoice(request, response) {
+  const token = String(request.params.token || '')
+  if (!supabase || !/^[a-f0-9]{32}$/.test(token)) {
+    invoicePayPage(response, { status: 404, title: 'Invoice not found', body: '<p>This payment link is not valid. Please check the link in your invoice email, or contact us.</p>' })
+    return null
+  }
+  const invoice = await loadInvoice({ payToken: token })
+  if (!invoice) {
+    invoicePayPage(response, { status: 404, title: 'Invoice not found', body: '<p>This payment link is not valid. Please check the link in your invoice email, or contact us.</p>' })
+    return null
+  }
+  const label = escHtml(invoice.row.invoice_number || 'This invoice')
+  if (invoice.row.invoice_status === 'Paid' || invoice.row.invoice_paid_at) {
+    invoicePayPage(response, { title: 'Already paid', body: `<p>${label} has already been paid. Thank you, there is nothing more to do.</p>` })
+    return null
+  }
+  if (invoice.row.status === 'Cancelled') {
+    invoicePayPage(response, { title: 'Invoice cancelled', body: `<p>${label} has been cancelled, so no payment is needed. Please contact us if you think this is a mistake.</p>` })
+    return null
+  }
+  if (!stripe || invoice.amountPence < 30) {
+    invoicePayPage(response, { title: 'Online payment unavailable', body: `<p>${label} can't be paid online right now. Please pay by bank transfer using the details on the invoice.</p>` })
+    return null
+  }
+  return invoice
+}
+
+app.get('/api/invoices/pay/:token', async (request, response) => {
+  const invoice = await payableInvoice(request, response)
+  if (!invoice) return
+  const { row, invoiceBooking } = invoice
+  const rows = [
+    ['Invoice', row.invoice_number || 'Not numbered'],
+    ['Billed to', invoice.payerName],
+    ['For', invoiceBooking.invoiceDescription || row.session_type || 'Dance workshop'],
+    ...(row.date ? [['Workshop date', formatDateGB(row.date)]] : []),
+    ...(row.invoice_due_date ? [['Due', formatDateGB(row.invoice_due_date)]] : []),
+  ].map(([label, value]) => `<tr><td style="padding:5px 16px 5px 0;color:#767066;vertical-align:top">${escHtml(label)}</td><td style="padding:5px 0;font-weight:700">${escHtml(value)}</td></tr>`).join('')
+  invoicePayPage(response, {
+    title: `Pay ${money(invoice.amountPence)}`,
+    body: `<table style="border-collapse:collapse;font-size:15px;margin-bottom:18px">${rows}</table><form method="post" action="/api/invoices/pay/${row.invoice_pay_token}"><button type="submit" style="background:#c9a227;color:#0b3d2e;border:0;padding:13px 24px;border-radius:8px;font-weight:700;font-size:16px;cursor:pointer">Pay ${money(invoice.amountPence)} by card →</button></form><p style="color:#767066;font-size:12px;margin-top:14px">You'll be taken to Stripe's secure checkout. You can also pay by bank transfer using the details on your invoice.</p>`,
+  })
+})
+
+app.post('/api/invoices/pay/:token', async (request, response) => {
+  const invoice = await payableInvoice(request, response)
+  if (!invoice) return
+  const { row, invoiceBooking } = invoice
+  const base = `${request.protocol}://${request.get('host')}/api/invoices/pay/${row.invoice_pay_token}`
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      // Card only (includes Apple/Google Pay) so the payment is final when checkout completes.
+      payment_method_types: ['card'],
+      ...(invoice.recipient ? { customer_email: invoice.recipient } : {}),
+      line_items: [{
+        quantity: 1,
+        price_data: {
+          currency: 'gbp',
+          unit_amount: invoice.amountPence,
+          product_data: {
+            name: `Invoice ${row.invoice_number || row.id}`,
+            description: [invoiceBooking.invoiceDescription || row.session_type, row.date ? `Workshop date: ${row.date}` : '', invoice.payerName].filter(Boolean).join(' · ').slice(0, 500),
+          },
+        },
+      }],
+      metadata: {
+        kind: 'invoice_payment',
+        // Not "booking_id": a server without the invoice_payment branch would treat
+        // that as a class booking and overwrite this row. Unknown keys fail harmlessly.
+        invoice_booking_id: row.id,
+        invoice_number: row.invoice_number || '',
+        amount_pence: String(invoice.amountPence),
+      },
+      payment_intent_data: { description: `KADA invoice ${row.invoice_number || row.id}` },
+      success_url: `${base}/done?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${base}/cancelled`,
+    })
+    response.redirect(303, session.url)
+  } catch (error) {
+    console.error('Invoice checkout creation failed:', error)
+    invoicePayPage(response, { status: 502, title: 'Payment could not start', body: '<p>Something went wrong starting the payment. Please go back and try again in a moment.</p>' })
+  }
+})
+
+app.get('/api/invoices/pay/:token/done', async (request, response) => {
+  const token = String(request.params.token || '')
+  const invoice = supabase && /^[a-f0-9]{32}$/.test(token) ? await loadInvoice({ payToken: token }) : null
+  let paid = Boolean(invoice?.row.invoice_paid_at)
+  if (!paid && invoice && stripe && request.query.session_id) {
+    try {
+      const session = await stripe.checkout.sessions.retrieve(String(request.query.session_id))
+      paid = session.metadata?.invoice_booking_id === invoice.row.id && session.payment_status === 'paid'
+    } catch { /* fall through to the processing message */ }
+  }
+  const label = escHtml(invoice?.row.invoice_number || 'your invoice')
+  invoicePayPage(response, paid
+    ? { title: 'Payment received', body: `<p>Thank you! Your payment for ${label} has gone through and the invoice is now marked as paid. A confirmation email is on its way.</p>` }
+    : { title: 'Payment processing', body: `<p>Thanks, we're confirming your payment for ${label}. You'll get a confirmation email shortly. If you don't, please contact us before paying again.</p>` })
+})
+
+app.get('/api/invoices/pay/:token/cancelled', (request, response) => {
+  const token = String(request.params.token || '')
+  invoicePayPage(response, { title: 'Payment not completed', body: `<p>No payment was taken. You can <a href="/api/invoices/pay/${/^[a-f0-9]{32}$/.test(token) ? token : ''}" style="color:#0b3d2e;font-weight:700">try again</a> whenever you're ready, or pay by bank transfer using the details on your invoice.</p>` })
+})
+
+/* Staff endpoints: admins and anyone who can issue invoices. */
+async function requireInvoiceAccess(request, response) {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
+  const { data: profile } = await supabase.from('profiles').select('role,permissions,can_send_invoices').eq('id', user.id).maybeSingle()
+  if (!canIssueInvoices(profile)) { response.status(403).json({ error: 'You need the sales (invoices) permission for this.' }); return null }
+  return { user, profile }
+}
+
+// Every unpaid, sent invoice, grouped by who owes it (school, family, or contact email).
+app.get('/api/invoices/arrears', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  const { data: rows, error } = await supabase.from('bookings').select('*')
+    .eq('invoice_status', 'Sent').is('invoice_paid_at', null).or('status.is.null,status.neq.Cancelled')
+  if (error) {
+    const missing = /invoice_paid_at|invoice_reminders/.test(error.message)
+    return response.status(500).json({ error: missing ? 'Arrears tracking is not set up yet. Apply supabase/migrations/20260926_invoice_arrears.sql in the Supabase SQL Editor.' : `Arrears could not be loaded: ${error.message}` })
+  }
+  const list = rows || []
+  const ids = list.map((row) => row.id)
+  const schoolIds = [...new Set(list.map((row) => row.school_id).filter(Boolean))]
+  const familyIds = [...new Set(list.map((row) => row.family_id).filter(Boolean))]
+  const [schoolsResult, familiesResult, remindersResult] = await Promise.all([
+    schoolIds.length ? supabase.from('schools').select('*').in('id', schoolIds) : { data: [] },
+    familyIds.length ? supabase.from('parent_families').select('id,guardian_name,guardian_email').in('id', familyIds) : { data: [] },
+    ids.length ? supabase.from('invoice_reminders').select('booking_id,kind,template,status,recipient,created_at').in('booking_id', ids).order('created_at') : { data: [] },
+  ])
+  if (remindersResult.error) return response.status(500).json({ error: `Reminder history could not be loaded: ${remindersResult.error.message}` })
+  const schools = new Map((schoolsResult.data || []).map((school) => [school.id, school]))
+  const families = new Map((familiesResult.data || []).map((family) => [family.id, family]))
+  const today = londonNow().date
+
+  const payers = new Map()
+  for (const row of list) {
+    const invoice = buildInvoice(row, schools.get(row.school_id))
+    const family = families.get(row.family_id)
+    const key = row.school_id ? `school:${row.school_id}` : row.family_id ? `family:${row.family_id}` : `email:${(row.contact_email || row.id).toLowerCase()}`
+    const payer = payers.get(key) || {
+      key,
+      kind: row.school_id ? 'school' : row.family_id ? 'family' : 'contact',
+      name: row.school_id ? invoice.payerName : family?.guardian_name || invoice.payerName,
+      email: invoice.recipient || family?.guardian_email || '',
+      schoolId: row.school_id || '',
+      invoices: [],
+    }
+    payers.set(key, payer)
+    const reminders = (remindersResult.data || []).filter((item) => item.booking_id === row.id)
+    const sentReminders = reminders.filter((item) => item.status === 'sent')
+    const overdue = daysOverdue(row.invoice_due_date, today)
+    payer.invoices.push({
+      id: row.id,
+      invoiceNumber: row.invoice_number || '',
+      description: invoice.invoiceBooking.invoiceDescription || row.session_type || '',
+      workshopDate: row.date || '',
+      bookingStatus: row.status || '',
+      amountPence: invoice.amountPence,
+      sentAt: row.invoice_sent_at,
+      dueDate: row.invoice_due_date,
+      daysOverdue: overdue,
+      needsFollowUp: overdue !== null && overdue > REMINDER_FIRM_DAY,
+      remindersSent: sentReminders.length,
+      lastReminderAt: sentReminders.at(-1)?.created_at || null,
+      reminders: reminders.map((item) => ({ kind: item.kind, template: item.template, status: item.status, recipient: item.recipient, at: item.created_at })),
+      recipient: invoice.recipient,
+      payUrl: invoicePayUrl(row),
+    })
+  }
+  const result = [...payers.values()].map((payer) => {
+    payer.invoices.sort((a, b) => (b.daysOverdue ?? -1e9) - (a.daysOverdue ?? -1e9))
+    const overdueDays = payer.invoices.map((item) => item.daysOverdue).filter((value) => value !== null)
+    return {
+      ...payer,
+      amountPence: payer.invoices.reduce((sum, item) => sum + item.amountPence, 0),
+      overdueAmountPence: payer.invoices.filter((item) => item.daysOverdue > 0).reduce((sum, item) => sum + item.amountPence, 0),
+      maxDaysOverdue: overdueDays.length ? Math.max(...overdueDays) : null,
+      remindersSent: payer.invoices.reduce((sum, item) => sum + item.remindersSent, 0),
+      needsFollowUp: payer.invoices.some((item) => item.needsFollowUp),
+    }
+  })
+  response.json({ payers: result, today, schedule: { friendlyFromDay: REMINDER_FRIENDLY_FROM_DAY, firmDay: REMINDER_FIRM_DAY }, isAdmin: access.profile?.role === 'admin' })
+})
+
+app.post('/api/invoices/:bookingId/remind', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  const template = ['friendly', 'firm'].includes(request.body?.template) ? request.body.template : 'friendly'
+  const result = await sendInvoiceReminder({ bookingId: request.params.bookingId, template, kind: 'manual', sentBy: access.user.id })
+  if (!result.sent) return response.status(result.status || 500).json({ error: result.reason })
+  response.json({ sent: true, recipient: result.recipient })
+})
+
+app.get('/api/invoices/reminder-templates', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  response.json({ templates: await reminderTemplates(), defaults: DEFAULT_REMINDER_TEMPLATES, placeholders: REMINDER_PLACEHOLDERS, canEdit: access.profile?.role === 'admin' })
+})
+
+app.post('/api/invoices/reminder-templates', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  if (access.profile?.role !== 'admin') return response.status(403).json({ error: 'Only admins can change the reminder wording.' })
+  const value = Object.fromEntries(Object.keys(DEFAULT_REMINDER_TEMPLATES).map((key) => [key, {
+    subject: String(request.body?.[key]?.subject || '').trim().slice(0, 200),
+    body: String(request.body?.[key]?.body || '').trim().slice(0, 5000),
+  }]))
+  const { error } = await supabase.from('app_settings').upsert({ key: 'invoice_reminders', value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+  if (error) return response.status(500).json({ error: `Reminder wording could not be saved: ${error.message}` })
+  response.json({ templates: await reminderTemplates() })
+})
+
+// Runs the same check as the hourly scheduler, immediately.
+app.post('/api/invoices/reminders/run', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  response.json(await runInvoiceReminders())
+})
 
 // Current date and wall-clock minutes in Europe/London ,  class times are UK local.
 function londonNow() {
