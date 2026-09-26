@@ -26,6 +26,7 @@ const PaymentLinkPage = lazy(() => import('./PaymentLinkPage').then((module) => 
 const PaymentLinksPage = lazy(() => import('./ops/PaymentLinksPage').then((module) => ({ default: module.PaymentLinksPage })))
 const AttendancePage = lazy(() => import('./ops/AttendancePage').then((module) => ({ default: module.AttendancePage })))
 const HomeworkPage = lazy(() => import('./ops/HomeworkPage').then((module) => ({ default: module.HomeworkPage })))
+const FormationsPage = lazy(() => import('./ops/FormationsPage').then((module) => ({ default: module.FormationsPage })))
 const ArrearsPage = lazy(() => import('./ops/ArrearsPage').then((module) => ({ default: module.ArrearsPage })))
 const ParentDashboard = lazy(() => import('./ParentDashboard').then((module) => ({ default: module.ParentDashboard })))
 
@@ -1524,6 +1525,7 @@ function App() {
         ...(isAdmin || can('students') ? [{ key: 'students', label: 'Students' }, { key: 'class-schedule', label: 'Class schedule' }] : []),
         ...(can('attendance') ? [{ key: 'attendance', label: 'Attendance' }] : []),
         ...(can('homework') ? [{ key: 'homework', label: 'Homework' }] : []),
+        ...(can('formations') ? [{ key: 'formations', label: 'Formations' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'jobs', label: 'Job board' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'template', label: 'Workshop template' }] : []),
       ],
@@ -1729,6 +1731,7 @@ function App() {
           {can('sales') && tab === 'payment-links' && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><PaymentLinksPage focusLinkId={paymentLinkFocus} onFocusHandled={() => setPaymentLinkFocus('')} /></Suspense>}
           {can('attendance') && tab === 'attendance' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><AttendancePage session={session} isAdmin={isAdmin} /></Suspense>}
           {can('homework') && tab === 'homework' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><HomeworkPage session={session} /></Suspense>}
+          {can('formations') && tab === 'formations' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><FormationsPage session={session} /></Suspense>}
           {can('sales') && tab === 'arrears' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><ArrearsPage session={session} /></Suspense>}
           {(isAdmin || can('sales')) && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
           {(isAdmin || can('students')) && tab === 'class-schedule' && <ClassSchedulePage sessions={classSessions} onSave={saveClassSession} onAdd={addClassSession} onDelete={deleteClassSession} />}

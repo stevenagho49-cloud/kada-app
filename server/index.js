@@ -557,7 +557,7 @@ app.post('/api/admin/invoice-permissions', async (request, response) => {
 /* accounts. Roles/permissions/job titles live on profiles; emails     */
 /* come from auth.users (service role only).                           */
 /* ------------------------------------------------------------------ */
-const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'attendance', 'homework', 'events', 'messages', 'site', 'sales']
+const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'attendance', 'homework', 'formations', 'events', 'messages', 'site', 'sales']
 const cleanPermissions = (value) => (Array.isArray(value) ? value.filter((item) => TEAM_PERMISSIONS.includes(item)) : [])
 
 async function requireAdmin(request, response) {
