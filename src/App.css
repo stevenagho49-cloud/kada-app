@@ -1589,6 +1589,13 @@ footer {
     flex-direction: column;
   }
 
+  /* Stacked on a phone: fill the screen width. Without this, the inline
+     align-items: flex-start sizes the content column to its widest table
+     and the page is clipped instead of the table scrolling. */
+  .ops-layout > * {
+    align-self: stretch;
+  }
+
   .ops-sidebar {
     width: 100%;
     position: static;

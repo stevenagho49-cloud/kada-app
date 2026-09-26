@@ -14,6 +14,8 @@ import { TeamPage } from './ops/TeamPage'
 import { SettingsPage } from './ops/SettingsPage'
 import { CampaignsPage } from './ops/CampaignsPage'
 import { SiteAnalytics } from './ops/SiteAnalytics'
+import { useAttendanceRows, AttendanceDots } from './ops/attendanceShared'
+import { childStats, formatRate } from './ops/attendanceStats'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
 import { applySiteFavicon } from './lib/useSiteLogo'
 
@@ -22,6 +24,7 @@ const EventTicketPage = lazy(() => import('./EventTicketPage').then((module) => 
 const LegalPage = lazy(() => import('./LegalPages').then((module) => ({ default: module.LegalPage })))
 const PaymentLinkPage = lazy(() => import('./PaymentLinkPage').then((module) => ({ default: module.PaymentLinkPage })))
 const PaymentLinksPage = lazy(() => import('./ops/PaymentLinksPage').then((module) => ({ default: module.PaymentLinksPage })))
+const AttendancePage = lazy(() => import('./ops/AttendancePage').then((module) => ({ default: module.AttendancePage })))
 const ArrearsPage = lazy(() => import('./ops/ArrearsPage').then((module) => ({ default: module.ArrearsPage })))
 const ParentDashboard = lazy(() => import('./ParentDashboard').then((module) => ({ default: module.ParentDashboard })))
 
@@ -530,8 +533,11 @@ function NeedsAttention({ jobs, bookings, instructors, messages, schools, isAdmi
   return <Card style={{ padding: 18, marginBottom: 20, borderColor: '#ead7a3', background: '#fff8e8' }}><h3 style={{ margin: '0 0 10px', color: emerald }}>Needs attention</h3>{notifications.map((notification) => <div key={notification.id} style={{ display: 'flex', alignItems: 'center', gap: 8, borderTop: `1px solid ${rule}` }}><button type="button" onClick={notification.onOpen} style={{ flex: 1, display: 'block', padding: '9px 0', textAlign: 'left', border: 0, background: 'transparent', cursor: 'pointer', color: ink }}>{notification.label}</button><button type="button" aria-label={`Dismiss ${notification.label}`} title="Dismiss notification" onClick={() => onDismiss(notification.id)} style={{ border: 0, background: 'transparent', color: muted, cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 6 }}>×</button></div>)}</Card>
 }
 
-function StudentPlansView({ students }) {
-  return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Students</h2><p style={{ color: muted }}>Current membership status by student.</p><Card>{students.length ? students.map((student) => <div key={student.id} style={{ padding: '13px 18px', borderTop: `1px solid ${rule}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><strong>{student.name}</strong><Badge text={student.membershipStatus} tone={student.membershipStatus === 'active' ? 'green' : student.membershipStatus === 'cancelled' ? 'red' : 'gold'} /></div>) : <p style={{ padding: 18, color: muted }}>No students found.</p>}</Card></div>
+function StudentPlansView({ students, canSeeAttendance }) {
+  // Attendance summary per child, for users who can read the register (RLS).
+  const { rows: attendanceRows, error: attendanceError } = useAttendanceRows(canSeeAttendance)
+  const attendance = new Map(childStats(attendanceRows || []).map((child) => [child.studentId, child]))
+  return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Students</h2><p style={{ color: muted }}>Current membership status{canSeeAttendance ? ' and attendance' : ''} by student.</p>{attendanceError && <p style={{ color: '#a3401f' }}>{attendanceError}</p>}<Card>{students.length ? students.map((student) => { const summary = attendance.get(student.id); return <div key={student.id} style={{ padding: '13px 18px', borderTop: `1px solid ${rule}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}><div><strong>{student.name}</strong>{student.className && <div style={{ fontSize: 12, color: muted }}>{student.className}</div>}</div><div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>{canSeeAttendance && (summary ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13 }}><span>Attended <strong>{summary.present}</strong> of {summary.marked} · <strong>{formatRate(summary.rate)}</strong></span><AttendanceDots history={summary.history} size={10} /></span> : <span style={{ fontSize: 12, color: muted }}>{attendanceRows ? 'No attendance marked yet' : ''}</span>)}<Badge text={student.membershipStatus} tone={student.membershipStatus === 'active' ? 'green' : student.membershipStatus === 'cancelled' ? 'red' : 'gold'} /></div></div> }) : <p style={{ padding: 18, color: muted }}>No students found.</p>}</Card></div>
 }
 
 function DbsUpload({ instructor, onUpload, uploading }) {
@@ -1515,6 +1521,7 @@ function App() {
         ...(isAdmin || can('schools') ? [{ key: 'schools', label: 'Schools' }] : []),
         ...(isAdmin ? [{ key: 'instructors', label: 'Instructors' }] : []),
         ...(isAdmin || can('students') ? [{ key: 'students', label: 'Students' }, { key: 'class-schedule', label: 'Class schedule' }] : []),
+        ...(can('attendance') ? [{ key: 'attendance', label: 'Attendance' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'jobs', label: 'Job board' }] : []),
         ...(isAdmin || isInstructor ? [{ key: 'template', label: 'Workshop template' }] : []),
       ],
@@ -1676,7 +1683,7 @@ function App() {
           </div>
           )}
 
-          {tab === 'students' && (isAdmin || can('students')) && <StudentPlansView students={students} />}
+          {tab === 'students' && (isAdmin || can('students')) && <StudentPlansView students={students} canSeeAttendance={can('attendance')} />}
           {tab === 'invoice-settings' && (isAdmin || can('sales')) && <InvoiceSettings settings={invoiceSettings} onSave={saveInvoiceSettings} saving={invoiceSettingsSaving} />}
           {tab === 'contacts' && can('contacts') && <ContactsPage />}
           {tab === 'team' && isAdmin && session && <TeamPage session={session} />}
@@ -1718,6 +1725,7 @@ function App() {
           {can('site') && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} />}
           {can('site') && tab === 'site-content' && <SiteContentPage content={siteContent} onSave={saveSiteContent} />}
           {can('sales') && tab === 'payment-links' && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><PaymentLinksPage focusLinkId={paymentLinkFocus} onFocusHandled={() => setPaymentLinkFocus('')} /></Suspense>}
+          {can('attendance') && tab === 'attendance' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><AttendancePage session={session} /></Suspense>}
           {can('sales') && tab === 'arrears' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><ArrearsPage session={session} /></Suspense>}
           {(isAdmin || can('sales')) && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
           {(isAdmin || can('students')) && tab === 'class-schedule' && <ClassSchedulePage sessions={classSessions} onSave={saveClassSession} onAdd={addClassSession} onDelete={deleteClassSession} />}
