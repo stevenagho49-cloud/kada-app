@@ -135,7 +135,7 @@ async function notificationSettings() {
 
 async function notifyAdmin(subject, html, type = '') {
   const settings = await notificationSettings()
-  const toggleKey = { 'new-booking': 'newBooking', contact: 'newContact', jobs: 'jobAlerts', 'event-ticket': 'eventSales' }[type]
+  const toggleKey = { 'new-booking': 'newBooking', contact: 'newContact', jobs: 'jobAlerts', 'event-ticket': 'eventSales', 'payment-link': 'paymentLinkSales' }[type]
   if (settings && toggleKey && settings[toggleKey] === false) return { sent: false, reason: `${toggleKey} alerts disabled in Settings` }
   const to = settings?.notifyEmail || ADMIN_EMAIL
   if (!to) return { sent: false, reason: 'ADMIN_NOTIFICATION_EMAIL not set' }
@@ -263,6 +263,13 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       return response.json({ received: true })
     }
 
+    // Payment links (/pay/<slug>): also separate from the class booking flow below.
+    if (metadata.kind === 'payment_link') {
+      const result = await recordPaymentLinkOrder(session)
+      if (!result.ok) return response.status(500).json({ error: 'Payment link order write failed' })
+      return response.json({ received: true })
+    }
+
     const planType = metadata.plan_type || 'day_pass'
     const { data: existingStudents } = await supabase.from('students').select('*').eq('booking_id', metadata.booking_id)
     const studentList = existingStudents || []
@@ -373,8 +380,8 @@ const tooMany = { error: 'Too many attempts. Please wait a few minutes, then try
 const checkoutLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 const lookupLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 const contactLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
-app.use(['/api/stripe/create-checkout-session', '/api/stripe/create-event-checkout'], checkoutLimiter)
-app.use(['/api/stripe/event-order', '/api/stripe/class-booking'], lookupLimiter)
+app.use(['/api/stripe/create-checkout-session', '/api/stripe/create-event-checkout', '/api/stripe/create-payment-link-checkout'], checkoutLimiter)
+app.use(['/api/stripe/event-order', '/api/stripe/class-booking', '/api/stripe/payment-link-order'], lookupLimiter)
 app.use('/api/public/contact', contactLimiter)
 
 // Health check for Render's uptime monitor ,  confirms the server is up and can
@@ -1655,6 +1662,209 @@ app.get('/api/stripe/event-order/:sessionId/calendar.ics', async (request, respo
   if (!orderEvent?.event_date) return response.status(400).json({ error: 'Event date is not set.' })
   const ics = buildIcs({ title: orderEvent.title, date: orderEvent.event_date, startTime: orderEvent.event_time, endTime: orderEvent.event_end_time, location: orderEvent.location, description: orderEvent.description, url: `${PUBLIC_BASE_URL}/event/${order.event_id}` })
   response.type('text/calendar').set('Content-Disposition', 'attachment; filename="event.ics"').send(ics)
+})
+
+// ------------------------------------------------------------------
+// Payment links (/pay/<slug>) ,  one priced item plus admin-defined custom
+// fields (e.g. T-shirt size). Same ad-hoc price_data approach as event
+// tickets; the Day Pass/Membership Stripe products are never touched.
+// A pending order row is written before checkout because the buyer's answers
+// can exceed Stripe's 500-character metadata limit; the webhook flips it to paid.
+// ------------------------------------------------------------------
+const PAYMENT_LINK_ANSWER_MAX = 500
+
+// The link's field definitions, cleaned the same way the admin form saves them.
+function paymentLinkFields(link) {
+  return (Array.isArray(link?.fields) ? link.fields : [])
+    .filter((field) => field?.id && String(field.label || '').trim())
+    .map((field) => ({
+      id: String(field.id),
+      label: String(field.label).trim(),
+      type: field.type === 'select' ? 'select' : 'text',
+      options: (Array.isArray(field.options) ? field.options : []).map((option) => String(option).trim()).filter(Boolean),
+      required: Boolean(field.required),
+    }))
+}
+
+app.post('/api/stripe/create-payment-link-checkout', async (request, response) => {
+  if (!stripe || !supabase) return response.status(503).json({ error: 'Payments are not configured on the server.' })
+  const { slug, buyerName, buyerEmail, answers = {} } = request.body || {}
+  const cleanName = String(buyerName || '').trim().slice(0, 120)
+  const cleanEmail = String(buyerEmail || '').trim().slice(0, 200)
+  if (!slug || !cleanName || !/.+@.+\..+/.test(cleanEmail)) return response.status(400).json({ error: 'Your name and a valid email are required.' })
+
+  const { data: link, error: linkError } = await supabase.from('payment_links').select('*').eq('slug', String(slug)).maybeSingle()
+  if (linkError) return response.status(500).json({ error: 'This payment page could not be loaded.' })
+  if (!link || !link.active) return response.status(404).json({ error: 'This payment link is no longer taking payments.' })
+  const unitAmount = Math.round(Number(link.price_pence))
+  if (!Number.isInteger(unitAmount) || unitAmount < 30) return response.status(400).json({ error: 'This payment link is not priced correctly yet.' })
+
+  // Validate against the link's own definitions ,  unknown keys are ignored,
+  // dropdown answers must be one of the admin's options.
+  const answerList = []
+  for (const field of paymentLinkFields(link)) {
+    const value = String(answers?.[field.id] ?? '').trim().slice(0, PAYMENT_LINK_ANSWER_MAX)
+    if (field.required && !value) return response.status(400).json({ error: `"${field.label}" is required.` })
+    if (field.type === 'select' && value && !field.options.includes(value)) return response.status(400).json({ error: `Please choose a valid option for "${field.label}".` })
+    answerList.push({ fieldId: field.id, label: field.label, value })
+  }
+
+  const orderId = `plink-${crypto.randomUUID()}`
+  const { error: orderError } = await supabase.from('payment_link_orders').insert({
+    id: orderId,
+    payment_link_id: link.id,
+    link_name: link.name,
+    buyer_name: cleanName,
+    buyer_email: cleanEmail,
+    amount_pence: unitAmount,
+    answers: answerList,
+    payment_status: 'pending',
+  })
+  if (orderError) {
+    console.error('Payment link order creation failed:', orderError)
+    return response.status(500).json({ error: 'Checkout could not be started. Please try again.' })
+  }
+
+  // Answers also go on the Stripe line item so the Stripe receipt and dashboard show them.
+  const answerSummary = answerList.filter((answer) => answer.value).map((answer) => `${answer.label}: ${answer.value}`).join(' · ')
+  const productDescription = [link.description, answerSummary].filter(Boolean).join(' · ').slice(0, 500)
+  const answersJson = JSON.stringify(answerList)
+  let clientUrl = process.env.CLIENT_URL || 'http://localhost:5173'
+  try { clientUrl = new URL(request.headers.origin || request.headers.referer).origin } catch { /* keep the default */ }
+  let session
+  try {
+    session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      customer_email: cleanEmail,
+      line_items: [{
+        quantity: 1,
+        price_data: {
+          currency: 'gbp',
+          unit_amount: unitAmount,
+          product_data: { name: link.name, ...(productDescription ? { description: productDescription } : {}) },
+        },
+      }],
+      metadata: {
+        kind: 'payment_link',
+        order_id: orderId,
+        payment_link_id: link.id,
+        link_name: link.name.slice(0, 500),
+        buyer_name: cleanName,
+        buyer_email: cleanEmail,
+        amount_pence: String(unitAmount),
+        // Backup copy for the webhook in case the pending row is ever missing; omitted when too long.
+        ...(answersJson.length <= 500 ? { answers: answersJson } : {}),
+      },
+      success_url: `${clientUrl}/pay/${link.slug}?purchase=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${clientUrl}/pay/${link.slug}`,
+    })
+  } catch (stripeError) {
+    console.error('Payment link checkout creation failed:', stripeError)
+    await supabase.from('payment_link_orders').delete().eq('id', orderId).eq('payment_status', 'pending')
+    return response.status(502).json({ error: 'Checkout could not be started. Please try again.' })
+  }
+  const { error: sessionSaveError } = await supabase.from('payment_link_orders').update({ stripe_checkout_session_id: session.id }).eq('id', orderId)
+  if (sessionSaveError) console.error('Payment link session id save failed (webhook will still match by order id):', sessionSaveError)
+  response.json({ url: session.url })
+})
+
+// Webhook handler for kind=payment_link. Returns { ok: false } on a failed
+// write so the webhook answers non-200 and Stripe retries.
+async function recordPaymentLinkOrder(session) {
+  const metadata = session.metadata || {}
+  const orderId = metadata.order_id
+  if (!orderId) {
+    console.error('Payment link webhook without order_id:', session.id)
+    return { ok: true } // nothing we could ever write; don't make Stripe retry forever
+  }
+  const paidFields = {
+    payment_status: 'paid',
+    stripe_checkout_session_id: session.id,
+    buyer_email: session.customer_details?.email || metadata.buyer_email || '',
+    amount_pence: Number(session.amount_total ?? metadata.amount_pence ?? 0),
+    paid_at: new Date().toISOString(),
+  }
+  const { data: existing, error: loadError } = await supabase.from('payment_link_orders').select('id,payment_status').eq('id', orderId).maybeSingle()
+  if (loadError) {
+    console.error('Payment link order lookup failed:', loadError)
+    return { ok: false }
+  }
+  if (existing) {
+    // Only pending -> paid. A redelivery (already paid) or a refunded order is left alone.
+    if (existing.payment_status === 'pending') {
+      const { error } = await supabase.from('payment_link_orders').update(paidFields).eq('id', orderId).eq('payment_status', 'pending')
+      if (error) {
+        console.error('Payment link order update failed:', error)
+        return { ok: false }
+      }
+    }
+  } else {
+    // The pending row is missing (shouldn't happen) ,  rebuild it from metadata.
+    let answers = []
+    try { answers = JSON.parse(metadata.answers || '[]') } catch { answers = [] }
+    const { error } = await supabase.from('payment_link_orders').insert({
+      id: orderId,
+      payment_link_id: metadata.payment_link_id,
+      link_name: metadata.link_name || 'Payment',
+      buyer_name: metadata.buyer_name || session.customer_details?.name || 'Customer',
+      answers: Array.isArray(answers) ? answers : [],
+      ...paidFields,
+    })
+    if (error) {
+      console.error('Payment link order creation failed:', error)
+      return { ok: false }
+    }
+  }
+
+  // Confirmation email exactly once per order ,  same claim pattern as event
+  // tickets: set confirmation_sent_at only where still null; a redelivery skips.
+  const { data: claimed } = await supabase
+    .from('payment_link_orders')
+    .update({ confirmation_sent_at: new Date().toISOString() })
+    .eq('id', orderId)
+    .is('confirmation_sent_at', null)
+    .select('*')
+  const order = (claimed || [])[0]
+  if (!order) return { ok: true }
+
+  const answerRows = (Array.isArray(order.answers) ? order.answers : []).filter((answer) => String(answer?.value || '').trim())
+  const detailRows = [
+    ['Item', order.link_name],
+    ...answerRows.map((answer) => [answer.label, answer.value]),
+    ['Amount paid', money(order.amount_pence)],
+  ].map(([label, value]) => `<tr><td style="padding:6px 16px 6px 0;color:#767066;vertical-align:top">${escHtml(label)}</td><td style="padding:6px 0;font-weight:700">${escHtml(value)}</td></tr>`).join('')
+  const emailResult = await sendEmail({
+    to: order.buyer_email,
+    subject: `Payment confirmed: ${order.link_name}`,
+    html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>Thank you, your payment is confirmed ✅</h2><p>Hi ${escHtml(order.buyer_name.split(' ')[0] || 'there')},</p><p>We've received your payment. Here's what you bought and the details you gave us${answerRows.length ? ', so please check they are right' : ''}:</p><table style="border-collapse:collapse;font-size:15px">${detailRows}</table><p>${answerRows.length ? 'If anything above needs changing, just reply to this email and let us know. ' : ''}Stripe will also email you a payment receipt.</p><p>Thank you for supporting King's Ark Dance Academy.</p></div>`,
+  })
+  // If the send failed, release the claim so a webhook retry can send it.
+  if (!emailResult.sent) {
+    await supabase.from('payment_link_orders').update({ confirmation_sent_at: null }).eq('id', orderId)
+    console.error('Payment link confirmation email failed:', emailResult.reason)
+  }
+  await notifyAdmin(`New payment: ${order.link_name}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New payment: ${escHtml(order.link_name)}</h2><p><strong>Buyer:</strong> ${escHtml(order.buyer_name)} (${escHtml(order.buyer_email)})<br>${answerRows.map((answer) => `<strong>${escHtml(answer.label)}:</strong> ${escHtml(answer.value)}<br>`).join('')}<strong>Amount:</strong> ${money(order.amount_pence)}</p>${dashboardButton('payment-links', 'See who has paid', order.payment_link_id)}</div>`, 'payment-link')
+  return { ok: true }
+}
+
+// Public order lookup for the post-payment success screen. The Stripe session id
+// acts as the secret (same as event-order). Pending rows read as "not yet" so the
+// page keeps polling until the webhook lands.
+app.get('/api/stripe/payment-link-order/:sessionId', async (request, response) => {
+  if (!supabase) return response.status(503).json({ error: 'Supabase server storage is not configured.' })
+  const { data: order, error } = await supabase.from('payment_link_orders').select('*').eq('stripe_checkout_session_id', request.params.sessionId).maybeSingle()
+  if (error) return response.status(500).json({ error: 'Order could not be loaded.' })
+  if (!order || order.payment_status === 'pending') return response.status(404).json({ status: 'pending' })
+  response.json({
+    status: order.payment_status,
+    order: {
+      linkName: order.link_name,
+      amountPence: order.amount_pence,
+      answers: (Array.isArray(order.answers) ? order.answers : []).filter((answer) => String(answer?.value || '').trim()),
+      buyerName: order.buyer_name,
+      buyerEmail: order.buyer_email,
+    },
+  })
 })
 
 // Public booking lookup for the post-payment class success screen. The Stripe

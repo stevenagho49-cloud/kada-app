@@ -1799,3 +1799,51 @@ footer {
     grid-template-columns: 1fr;
   }
 }
+
+/* Payment links admin: two-up form rows stack on phones; summary strip wraps. */
+.plink-form-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 12px;
+}
+
+.plink-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 8px;
+}
+
+.plink-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 28px;
+  align-items: flex-start;
+  background: #f6f3ea;
+  border: 1px solid #e4ddc9;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 14px 0 16px;
+}
+
+.plink-stat-value {
+  font-family: 'Iowan Old Style', Georgia, serif;
+  font-size: 24px;
+  font-weight: 700;
+  color: #232323;
+  line-height: 1.1;
+}
+
+.plink-stat-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #767066;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+@media (max-width: 560px) {
+  .plink-form-row,
+  .plink-field-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

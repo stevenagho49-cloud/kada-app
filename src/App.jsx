@@ -20,6 +20,8 @@ import { applySiteFavicon } from './lib/useSiteLogo'
 // Routable screens loaded on demand ,  the public homepage bundle doesn't pay for them.
 const EventTicketPage = lazy(() => import('./EventTicketPage').then((module) => ({ default: module.EventTicketPage })))
 const LegalPage = lazy(() => import('./LegalPages').then((module) => ({ default: module.LegalPage })))
+const PaymentLinkPage = lazy(() => import('./PaymentLinkPage').then((module) => ({ default: module.PaymentLinkPage })))
+const PaymentLinksPage = lazy(() => import('./ops/PaymentLinksPage').then((module) => ({ default: module.PaymentLinksPage })))
 const ParentDashboard = lazy(() => import('./ParentDashboard').then((module) => ({ default: module.ParentDashboard })))
 
 const emerald = '#0b3d2e'
@@ -120,9 +122,12 @@ const parseStored = (key, fallback) => {
 // shared before this change) still resolve: parseRoute falls back to the hash, and the
 // route-sync effect below rewrites the URL to its real path with history.replaceState.
 function parseRoute() {
-  if (typeof window === 'undefined') return { eventId: null, legalId: null }
+  if (typeof window === 'undefined') return { eventId: null, legalId: null, paySlug: null }
   const pathname = window.location.pathname
   const hash = window.location.hash || ''
+  // Payment links (/pay/<slug>) were born as real paths ,  no legacy hash form to support.
+  const paySlug = pathname.match(/^\/pay\/([a-z0-9-]+)\/?$/)?.[1] || null
+  if (paySlug) return { eventId: null, legalId: null, paySlug }
   // 1. Real URL path ,  the current, shareable format.
   let eventId = pathname.match(/^\/event\/([\w-]+)/)?.[1] || null
   let legalId = pathname.match(/^\/(privacy|terms|accessibility)$/)?.[1] || null
@@ -705,6 +710,8 @@ function App() {
   const [eventModal, setEventModal] = useState(null)
   const [eventPageId, setEventPageId] = useState(() => parseRoute().eventId)
   const [legalPageId, setLegalPageId] = useState(() => parseRoute().legalId)
+  const [payLinkSlug, setPayLinkSlug] = useState(() => parseRoute().paySlug)
+  const [paymentLinkFocus, setPaymentLinkFocus] = useState('')
   const [siteEvents, setSiteEvents] = useState([])
   const [sectionLayout, setSectionLayout] = useState([])
   const [siteContent, setSiteContent] = useState({})
@@ -734,7 +741,7 @@ function App() {
   // Anonymous site analytics: record each public navigation (path + referrer
   // only, no personal data). Skips the admin/ops dashboard itself.
   useEffect(() => {
-    if (view !== 'site' && !eventPageId && !legalPageId) return undefined
+    if (view !== 'site' && !eventPageId && !legalPageId && !payLinkSlug) return undefined
     const track = () => {
       fetch('/api/track/pageview', {
         method: 'POST',
@@ -751,7 +758,7 @@ function App() {
       window.removeEventListener('popstate', track)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, eventPageId, legalPageId])
+  }, [view, eventPageId, legalPageId, payLinkSlug])
 
   // Public pages live at /event/<id> (ticketed events) and /privacy /terms
   // /accessibility (legal pages) ,  all reachable by guests without sign-in.
@@ -761,7 +768,7 @@ function App() {
     const syncRoute = () => {
       const hash = window.location.hash || ''
       if (hash.includes('access_token=') || hash.includes('token_hash=')) return // Supabase/invite auth hash being consumed
-      const { eventId, legalId } = parseRoute()
+      const { eventId, legalId, paySlug } = parseRoute()
       // Migrate an already-shared #event/<id> or #privacy-style link to its real
       // URL path so old links keep working instead of breaking.
       if (eventId && window.location.pathname !== `/event/${eventId}`) {
@@ -771,6 +778,7 @@ function App() {
       }
       setEventPageId(eventId)
       setLegalPageId(legalId)
+      setPayLinkSlug(paySlug)
     }
     window.addEventListener('hashchange', syncRoute)
     window.addEventListener('popstate', syncRoute)
@@ -923,6 +931,7 @@ function App() {
         if (pending.tab === 'schools') { const found = (nextSchools || []).find((item) => item.id === pending.id); if (found) setSchoolRecord(found) }
         if (pending.tab === 'instructors') { const found = (nextInstructors || []).find((item) => item.id === pending.id); if (found) setInstructorModal(found) }
         if (pending.tab === 'events-published' || pending.tab === 'events-drafts' || pending.tab === 'events-archived') { const found = (nextEvents || []).map(normalizeEvent).find((item) => item.id === pending.id); if (found) setEventModal(found) }
+        if (pending.tab === 'payment-links') setPaymentLinkFocus(pending.id)
       }
     }
 
@@ -1053,7 +1062,7 @@ function App() {
       observer.disconnect()
       window.removeEventListener('scroll', onScroll)
     }
-  }, [view, authReady, siteEvents, sectionLayout, eventPageId, legalPageId])
+  }, [view, authReady, siteEvents, sectionLayout, eventPageId, legalPageId, payLinkSlug])
 
   const conflicts = useMemo(() => {
     const map = {}
@@ -1522,6 +1531,7 @@ function App() {
       label: 'Sales',
       children: [
         { key: 'subscriptions', label: 'Subscriptions' },
+        { key: 'payment-links', label: 'Payment links' },
         { key: 'invoice-settings', label: 'Invoice settings' },
       ],
     }] : []),
@@ -1551,6 +1561,7 @@ function App() {
   if (!authReady) return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', fontFamily: 'sans-serif' }}>Loading...</div>
   if (eventPageId) return <Suspense fallback={routeFallback}><EventTicketPage eventId={eventPageId} onBack={() => { window.history.pushState(null, '', '/'); setEventPageId(null) }} /></Suspense>
   if (legalPageId) return <Suspense fallback={routeFallback}><LegalPage page={legalPageId} onBack={() => { window.history.pushState(null, '', '/'); setLegalPageId(null) }} /></Suspense>
+  if (payLinkSlug) return <Suspense fallback={routeFallback}><PaymentLinkPage slug={payLinkSlug} onBack={() => { window.history.pushState(null, '', '/'); setPayLinkSlug(null) }} /></Suspense>
   if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
   if (view === 'ops' && session && needsPasswordSetup) return <AuthScreen requirePasswordSetup onAuthenticated={() => { setNeedsPasswordSetup(false); setView('ops') }} />
   if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
@@ -1697,6 +1708,7 @@ function App() {
           {can('events') && (tab === 'events-published' || tab === 'events-drafts' || tab === 'events-archived') && <EventsPage view={tab === 'events-published' ? 'published' : tab === 'events-archived' ? 'archived' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} session={session} />}
           {can('site') && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} />}
           {can('site') && tab === 'site-content' && <SiteContentPage content={siteContent} onSave={saveSiteContent} />}
+          {can('sales') && tab === 'payment-links' && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><PaymentLinksPage focusLinkId={paymentLinkFocus} onFocusHandled={() => setPaymentLinkFocus('')} /></Suspense>}
           {(isAdmin || can('sales')) && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
           {(isAdmin || can('students')) && tab === 'class-schedule' && <ClassSchedulePage sessions={classSessions} onSave={saveClassSession} onAdd={addClassSession} onDelete={deleteClassSession} />}
           {tab === 'template' && <TemplateView template={template} onSave={saveTemplate} />}
