@@ -48,7 +48,7 @@ function Section({ title, description, onSave, saving, dirty, children }) {
   )
 }
 
-export function SettingsPage({ content, onSaveContent }) {
+export function SettingsPage({ content, onSaveContent, session }) {
   // site_content-backed drafts (public website reads these)
   const [contact, setContact] = useState({ email: '', phone: '', address: '', ...(content.contact || {}) })
   const [branding, setBranding] = useState({ logoUrl: '', ...(content.branding || {}) })
@@ -57,7 +57,7 @@ export function SettingsPage({ content, onSaveContent }) {
   const [savingKey, setSavingKey] = useState('')
 
   // app_settings-backed notifications (admin-only, read by the server)
-  const [notifications, setNotifications] = useState({ notifyEmail: '', newBooking: true, newContact: true, jobAlerts: true, eventSales: true, paymentLinkSales: true, invoicePayments: true })
+  const [notifications, setNotifications] = useState({ notifyEmail: '', newBooking: true, newContact: true, jobAlerts: true, eventSales: true, paymentLinkSales: true, invoicePayments: true, newSignups: true })
   const [notificationsLoaded, setNotificationsLoaded] = useState(false)
 
   useEffect(() => {
@@ -135,10 +135,13 @@ export function SettingsPage({ content, onSaveContent }) {
             <Toggle label="Payment link payments" checked={notifications.paymentLinkSales} onChange={(value) => editNotifications({ paymentLinkSales: value })} />
             <Toggle label="Invoices paid online" checked={notifications.invoicePayments} onChange={(value) => editNotifications({ invoicePayments: value })} />
             <Toggle label="Website contact form messages" checked={notifications.newContact} onChange={(value) => editNotifications({ newContact: value })} />
-            <Toggle label="Job board & DBS alerts" hint="Instructor claims and certificate uploads" checked={notifications.jobAlerts} onChange={(value) => editNotifications({ jobAlerts: value })} />
+            <Toggle label="New sign-ups" hint="Parents, instructors and schools creating an account on the website" checked={notifications.newSignups} onChange={(value) => editNotifications({ newSignups: value })} />
+            <Toggle label="Job board & DBS alerts" hint="Job claims, accepted jobs, sessions marked done and DBS certificate uploads" checked={notifications.jobAlerts} onChange={(value) => editNotifications({ jobAlerts: value })} />
           </>
         )}
       </Section>
+
+      {session && <DiscountCodesSection session={session} />}
 
       <Section
         title="Branding"
@@ -196,6 +199,129 @@ export function SettingsPage({ content, onSaveContent }) {
           <li><strong>Old spreadsheet data</strong> ,  Operations → Contacts → Import Excel / CSV</li>
         </ul>
       </Section>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Discount codes. Stored server-side (app_settings 'discount_codes',   */
+/* admin-only) and checked again at every checkout. A code works on     */
+/* any mix of class bookings, school bookings and event tickets, takes  */
+/* a percentage or a fixed £ amount off, and can be switched off        */
+/* without deleting it.                                                 */
+/* ------------------------------------------------------------------ */
+const DISCOUNT_SCOPES = [
+  { key: 'class', label: 'Parent class bookings' },
+  { key: 'school', label: 'School bookings (taken off the invoice)' },
+  { key: 'event', label: 'Event tickets' },
+]
+const emptyDiscount = { id: '', code: '', description: '', appliesTo: ['class'], type: 'percent', value: '', membershipDuration: 'once', active: true }
+const describeDiscount = (code) => (code.type === 'percent' ? `${code.percentOff}% off` : `£${(code.amountOffPence / 100).toFixed(2)} off`)
+
+function DiscountCodesSection({ session }) {
+  const [codes, setCodes] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [editing, setEditing] = useState(null)
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const request = async (method, body) => {
+    const response = await fetch('/api/admin/discount-codes', { method, headers: { Authorization: `Bearer ${session.access_token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(result.error || 'Request failed.')
+    return result
+  }
+
+  useEffect(() => {
+    let mounted = true
+    request('GET').then((result) => { if (mounted) setCodes(result.codes || []) }).catch((loadError) => { if (mounted) setError(loadError.message) }).finally(() => { if (mounted) setLoading(false) })
+    return () => { mounted = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const save = async (draft) => {
+    setSaving(true)
+    setError('')
+    try {
+      const result = await request('POST', { ...draft, id: draft.id || undefined, value: Number(draft.value) })
+      setCodes(result.codes)
+      setEditing(null)
+    } catch (saveError) {
+      setError(saveError.message)
+    }
+    setSaving(false)
+  }
+
+  const toggleActive = async (code) => {
+    setError('')
+    try {
+      const result = await request('POST', { id: code.id, active: !code.active })
+      setCodes(result.codes)
+    } catch (saveError) {
+      setError(saveError.message)
+    }
+  }
+
+  const startEdit = (code) => setEditing({ id: code.id, code: code.code, description: code.description || '', appliesTo: code.appliesTo, type: code.type, value: String(code.type === 'percent' ? code.percentOff : code.amountOffPence / 100), membershipDuration: code.membershipDuration || 'once', active: code.active })
+
+  return (
+    <div style={sectionStyle}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
+        <h4 style={{ margin: 0, fontSize: 15, color: OPS_COLORS.emerald }}>Discount codes</h4>
+        {!editing && <OpsButton small onClick={() => setEditing({ ...emptyDiscount })}>New code</OpsButton>}
+      </div>
+      <p style={{ margin: '0 0 12px', fontSize: 12.5, color: OPS_COLORS.muted }}>Codes people type at checkout. A 100% code makes the booking free: it is still recorded as a confirmed booking or ticket order, with no card payment. Switching a code off keeps it here for your records.</p>
+      {error && <p style={{ color: OPS_COLORS.warn, fontSize: 13, margin: '0 0 10px' }}>{error}</p>}
+      {editing && <DiscountCodeForm draft={editing} saving={saving} onChange={setEditing} onSave={() => save(editing)} onCancel={() => { setEditing(null); setError('') }} />}
+      {loading ? <p style={{ color: OPS_COLORS.muted, fontSize: 13 }}>Loading…</p> : codes.length === 0 ? <p style={{ color: OPS_COLORS.muted, fontSize: 13, margin: 0 }}>No discount codes yet.</p> : (
+        <div style={{ overflowX: 'auto' }}>
+          <table className="ops-table">
+            <thead><tr><th>Code</th><th>Discount</th><th>Works on</th><th>Status</th><th /></tr></thead>
+            <tbody>
+              {codes.map((code) => (
+                <tr key={code.id} style={{ opacity: code.active ? 1 : 0.6 }}>
+                  <td><strong style={{ letterSpacing: '0.04em' }}>{code.code}</strong>{code.description && <div style={{ fontSize: 12, color: OPS_COLORS.muted }}>{code.description}</div>}</td>
+                  <td style={{ fontSize: 13 }}>{describeDiscount(code)}{code.appliesTo.includes('class') && <div style={{ fontSize: 11.5, color: OPS_COLORS.muted }}>Memberships: {code.membershipDuration === 'forever' ? 'every month' : 'first month'}</div>}</td>
+                  <td style={{ fontSize: 12.5 }}>{code.appliesTo.map((scope) => DISCOUNT_SCOPES.find((item) => item.key === scope)?.label.replace(/ \(.*\)$/, '')).join(', ')}</td>
+                  <td><span style={{ fontSize: 12, fontWeight: 700, color: code.active ? '#2e6b47' : OPS_COLORS.muted }}>{code.active ? 'Active' : 'Off'}</span></td>
+                  <td style={{ whiteSpace: 'nowrap' }}><OpsButton small variant="ghost" onClick={() => startEdit(code)}>Edit</OpsButton> <OpsButton small variant="ghost" onClick={() => toggleActive(code)}>{code.active ? 'Switch off' : 'Switch on'}</OpsButton></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DiscountCodeForm({ draft, saving, onChange, onSave, onCancel }) {
+  const set = (changes) => onChange({ ...draft, ...changes })
+  const toggleScope = (key) => set({ appliesTo: draft.appliesTo.includes(key) ? draft.appliesTo.filter((item) => item !== key) : [...draft.appliesTo, key] })
+  const value = Number(draft.value)
+  const valid = /^[A-Za-z0-9_-]{3,30}$/.test(draft.code.trim()) && draft.appliesTo.length > 0 && draft.value !== '' && Number.isFinite(value) && (draft.type === 'percent' ? value >= 0 && value <= 100 : value > 0)
+  return (
+    <div style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: 14, marginBottom: 14, background: '#fffdf8' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+        <label style={{ display: 'block' }}><span style={labelStyle}>Code</span><input style={{ ...opsInputStyle, textTransform: 'uppercase' }} value={draft.code} placeholder="FAMILY10" onChange={(event) => set({ code: event.target.value.replace(/\s+/g, '') })} /></label>
+        <label style={{ display: 'block' }}><span style={labelStyle}>Note for staff (optional)</span><input style={opsInputStyle} value={draft.description} placeholder="e.g. Siblings discount" onChange={(event) => set({ description: event.target.value })} /></label>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10, marginTop: 10 }}>
+        <label style={{ display: 'block' }}><span style={labelStyle}>Discount type</span><select style={opsInputStyle} value={draft.type} onChange={(event) => set({ type: event.target.value })}><option value="percent">Percentage off</option><option value="amount">Fixed amount off (£)</option></select></label>
+        <label style={{ display: 'block' }}><span style={labelStyle}>{draft.type === 'percent' ? 'Percentage (0 to 100)' : 'Amount off (£)'}</span><input type="number" min="0" max={draft.type === 'percent' ? 100 : undefined} step="0.01" style={opsInputStyle} value={draft.value} placeholder={draft.type === 'percent' ? '10' : '10.00'} onChange={(event) => set({ value: event.target.value })} /></label>
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <span style={labelStyle}>Works on</span>
+        {DISCOUNT_SCOPES.map((scope) => <Toggle key={scope.key} label={scope.label} checked={draft.appliesTo.includes(scope.key)} onChange={() => toggleScope(scope.key)} />)}
+      </div>
+      {draft.appliesTo.includes('class') && (
+        <label style={{ display: 'block', marginTop: 4 }}><span style={labelStyle}>On monthly memberships</span><select style={{ ...opsInputStyle, maxWidth: 320 }} value={draft.membershipDuration} onChange={(event) => set({ membershipDuration: event.target.value })}><option value="once">First month only</option><option value="forever">Every month</option></select></label>
+      )}
+      <Toggle label="Active (can be used at checkout)" checked={draft.active} onChange={(checked) => set({ active: checked })} />
+      <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+        <OpsButton small disabled={!valid || saving} onClick={onSave}>{saving ? 'Saving…' : draft.id ? 'Save code' : 'Create code'}</OpsButton>
+        <OpsButton small variant="ghost" onClick={onCancel}>Cancel</OpsButton>
+      </div>
     </div>
   )
 }

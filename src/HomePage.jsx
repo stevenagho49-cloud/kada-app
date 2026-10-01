@@ -1,6 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import { flyerPublicUrl, formatEventTimeRange } from './ops/EventsPage'
 import { ClassDatePicker, DAY_NAMES, classEndedOnDate, nextClassDate, startOfToday } from './lib/classDates'
+import { DiscountCodeField, poundsFromPence } from './lib/DiscountCodeField'
+
+const discountLabelStyle = { display: 'block', fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#767066', marginBottom: 8 }
+const discountButtonStyle = { border: '1px solid #ddd3b3', borderRadius: 8, background: '#0b3d2e', color: '#fffdf8', padding: '0 16px', fontWeight: 700, cursor: 'pointer' }
 
 // Testimonial videos + posters live in Supabase Storage (public bucket) instead
 // of the repo ,  keeps the git history and page payload small.
@@ -86,7 +90,11 @@ function ContactForm() {
   )
 }
 
-export default function HomePage({ SectionError, siteEvents, siteContent = {}, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, valueItems, Modal }) {
+export default function HomePage({ SectionError, siteEvents, siteContent = {}, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, schoolQuotePence = 0, valueItems, Modal }) {
+  const [classDiscount, setClassDiscount] = useState(null)
+  const [schoolDiscount, setSchoolDiscount] = useState(null)
+  // A £0 total skips Stripe, except a membership free only for its first month.
+  const classFree = classDiscount?.totalPence === 0 && (parentBooking.planType !== 'monthly_membership' || classDiscount.membershipDuration === 'forever')
   const selectedSession = classSessions.find((session) => session.name === parentBooking.className) || classSessions[0] || null
 
   // Homepage copy comes from the site_content table (editable in Ops). Every
@@ -242,8 +250,9 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
                   <label><span>Parent / guardian name</span><input value={parentBooking.parentName} onChange={(event) => setParentBooking({ ...parentBooking, parentName: event.target.value })} required /></label>
                   <label><span>Parent / guardian email</span><input type="email" value={parentBooking.parentEmail} onChange={(event) => setParentBooking({ ...parentBooking, parentEmail: event.target.value })} required /></label>
                   <div><span className="label">Children</span>{parentBooking.students.map((student, index) => <div key={index} className="student-row"><input aria-label={`Child ${index + 1} name`} placeholder="Child name" value={student.name} onChange={(event) => { const students = [...parentBooking.students]; students[index] = { ...student, name: event.target.value }; setParentBooking({ ...parentBooking, students }) }} required /><input aria-label={`Child ${index + 1} date of birth`} type="date" value={student.dateOfBirth} onChange={(event) => { const students = [...parentBooking.students]; students[index] = { ...student, dateOfBirth: event.target.value }; setParentBooking({ ...parentBooking, students }) }} required />{index > 0 && <button type="button" className="remove-child" onClick={() => setParentBooking({ ...parentBooking, students: parentBooking.students.filter((_, childIndex) => childIndex !== index) })}>Remove</button>}</div>)}<button type="button" className="add-child" onClick={() => setParentBooking({ ...parentBooking, students: [...parentBooking.students, { name: '', dateOfBirth: '' }] })}>+ Add another child</button></div>
-                  <div className="quote-summary"><div><span className="label">Price</span><strong>{parentBooking.planType === 'monthly_membership' ? `£${membershipPounds} / month` : `£${dayPassPounds}`}</strong></div><div><span className="label">Payment</span><strong>{parentBooking.planType === 'monthly_membership' ? 'Recurring' : 'One-time'}</strong></div></div>
-                  <button type="submit" className="btn btn-gold submit-btn" disabled={checkoutBusy || !parentBooking.classDate || !classSessions.length}>{checkoutBusy ? 'Opening checkout…' : 'Continue to payment'}</button>
+                  <div style={{ marginTop: 18 }}><DiscountCodeField scope="class" request={{ planType: parentBooking.planType }} value={parentBooking.discountCode || ''} onChange={(code) => setParentBooking({ ...parentBooking, discountCode: code })} onApplied={setClassDiscount} labelStyle={discountLabelStyle} buttonStyle={discountButtonStyle} /></div>
+                  <div className="quote-summary"><div><span className="label">Price</span><strong>{classDiscount ? `${poundsFromPence(classDiscount.totalPence)}${parentBooking.planType === 'monthly_membership' ? (classDiscount.membershipDuration === 'forever' ? ' / month' : ` first month, then £${membershipPounds}/month`) : ''}` : parentBooking.planType === 'monthly_membership' ? `£${membershipPounds} / month` : `£${dayPassPounds}`}</strong></div><div><span className="label">Payment</span><strong>{classFree ? 'Free' : parentBooking.planType === 'monthly_membership' ? 'Recurring' : 'One-time'}</strong></div></div>
+                  <button type="submit" className="btn btn-gold submit-btn" disabled={checkoutBusy || !parentBooking.classDate || !classSessions.length}>{checkoutBusy ? 'Opening checkout…' : classFree ? 'Confirm free booking' : 'Continue to payment'}</button>
                 </form>
               </div>
             </section></Modal>}
@@ -299,11 +308,13 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
                     <textarea value={schoolRequest.notes} onChange={(event) => handleQuoteChange('notes', event.target.value)} placeholder="Tell us about your event, age group or goals." />
                   </label>
 
-                  {quote && (
+                  <DiscountCodeField scope="school" request={{ subtotalPence: schoolQuotePence }} value={schoolRequest.discountCode || ''} onChange={(code) => handleQuoteChange('discountCode', code)} onApplied={setSchoolDiscount} labelStyle={discountLabelStyle} buttonStyle={discountButtonStyle} />
+
+                  {(quote || schoolDiscount) && (
                     <div className="quote-summary">
                       <div>
                         <span className="label">Estimated quote</span>
-                        <strong>{quotePrice}</strong>
+                        <strong>{schoolDiscount ? `${poundsFromPence(schoolDiscount.totalPence)} (${schoolDiscount.code})` : quotePrice}</strong>
                       </div>
                       <div>
                         <span className="label">Instructor coverage</span>

@@ -17,6 +17,8 @@ export const PERMISSION_AREAS = [
   { key: 'attendance', label: 'Class register & awards' },
   { key: 'homework', label: 'Homework (emails families)' },
   { key: 'formations', label: 'Formation planner (internal child photos)' },
+  { key: 'jobs', label: 'Job board (post jobs, accept claims)' },
+  { key: 'template', label: 'Workshop template (edit)' },
   { key: 'events', label: 'Events & ticketing' },
   { key: 'messages', label: 'Messages' },
   { key: 'site', label: 'Site content & layout' },

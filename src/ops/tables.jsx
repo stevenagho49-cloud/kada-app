@@ -17,11 +17,11 @@ export function invoiceStatusTone(status) {
 /* ------------------------------------------------------------------ */
 export function BookingsTable({
   bookings, schools, instructors, jobs, conflicts, instructorLabel,
-  isAdmin, isInstructor, canIssueInvoices,
+  isAdmin, isInstructor, canIssueInvoices, canManageJobs,
   expanded, onToggleExpand,
   onSaveBooking, onOpenSchool, onEditBooking, onPublishJob, onMarkDone, onInvoice,
 }) {
-  const schoolName = (booking) => schools.find((school) => school.id === booking.schoolId)?.name || 'School enquiry'
+  const schoolName = (booking) => schools.find((school) => school.id === booking.schoolId)?.name || (booking.familyId ? 'Parent / family' : 'School enquiry')
 
   const columns = [
     {
@@ -104,7 +104,7 @@ export function BookingsTable({
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {isInstructor && booking.status !== 'Delivered' && booking.status !== 'Cancelled' && <OpsButton small onClick={() => onMarkDone(booking.id)}>Mark as done</OpsButton>}
           {isAdmin && <OpsButton small variant="ghost" onClick={() => onEditBooking(booking)}>Edit</OpsButton>}
-          {isAdmin && !jobs.some((job) => job.bookingId === booking.id) && <OpsButton small onClick={() => onPublishJob(booking)}>Publish job</OpsButton>}
+          {canManageJobs && !booking.familyId && booking.date && booking.status !== 'Cancelled' && !jobs.some((job) => job.bookingId === booking.id) && <OpsButton small onClick={() => onPublishJob(booking)}>Publish job</OpsButton>}
         </div>
       ),
     },

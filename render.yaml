@@ -35,6 +35,10 @@ services:
         sync: false
       - key: ADMIN_NOTIFICATION_EMAIL
         sync: false
+      # Signing secret of the Resend webhook for /api/resend/webhook (campaign
+      # delivered / bounced / spam tracking).
+      - key: RESEND_WEBHOOK_SECRET
+        sync: false
       # --- Runtime: AI email design (Anthropic / Claude) ---
       - key: ANTHROPIC_API_KEY
         sync: false

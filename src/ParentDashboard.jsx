@@ -6,6 +6,7 @@ import { ClassDatePicker, DAY_NAMES, nextClassDate } from './lib/classDates'
 import { AddressAutocomplete } from './lib/AddressAutocomplete'
 import { AwardGallery, LatestAwardPanel, useParentAwards } from './ParentAwards'
 import { HomeworkList, HomeworkDuePanel, useParentHomework, outstandingHomework } from './ParentHomework'
+import { DiscountCodeField, poundsFromPence } from './lib/DiscountCodeField'
 
 const emerald = '#0b3d2e'
 const muted = '#767066'
@@ -27,17 +28,34 @@ function Button({ children, onClick, type = 'button', disabled, variant = 'prima
   return <button type={type} disabled={disabled} onClick={onClick} style={{ ...styles[variant], borderRadius: 6, padding: small ? '6px 11px' : '9px 18px', fontFamily: 'inherit', fontSize: small ? 12 : 13.5, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1 }}>{children}</button>
 }
 
-function ParentDashboard({ initialTab = '', session, family, bookings, students, classSessions = [], onBookClass, checkoutBusy, onCancelBooking, onBillingPortal, onCancelSubscription, onSaveSettings, onBack, onSignOut }) {
-  const [parentTab, setParentTab] = useState(['book-class', 'bookings', 'children', 'homework', 'awards', 'settings'].includes(initialTab) ? initialTab : 'dashboard')
+// One entry per child: a child booked more than once has a record per booking,
+// so show the current one (active first, then the most recent class).
+function uniqueChildren(students) {
+  const byChild = new Map()
+  for (const student of students) {
+    const key = `${student.name.trim().toLowerCase()}|${student.dateOfBirth}`
+    const current = byChild.get(key)
+    const better = !current
+      || (student.membershipStatus === 'active' && current.membershipStatus !== 'active')
+      || (student.membershipStatus === current.membershipStatus && String(student.term || '') > String(current.term || ''))
+    if (better) byChild.set(key, student)
+  }
+  return [...byChild.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+function ParentDashboard({ initialTab = '', session, family, bookings, students, invoices = [], classSessions = [], onBookClass, onAddChildren, checkoutBusy, onCancelBooking, onBillingPortal, onCancelSubscription, onSaveSettings, onBack, onSignOut }) {
+  const [parentTab, setParentTab] = useState(['book-class', 'bookings', 'children', 'invoices', 'homework', 'awards', 'settings'].includes(initialTab) ? initialTab : 'dashboard')
   const { awards, error: awardsError } = useParentAwards(true)
   const { tasks: homework, error: homeworkError, reload: reloadHomework } = useParentHomework(true)
   const homeworkTodo = outstandingHomework(homework).length
   const [openGroups, setOpenGroups] = useState(() => new Set(['Your family']))
-  const activeStudents = students.filter((student) => student.membershipStatus === 'active' || student.familyId === family?.id)
+  const activeStudents = uniqueChildren(students.filter((student) => student.membershipStatus === 'active' || student.familyId === family?.id))
+  const outstanding = invoices.filter((invoice) => invoice.status === 'outstanding')
+  const outstandingPence = outstanding.reduce((sum, invoice) => sum + invoice.amountPence, 0)
   const sidebarItems = [
     { key: 'dashboard', label: 'Dashboard' },
     { key: 'book-class', label: 'Book a class' },
-    { label: 'Your family', children: [{ key: 'bookings', label: 'Bookings' }, { key: 'children', label: 'Children' }, { key: 'homework', label: `Homework${homeworkTodo ? ` (${homeworkTodo})` : ''}` }, { key: 'awards', label: `Awards${awards?.length ? ` (${awards.length})` : ''}` }, { key: 'settings', label: 'Settings' }] },
+    { label: 'Your family', children: [{ key: 'bookings', label: 'Bookings' }, { key: 'children', label: 'Children' }, { key: 'invoices', label: `Invoices${outstanding.length ? ` (${outstanding.length} to pay)` : ''}` }, { key: 'homework', label: `Homework${homeworkTodo ? ` (${homeworkTodo})` : ''}` }, { key: 'awards', label: `Awards${awards?.length ? ` (${awards.length})` : ''}` }, { key: 'settings', label: 'Settings' }] },
   ]
   const toggleGroup = (label) => setOpenGroups((previous) => {
     const next = new Set(previous)
@@ -52,6 +70,13 @@ function ParentDashboard({ initialTab = '', session, family, bookings, students,
     { key: 'price', label: 'Price', render: (booking) => formatCurrency(booking.price) },
     { key: 'status', label: 'Status', render: (booking) => <Pill text={booking.status} tone={booking.status === 'Cancelled' ? 'red' : booking.status === 'Confirmed' ? 'green' : 'gold'} /> },
     { key: 'actions', label: '', render: (booking) => booking.status !== 'Cancelled' ? <OpsButton small variant="danger" onClick={() => onCancelBooking(booking.id)}>Cancel booking</OpsButton> : null },
+  ]
+  const invoiceColumns = [
+    { key: 'invoice', label: 'Invoice', render: (invoice) => <div><strong style={{ color: emerald }}>{invoice.invoiceNumber || 'Invoice'}</strong><div style={{ fontSize: 12, color: muted }}>{invoice.description}</div></div> },
+    { key: 'amount', label: 'Amount', render: (invoice) => <strong>{poundsFromPence(invoice.amountPence)}</strong> },
+    { key: 'due', label: 'Due', render: (invoice) => invoice.status === 'paid' ? (invoice.paidAt ? `Paid ${new Date(invoice.paidAt).toLocaleDateString('en-GB')}` : 'Paid') : <span style={{ color: invoice.daysOverdue > 0 ? '#a3401f' : undefined }}>{invoice.dueDate ? new Date(`${invoice.dueDate}T00:00:00`).toLocaleDateString('en-GB') : 'On receipt'}{invoice.daysOverdue > 0 ? ` (${invoice.daysOverdue} day${invoice.daysOverdue === 1 ? '' : 's'} overdue)` : ''}</span> },
+    { key: 'status', label: 'Status', render: (invoice) => <Pill text={invoice.status === 'paid' ? 'Paid' : invoice.daysOverdue > 0 ? 'Overdue' : 'To pay'} tone={invoice.status === 'paid' ? 'green' : invoice.daysOverdue > 0 ? 'red' : 'gold'} /> },
+    { key: 'pay', label: '', render: (invoice) => invoice.payUrl ? <a href={invoice.payUrl} style={{ background: '#c9a227', color: emerald, padding: '6px 12px', borderRadius: 6, fontWeight: 700, fontSize: 12.5, textDecoration: 'none', whiteSpace: 'nowrap' }}>Pay now</a> : null },
   ]
   const childColumns = [
     { key: 'name', label: 'Child', render: (student) => <strong style={{ color: emerald }}>{student.name}</strong> },
@@ -90,6 +115,20 @@ function ParentDashboard({ initialTab = '', session, family, bookings, students,
           </div>
         </>}
 
+        {parentTab === 'dashboard' && outstanding.length > 0 && (
+          <div className="panel" style={{ borderColor: '#ead7a3', background: '#fff8e8', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div><strong style={{ color: emerald }}>You have {outstanding.length} invoice{outstanding.length === 1 ? '' : 's'} to pay ({poundsFromPence(outstandingPence)})</strong><div style={{ fontSize: 13, color: muted }}>Pay securely by card, or by bank transfer using the details on the invoice.</div></div>
+            <Button onClick={() => setParentTab('invoices')}>View invoices</Button>
+          </div>
+        )}
+
+        {parentTab === 'invoices' && (
+          <div className="panel">
+            <div className="panel-head"><h3>Invoices</h3></div>
+            <DataTable columns={invoiceColumns} rows={invoices} expanded onToggleExpand={() => {}} pageSize={1000} emptyState={<EmptyState icon="🧾" title="No invoices" body="Invoices we send you appear here, with a button to pay online." />} />
+          </div>
+        )}
+
         {parentTab === 'dashboard' && <HomeworkDuePanel tasks={homework} onOpen={() => setParentTab('homework')} />}
 
         {parentTab === 'homework' && <HomeworkList tasks={homework} error={homeworkError} session={session} onChanged={reloadHomework} />}
@@ -99,7 +138,7 @@ function ParentDashboard({ initialTab = '', session, family, bookings, students,
         {parentTab === 'awards' && <AwardGallery awards={awards} error={awardsError} students={activeStudents} />}
 
         {parentTab === 'book-class' && (
-          <ParentBookingForm family={family} students={students} classSessions={classSessions} session={session} onBookClass={onBookClass} checkoutBusy={checkoutBusy} />
+          <ParentBookingForm family={family} students={activeStudents} classSessions={classSessions} session={session} onBookClass={onBookClass} checkoutBusy={checkoutBusy} />
         )}
 
         {parentTab === 'bookings' && (
@@ -112,7 +151,8 @@ function ParentDashboard({ initialTab = '', session, family, bookings, students,
         {parentTab === 'children' && (
           <div className="panel">
             <div className="panel-head"><h3>Your children</h3></div>
-            <DataTable columns={childColumns} rows={activeStudents} expanded onToggleExpand={() => {}} pageSize={1000} emptyState={<EmptyState icon="🧒" title="No children yet" body="Children appear here after a completed class booking." />} />
+            <DataTable columns={childColumns} rows={activeStudents} expanded onToggleExpand={() => {}} pageSize={1000} emptyState={<EmptyState icon="🧒" title="No children yet" body="Add your children below, then book them into a class." />} />
+            <AddChildrenForm onAdd={onAddChildren} />
           </div>
         )}
 
@@ -123,6 +163,46 @@ function ParentDashboard({ initialTab = '', session, family, bookings, students,
     </main>
   )
 }
+/* Add one or more children to the account, outside any booking. */
+function AddChildrenForm({ onAdd }) {
+  const blank = { name: '', dateOfBirth: '' }
+  const [rows, setRows] = useState([blank])
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState({ tone: '', text: '' })
+  const input = { width: '100%', boxSizing: 'border-box', padding: '9px 11px', fontSize: 14, border: '1px solid #e4ddc9', borderRadius: 6, background: '#fffdf8', fontFamily: 'inherit' }
+  const update = (index, changes) => setRows(rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...changes } : row)))
+  const submit = async (event) => {
+    event.preventDefault()
+    setBusy(true)
+    setMessage({ tone: '', text: '' })
+    try {
+      const added = await onAdd(rows.map((row) => ({ name: row.name.trim(), dateOfBirth: row.dateOfBirth })))
+      setRows([blank])
+      setMessage({ tone: 'ok', text: `Added ${added.map((child) => child.name).join(' and ')}.` })
+    } catch (error) {
+      setMessage({ tone: 'error', text: error.message })
+    }
+    setBusy(false)
+  }
+  return (
+    <form onSubmit={submit} style={{ borderTop: '1px solid #e4ddc9', marginTop: 16, paddingTop: 14, display: 'grid', gap: 8, maxWidth: 560 }}>
+      <strong style={{ color: emerald }}>Add a child</strong>
+      {rows.map((row, index) => (
+        <div key={index} style={{ display: 'grid', gridTemplateColumns: '1fr 160px auto', gap: 8, alignItems: 'center' }}>
+          <input style={input} aria-label={`Child ${index + 1} name`} placeholder="Child's full name" value={row.name} onChange={(event) => update(index, { name: event.target.value })} required />
+          <input style={input} aria-label={`Child ${index + 1} date of birth`} type="date" value={row.dateOfBirth} onChange={(event) => update(index, { dateOfBirth: event.target.value })} required />
+          {rows.length > 1 ? <button type="button" aria-label={`Remove child ${index + 1}`} onClick={() => setRows(rows.filter((_, rowIndex) => rowIndex !== index))} style={{ border: 0, background: 'none', color: '#a3401f', cursor: 'pointer', fontSize: 18 }}>×</button> : <span />}
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <OpsButton small variant="ghost" onClick={() => setRows([...rows, blank])}>+ Another child</OpsButton>
+        <OpsButton small type="submit" disabled={busy}>{busy ? 'Adding…' : rows.length > 1 ? `Add ${rows.length} children` : 'Add child'}</OpsButton>
+      </div>
+      {message.text && <p style={{ margin: 0, fontSize: 13, color: message.tone === 'ok' ? '#2e6b47' : '#a3401f' }}>{message.text}</p>}
+    </form>
+  )
+}
+
 /* Book-a-class form for signed-in parents ,  pre-fills from their family
    record and existing children, then hands off to Stripe checkout. */
 function ParentBookingForm({ family, students, classSessions, session, onBookClass, checkoutBusy }) {
@@ -130,12 +210,16 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
     planType: 'monthly_membership',
     className: classSessions[0]?.name || '',
     classDate: '',
-    students: [{ name: '', dateOfBirth: '' }],
+    discountCode: '',
+    // Each row is a child already on the account (childId) or a new one typed in.
+    students: [{ childId: '', name: '', dateOfBirth: '' }],
   })
+  const [discount, setDiscount] = useState(null)
   const parentName = family?.guardian_name || session.user.user_metadata?.full_name || ''
   const parentEmail = family?.guardian_email || session.user.email || ''
   const knownChildren = students.filter((student) => student.name)
   const selectedSession = classSessions.find((session) => session.name === form.className) || classSessions[0] || null
+  const free = discount?.totalPence === 0 && (form.planType !== 'monthly_membership' || discount.membershipDuration === 'forever')
 
   // Keep the chosen date on a real class day ,  switching class jumps to the
   // nearest date that class actually runs; only scheduled days are selectable.
@@ -147,20 +231,27 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSession?.id, classSessions])
 
-  const pickChild = (index, name) => {
-    const found = knownChildren.find((student) => student.name === name)
-    const next = [...form.students]
-    next[index] = found ? { name: found.name, dateOfBirth: found.dateOfBirth || found.date_of_birth || '' } : { name: '', dateOfBirth: '' }
-    setForm({ ...form, students: next })
+  // Start with every child on the account ticked in, one row each.
+  useEffect(() => {
+    if (!knownChildren.length) return
+    setForm((current) => (current.students.some((row) => row.childId || row.name) ? current : { ...current, students: knownChildren.map((child) => ({ childId: child.id, name: child.name, dateOfBirth: child.dateOfBirth })) }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [knownChildren.length])
+
+  const setRow = (index, changes) => setForm((current) => ({ ...current, students: current.students.map((row, rowIndex) => (rowIndex === index ? { ...row, ...changes } : row)) }))
+  const pickChild = (index, childId) => {
+    const found = knownChildren.find((student) => student.id === childId)
+    setRow(index, found ? { childId: found.id, name: found.name, dateOfBirth: found.dateOfBirth || '' } : { childId, name: '', dateOfBirth: '' })
   }
 
   const submit = (event) => {
     event.preventDefault()
-    onBookClass({ ...form, parentName, parentEmail })
+    onBookClass({ planType: form.planType, className: form.className, classDate: form.classDate, discountCode: form.discountCode, students: form.students.map((row) => ({ name: row.name.trim(), dateOfBirth: row.dateOfBirth })), parentName, parentEmail })
   }
 
   const input = { width: '100%', boxSizing: 'border-box', padding: '9px 11px', fontSize: 14, border: '1px solid #e4ddc9', borderRadius: 6, background: '#fffdf8', fontFamily: 'inherit' }
   const label = { display: 'block', fontSize: 12, fontWeight: 700, color: emerald, marginBottom: 4 }
+  const chosenIds = form.students.map((row) => row.childId).filter((id) => id && id !== '__new')
 
   if (!classSessions.length) {
     return <div className="panel"><EmptyState icon="🗓" title="No classes scheduled" body="Class times are being finalised. Please check back shortly." /></div>
@@ -188,34 +279,36 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
           <span style={label}>Class date</span>
           <ClassDatePicker session={selectedSession} value={form.classDate} onChange={(date) => setForm({ ...form, classDate: date })} />
         </div>
-        {form.students.map((student, index) => (
-          <div key={index} className="pair-grid" style={{ borderTop: '1px solid #e4ddc9', paddingTop: 10 }}>
-            <div>
-              <span style={label}>Child {index + 1}</span>
-              {knownChildren.length ? (
-                <select style={input} value={student.name} onChange={(event) => pickChild(index, event.target.value)} required>
+        {form.students.map((row, index) => {
+          const isNew = !knownChildren.length || row.childId === '__new'
+          return (
+            <div key={index} style={{ borderTop: '1px solid #e4ddc9', paddingTop: 10, display: 'grid', gap: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={label}>Child {index + 1}</span>
+                {form.students.length > 1 && <button type="button" onClick={() => setForm({ ...form, students: form.students.filter((_, rowIndex) => rowIndex !== index) })} style={{ border: 0, background: 'none', color: '#a3401f', cursor: 'pointer', fontSize: 12.5 }}>Remove</button>}
+              </div>
+              {knownChildren.length > 0 && (
+                <select style={input} aria-label={`Child ${index + 1}`} value={row.childId} onChange={(event) => pickChild(index, event.target.value)} required>
                   <option value="">Select child</option>
-                  {knownChildren.map((known) => <option key={known.id || known.name} value={known.name}>{known.name}</option>)}
-                  <option value="__new">New child…</option>
+                  {knownChildren.filter((known) => known.id === row.childId || !chosenIds.includes(known.id)).map((known) => <option key={known.id} value={known.id}>{known.name}</option>)}
+                  <option value="__new">A child not listed yet…</option>
                 </select>
-              ) : (
-                <input style={input} placeholder="Child name" value={student.name} onChange={(event) => { const next = [...form.students]; next[index] = { ...student, name: event.target.value }; setForm({ ...form, students: next }) }} required />
               )}
-              {student.name === '__new' || (!knownChildren.length) ? null : null}
+              {isNew && (
+                <div className="pair-grid">
+                  <input style={input} aria-label={`Child ${index + 1} name`} placeholder="Child's full name" value={row.name} onChange={(event) => setRow(index, { name: event.target.value })} required />
+                  <input type="date" style={input} aria-label={`Child ${index + 1} date of birth`} value={row.dateOfBirth} onChange={(event) => setRow(index, { dateOfBirth: event.target.value })} required />
+                </div>
+              )}
             </div>
-            <div>
-              <span style={label}>Date of birth</span>
-              <input type="date" style={input} value={student.dateOfBirth} onChange={(event) => { const next = [...form.students]; next[index] = { ...student, dateOfBirth: event.target.value }; setForm({ ...form, students: next }) }} required />
-            </div>
-          </div>
-        ))}
-        {form.students.some((s) => s.name === '__new') && (
-          <input style={input} placeholder="New child's name" onChange={(event) => { const next = [...form.students]; const idx = next.findIndex((s) => s.name === '__new'); if (idx >= 0) next[idx] = { name: event.target.value, dateOfBirth: next[idx].dateOfBirth }; setForm({ ...form, students: next }) }} />
-        )}
+          )
+        })}
         <div style={{ display: 'flex', gap: 8 }}>
-          <OpsButton small variant="ghost" onClick={() => setForm({ ...form, students: [...form.students, { name: '', dateOfBirth: '' }] })}>+ Add another child</OpsButton>
+          <OpsButton small variant="ghost" onClick={() => setForm({ ...form, students: [...form.students, { childId: '', name: '', dateOfBirth: '' }] })}>+ Add another child</OpsButton>
         </div>
-        <OpsButton type="submit" disabled={checkoutBusy || !form.classDate}>{checkoutBusy ? 'Opening checkout…' : 'Continue to payment'}</OpsButton>
+        <DiscountCodeField scope="class" request={{ planType: form.planType }} value={form.discountCode} onChange={(code) => setForm({ ...form, discountCode: code })} onApplied={setDiscount} inputStyle={input} labelStyle={label} buttonStyle={{ border: '1px solid #e4ddc9', borderRadius: 6, background: emerald, color: '#fffdf8', padding: '0 14px', fontWeight: 700, cursor: 'pointer' }} />
+        {discount && <p style={{ margin: 0, fontSize: 13.5 }}>Total: <strong>{poundsFromPence(discount.totalPence)}</strong>{form.planType === 'monthly_membership' ? (discount.membershipDuration === 'forever' ? ' a month' : ' for the first month, then £25 a month') : ''}</p>}
+        <OpsButton type="submit" disabled={checkoutBusy || !form.classDate}>{checkoutBusy ? 'Opening checkout…' : free ? 'Confirm free booking' : 'Continue to payment'}</OpsButton>
       </form>
     </div>
   )

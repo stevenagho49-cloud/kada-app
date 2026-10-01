@@ -7,6 +7,7 @@ import { createClient } from '@supabase/supabase-js'
 import PDFDocument from 'pdfkit'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHmac, timingSafeEqual } from 'node:crypto'
 
 const app = express()
 // Render (and most hosts) sit behind a single proxy ,  trust one hop so req.ip
@@ -55,29 +56,40 @@ const ADMIN_EMAIL = process.env.ADMIN_NOTIFICATION_EMAIL || ''
 const APP_URL = (process.env.APP_URL || 'https://kingsarkdance.com').replace(/\/$/, '')
 const PUBLIC_BASE_URL = APP_URL
 
-async function sendEmail({ to, subject, html, attachments = [] }) {
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// idempotencyKey: Resend returns the original email instead of sending again
+// when the same key is reused within 24h (used by campaign sends, which can be
+// resumed after a restart). Rate-limited calls (429) are retried with backoff.
+async function sendEmail({ to, subject, html, attachments = [], idempotencyKey = '' }) {
   if (!process.env.RESEND_API_KEY || !to) return { sent: false, reason: 'email not configured' }
-  try {
-    const resendResponse = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: EMAIL_FROM,
-        to: Array.isArray(to) ? to : [to],
-        subject,
-        html,
-        ...(attachments.length ? { attachments } : {}),
-      }),
-    })
-    const result = await resendResponse.json()
-    if (!resendResponse.ok) {
-      console.error('Resend send failed:', result)
-      return { sent: false, reason: result.message || 'resend error' }
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const resendResponse = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json', ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
+        body: JSON.stringify({
+          from: EMAIL_FROM,
+          to: Array.isArray(to) ? to : [to],
+          subject,
+          html,
+          ...(attachments.length ? { attachments } : {}),
+        }),
+      })
+      const result = await resendResponse.json()
+      if (resendResponse.status === 429 && attempt < 5) {
+        await sleep(Math.max(1000, Number(resendResponse.headers.get('retry-after') || 0) * 1000) * attempt)
+        continue
+      }
+      if (!resendResponse.ok) {
+        console.error('Resend send failed:', result)
+        return { sent: false, reason: result.message || 'resend error' }
+      }
+      return { sent: true, id: result.id }
+    } catch (error) {
+      console.error('Resend send error:', error)
+      return { sent: false, reason: error.message }
     }
-    return { sent: true, id: result.id }
-  } catch (error) {
-    console.error('Resend send error:', error)
-    return { sent: false, reason: error.message }
   }
 }
 
@@ -135,7 +147,7 @@ async function notificationSettings() {
 
 async function notifyAdmin(subject, html, type = '') {
   const settings = await notificationSettings()
-  const toggleKey = { 'new-booking': 'newBooking', contact: 'newContact', jobs: 'jobAlerts', 'event-ticket': 'eventSales', 'payment-link': 'paymentLinkSales', 'invoice-payment': 'invoicePayments' }[type]
+  const toggleKey = { 'new-booking': 'newBooking', contact: 'newContact', jobs: 'jobAlerts', 'event-ticket': 'eventSales', 'payment-link': 'paymentLinkSales', 'invoice-payment': 'invoicePayments', signup: 'newSignups' }[type]
   if (settings && toggleKey && settings[toggleKey] === false) return { sent: false, reason: `${toggleKey} alerts disabled in Settings` }
   const to = settings?.notifyEmail || ADMIN_EMAIL
   if (!to) return { sent: false, reason: 'ADMIN_NOTIFICATION_EMAIL not set' }
@@ -174,92 +186,9 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     const metadata = session.metadata || {}
 
     // Ticketed event purchases take a separate path from class bookings.
-    // The Day Pass/Membership booking logic below is unchanged.
     if (metadata.kind === 'event_ticket') {
-      const orderId = `ticket-${session.id}`
-      const ticketCount = Number(metadata.tickets || 1)
-      // Attendee names travel in metadata as a JSON array (one per ticket,
-      // duplicates allowed ,  a 2-for-1 for the same person twice is fine).
-      let attendeeNames = []
-      try { attendeeNames = JSON.parse(metadata.attendee_names || '[]') } catch { attendeeNames = [] }
-      attendeeNames = (Array.isArray(attendeeNames) ? attendeeNames : []).map((name) => String(name || '').trim()).filter(Boolean)
-      while (attendeeNames.length < ticketCount) attendeeNames.push(metadata.buyer_name || session.customer_details?.name || 'Guest')
-      const { error: ticketError } = await supabase.from('event_ticket_orders').upsert({
-        id: orderId,
-        event_id: metadata.event_id,
-        buyer_name: metadata.buyer_name || session.customer_details?.name || 'Guest',
-        buyer_email: session.customer_details?.email || metadata.buyer_email || '',
-        tier_id: metadata.tier_id,
-        tier_name: metadata.tier_name,
-        tickets: ticketCount,
-        total_pence: Number(metadata.total_pence || session.amount_total || 0),
-        stripe_checkout_session_id: session.id,
-        payment_status: 'paid',
-        attendee_names: attendeeNames,
-      }, { onConflict: 'stripe_checkout_session_id' })
-      if (ticketError) {
-        console.error('Ticket order creation failed:', ticketError)
-        // Non-200 so Stripe retries instead of marking this delivered while nothing was written.
-        return response.status(500).json({ error: 'Ticket order write failed' })
-      }
-
-      // File the buyer into the CRM as an event attendee with a category tag
-      // for this event (e.g. "event:It's Time to Rise") so Contacts can sort
-      // and filter by who came to what. Idempotent: email is unique, tags merge.
-      const buyerEmail = (session.customer_details?.email || metadata.buyer_email || '').toLowerCase().trim()
-      if (!ticketError && buyerEmail) {
-        const { data: orderEvent } = await supabase.from('events').select('title').eq('id', metadata.event_id).maybeSingle()
-        const eventTag = `event:${orderEvent?.title || 'Event'}`
-        const buyerName = metadata.buyer_name || session.customer_details?.name || 'Guest'
-        const { data: existingContact } = await supabase.from('contacts').select('id,kind,tags').eq('email', buyerEmail).maybeSingle()
-        if (existingContact) {
-          const tags = [...new Set([...(existingContact.tags || []), eventTag])]
-          await supabase.from('contacts').update({
-            tags,
-            kind: existingContact.kind === 'other' ? 'event-attendee' : existingContact.kind,
-            updated_at: new Date().toISOString(),
-          }).eq('id', existingContact.id)
-        } else {
-          await supabase.from('contacts').insert({
-            kind: 'event-attendee',
-            name: buyerName,
-            email: buyerEmail,
-            source: 'event-ticket',
-            tags: [eventTag],
-            last_contacted_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          })
-        }
-      }
-
-      // Send confirmation email exactly once per order. Stripe redelivers webhook
-      // events, so we atomically claim the order by setting confirmation_sent_at
-      // only where it is still null ,  a redelivery finds it already set and skips.
-      const { data: claimed } = await supabase
-        .from('event_ticket_orders')
-        .update({ confirmation_sent_at: new Date().toISOString() })
-        .eq('stripe_checkout_session_id', session.id)
-        .is('confirmation_sent_at', null)
-        .select('id')
-      const shouldSend = !ticketError && (claimed || []).length > 0
-      if (shouldSend) {
-        const { data: orderEvent } = await supabase.from('events').select('*').eq('id', metadata.event_id).maybeSingle()
-        const buyerEmail = session.customer_details?.email || metadata.buyer_email
-        const eventPageUrl = `${PUBLIC_BASE_URL}/event/${metadata.event_id}`
-        const calendarUrl = `${PUBLIC_BASE_URL}/api/stripe/event-order/${session.id}/calendar.ics`
-        const emailResult = await sendEmail({
-          to: buyerEmail,
-          subject: `Your tickets: ${orderEvent?.title || 'Event'}`,
-          html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>You're booked in! 🎟</h2><p>Hi ${(metadata.buyer_name || 'there').split(' ')[0]},</p><p>Thank you for your purchase. Here are your ticket details:</p><p><strong>Event:</strong> ${orderEvent?.title || 'Event'}<br><strong>Date:</strong> ${formatDateGB(orderEvent?.event_date)}${orderEvent?.event_time ? ` · ${orderEvent.event_time.slice(0, 5)}` : ''}<br><strong>Venue:</strong> ${orderEvent?.location || 'To be confirmed'}<br><strong>Ticket type:</strong> ${metadata.tier_name}<br><strong>Tickets:</strong> ${metadata.tickets}<br><strong>Total paid:</strong> ${money(metadata.total_pence)}</p><p><a href="${calendarUrl}" style="background:#c9a227;color:#0b3d2e;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Add to calendar</a>&nbsp;&nbsp;<a href="${eventPageUrl}" style="color:#0b3d2e">View event page</a></p><p>We can't wait to see you there.</p></div>`,
-          attachments: orderEvent?.event_date ? [{ filename: 'event.ics', content: Buffer.from(buildIcs({ title: orderEvent.title, date: orderEvent.event_date, startTime: orderEvent.event_time, endTime: orderEvent.event_end_time, location: orderEvent.location, description: orderEvent.description, url: eventPageUrl })).toString('base64') }] : [],
-        })
-        // If the send failed (e.g. Resend not configured), release the claim so a retry can send it.
-        if (!emailResult.sent) {
-          await supabase.from('event_ticket_orders').update({ confirmation_sent_at: null }).eq('stripe_checkout_session_id', session.id)
-          console.error('Confirmation email failed:', emailResult.reason)
-        }
-        await notifyAdmin('New event ticket sale', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New event ticket sale</h2><p><strong>Event:</strong> ${orderEvent?.title || 'Event'}<br><strong>Buyer:</strong> ${metadata.buyer_name || session.customer_details?.name || 'Guest'} (${buyerEmail})<br><strong>Tickets:</strong> ${metadata.tickets}<br><strong>Amount:</strong> ${money(metadata.total_pence)}</p>${dashboardButton('events-published', 'View event', metadata.event_id)}</div>`, 'event-ticket')
-      }
+      const result = await recordEventTicketOrder(session)
+      if (!result.ok) return response.status(500).json({ error: 'Ticket order write failed' })
       return response.json({ received: true })
     }
 
@@ -277,83 +206,9 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       return response.json({ received: true })
     }
 
-    const planType = metadata.plan_type || 'day_pass'
-    const { data: existingStudents } = await supabase.from('students').select('*').eq('booking_id', metadata.booking_id)
-    const studentList = existingStudents || []
-    const { error: familyError } = await supabase.from('parent_families').upsert({
-      id: metadata.family_id,
-      guardian_name: metadata.parent_name,
-      guardian_email: session.customer_details?.email || metadata.parent_email,
-      plan_type: planType,
-      membership_status: 'active',
-      stripe_customer_id: session.customer || null,
-      stripe_subscription_id: session.subscription || null,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'id' })
-    if (familyError) console.error('Family creation failed:', familyError)
-    const { error } = await supabase.from('bookings').upsert({
-      id: metadata.booking_id,
-      family_id: metadata.family_id,
-      school_id: metadata.school_id || null,
-      contact_name: metadata.parent_name,
-      contact_email: session.customer_details?.email || metadata.parent_email,
-      date: metadata.class_date,
-      session_type: `${metadata.class_name} (${planType})`,
-      price: Number(metadata.amount_pence || 0) / 100,
-      student_count: studentList.length,
-      status: 'Confirmed',
-      invoice_status: 'Paid',
-      invoice_number: '',
-      notes: `Stripe test payment ${session.payment_intent || session.id}`,
-      stripe_checkout_session_id: session.id,
-      payment_status: 'paid',
-      requested_by: null,
-    }, { onConflict: 'id' })
-    if (error) {
-      console.error('Booking creation failed:', error)
-      // Non-200 so Stripe retries instead of marking this delivered while nothing was written.
-      return response.status(500).json({ error: 'Booking write failed' })
-    }
-    if (!familyError && studentList.length) {
-      const { error: studentError } = await supabase.from('students').update({ membership_status: 'active' }).eq('booking_id', metadata.booking_id)
-      if (studentError) console.error('Student creation failed:', studentError)
-    }
-    if (!error) {
-      await notifyAdmin('New paid class booking', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New paid class booking</h2><p><strong>Parent:</strong> ${metadata.parent_name} (${session.customer_details?.email || metadata.parent_email})<br><strong>Class:</strong> ${metadata.class_name} (${planType})<br><strong>Date:</strong> ${metadata.class_date}<br><strong>Amount:</strong> ${money(metadata.amount_pence)}<br><strong>Children:</strong> ${studentList.length}</p>${dashboardButton('bookings', 'View booking', metadata.booking_id)}</div>`, 'new-booking')
-
-      // Parent confirmation email, exactly once per booking ,  same idempotency
-      // pattern as event tickets: atomically claim the booking by setting
-      // confirmation_sent_at only where still null; a redelivery skips.
-      const { data: claimed } = await supabase
-        .from('bookings')
-        .update({ confirmation_sent_at: new Date().toISOString() })
-        .eq('id', metadata.booking_id)
-        .is('confirmation_sent_at', null)
-        .select('id')
-      if ((claimed || []).length > 0) {
-        const parentEmailTo = session.customer_details?.email || metadata.parent_email
-        const [{ data: classSession }, { data: bookingStudents }] = await Promise.all([
-          supabase.from('class_sessions').select('start_time,end_time,description').eq('name', metadata.class_name).eq('active', true).maybeSingle(),
-          supabase.from('students').select('name').eq('booking_id', metadata.booking_id),
-        ])
-        const studentNames = (bookingStudents || []).map((student) => student.name).filter(Boolean)
-        const planLabel = planType === 'monthly_membership' ? 'Monthly Membership (£25/month)' : 'Day Pass (£10)'
-        const classTime = classSession?.start_time ? ` · ${String(classSession.start_time).slice(0, 5)}${classSession.end_time ? ` to ${String(classSession.end_time).slice(0, 5)}` : ''}` : ''
-        const classesUrl = `${PUBLIC_BASE_URL}#classes`
-        const ics = metadata.class_date ? buildIcs({ title: `${metadata.class_name} at King's Ark Dance Academy`, date: metadata.class_date, startTime: classSession?.start_time || '10:00', endTime: classSession?.end_time || classSession?.start_time || '11:00', location: "King's Ark Dance Academy, 395 College Rd, Birmingham B44 0HF", description: classSession?.description || '', url: classesUrl }) : ''
-        const emailResult = await sendEmail({
-          to: parentEmailTo,
-          subject: `Booking confirmed: ${metadata.class_name}`,
-          html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>You're booked in! 🎉</h2><p>Hi ${(metadata.parent_name || 'there').split(' ')[0]},</p><p>Thank you. Your payment was successful and your child's place is confirmed:</p><p><strong>Class:</strong> ${metadata.class_name}<br><strong>Date:</strong> ${formatDateGB(metadata.class_date)}${classTime}<br><strong>Children:</strong> ${studentNames.join(', ') || studentList.length}<br><strong>Plan:</strong> ${planLabel}<br><strong>Total paid:</strong> ${money(metadata.amount_pence)}</p><p><a href="${classesUrl}" style="background:#c9a227;color:#0b3d2e;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">View classes</a></p><p>A calendar file is attached. Tap it to add the class to your phone's calendar. We can't wait to see you there.</p></div>`,
-          attachments: ics ? [{ filename: 'class.ics', content: Buffer.from(ics).toString('base64') }] : [],
-        })
-        // If the send failed, release the claim so a webhook retry can send it.
-        if (!emailResult.sent) {
-          await supabase.from('bookings').update({ confirmation_sent_at: null }).eq('id', metadata.booking_id)
-          console.error('Class booking confirmation email failed:', emailResult.reason)
-        }
-      }
-    }
+    const result = await recordClassBooking(session)
+    // Non-200 so Stripe retries instead of marking this delivered while nothing was written.
+    if (!result.ok) return response.status(500).json({ error: 'Booking write failed' })
   }
 
   if (event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {
@@ -377,6 +232,256 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     if (!response.headersSent) response.status(500).json({ error: 'Webhook processing failed' })
   }
 })
+
+/* ------------------------------------------------------------------ */
+/* Resend delivery events (Resend dashboard > Webhooks, pointing at     */
+/* /api/resend/webhook, signing secret in RESEND_WEBHOOK_SECRET). This  */
+/* is the only source of truth for what happened after Resend accepted */
+/* an email: delivered, delayed, bounced, marked as spam (complained),  */
+/* and Resend's own opens/clicks when tracking is on for the domain.    */
+/* Each event is stored once by its svix id (redeliveries are no-ops).  */
+/* ------------------------------------------------------------------ */
+const RESEND_EVENT_RANK = { sent: 0, delivery_delayed: 1, delivered: 2, opened: 3, clicked: 4, failed: 5, bounced: 6, complained: 7 }
+
+function verifySvixSignature(rawBody, headers, secret) {
+  const id = headers['svix-id']
+  const timestamp = headers['svix-timestamp']
+  const signatures = String(headers['svix-signature'] || '')
+  if (!id || !timestamp || !signatures) return false
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false // replayed or very late
+  const key = Buffer.from(String(secret).replace(/^whsec_/, ''), 'base64')
+  const expected = createHmac('sha256', key).update(`${id}.${timestamp}.${rawBody}`).digest()
+  return signatures.split(' ').some((part) => {
+    const [version, signature] = part.split(',')
+    if (version !== 'v1' || !signature) return false
+    const given = Buffer.from(signature, 'base64')
+    return given.length === expected.length && timingSafeEqual(given, expected)
+  })
+}
+
+// Applies one Resend event (from the webhook or an API sync) to its campaign_sends row.
+async function applyResendEvent({ emailId, type, at, data = {} }) {
+  const event = String(type || '').replace(/^email\./, '')
+  if (!emailId || !(event in RESEND_EVENT_RANK)) return { matched: false }
+  const { data: row } = await supabase.from('campaign_sends').select('id,last_event,delivered_at,delivery_delayed_at,bounced_at,complained_at,resend_opened_at,resend_clicked_at').eq('resend_id', emailId).maybeSingle()
+  if (!row) return { matched: false } // a transactional email, not a campaign send
+  const when = at || new Date().toISOString()
+  const update = {}
+  if (event === 'delivered' && !row.delivered_at) update.delivered_at = when
+  if (event === 'delivery_delayed' && !row.delivery_delayed_at) update.delivery_delayed_at = when
+  if (event === 'bounced' && !row.bounced_at) Object.assign(update, { bounced_at: when, bounce_type: [data.bounce?.type, data.bounce?.subType].filter(Boolean).join(' / ').slice(0, 80) || null, bounce_message: String(data.bounce?.message || '').slice(0, 500) || null })
+  if (event === 'complained' && !row.complained_at) update.complained_at = when
+  if (event === 'opened' && !row.resend_opened_at) update.resend_opened_at = when
+  if (event === 'clicked' && !row.resend_clicked_at) update.resend_clicked_at = when
+  if (event === 'failed') update.error = String(data.failed?.reason || data.reason || 'Resend could not send this email.').slice(0, 300)
+  // Events can arrive out of order: last_event only ever moves forward.
+  if ((RESEND_EVENT_RANK[event] ?? -1) > (RESEND_EVENT_RANK[row.last_event] ?? -1)) update.last_event = event
+  if (Object.keys(update).length) await supabase.from('campaign_sends').update(update).eq('id', row.id)
+  return { matched: true, event }
+}
+
+app.post('/api/resend/webhook', express.raw({ type: '*/*', limit: '1mb' }), async (request, response) => {
+  const secret = process.env.RESEND_WEBHOOK_SECRET
+  if (!secret || !supabase) return response.sendStatus(503)
+  const rawBody = Buffer.isBuffer(request.body) ? request.body.toString('utf8') : ''
+  if (!verifySvixSignature(rawBody, request.headers, secret)) return response.status(401).json({ error: 'Invalid signature.' })
+  let event
+  try { event = JSON.parse(rawBody) } catch { return response.status(400).json({ error: 'Invalid JSON.' }) }
+  const emailId = event?.data?.email_id || null
+  const { error: logError } = await supabase.from('resend_events').insert({ svix_id: String(request.headers['svix-id']), type: String(event?.type || ''), email_id: emailId, occurred_at: event?.created_at || null, payload: event })
+  if (logError?.code === '23505') return response.json({ received: true, duplicate: true })
+  if (logError) {
+    console.error('Resend event could not be stored:', logError.message)
+    return response.status(500).json({ error: 'Event could not be stored.' }) // Resend retries
+  }
+  try {
+    const result = await applyResendEvent({ emailId, type: event?.type, at: event?.created_at, data: event?.data })
+    response.json({ received: true, ...result })
+  } catch (error) {
+    console.error('Resend event could not be applied:', error.message)
+    response.status(500).json({ error: 'Event could not be applied.' })
+  }
+})
+
+// Records a paid (or fully discounted, free) event ticket order. Used by the
+// Stripe webhook and by £0 checkouts. Returns { ok: false } on a failed write
+// so the webhook answers non-200 and Stripe retries.
+async function recordEventTicketOrder(session) {
+  const metadata = session.metadata || {}
+  const orderId = `ticket-${session.id}`
+  const ticketCount = Number(metadata.tickets || 1)
+  // Attendee names travel in metadata as a JSON array (one per ticket,
+  // duplicates allowed ,  a 2-for-1 for the same person twice is fine).
+  let attendeeNames = []
+  try { attendeeNames = JSON.parse(metadata.attendee_names || '[]') } catch { attendeeNames = [] }
+  attendeeNames = (Array.isArray(attendeeNames) ? attendeeNames : []).map((name) => String(name || '').trim()).filter(Boolean)
+  while (attendeeNames.length < ticketCount) attendeeNames.push(metadata.buyer_name || session.customer_details?.name || 'Guest')
+  const { error: ticketError } = await supabase.from('event_ticket_orders').upsert({
+    id: orderId,
+    event_id: metadata.event_id,
+    buyer_name: metadata.buyer_name || session.customer_details?.name || 'Guest',
+    buyer_email: session.customer_details?.email || metadata.buyer_email || '',
+    tier_id: metadata.tier_id,
+    tier_name: metadata.tier_name,
+    tickets: ticketCount,
+    total_pence: Number(session.amount_total ?? metadata.total_pence ?? 0),
+    stripe_checkout_session_id: session.id,
+    payment_status: 'paid',
+    attendee_names: attendeeNames,
+  }, { onConflict: 'stripe_checkout_session_id' })
+  if (ticketError) {
+    console.error('Ticket order creation failed:', ticketError)
+    // Non-200 so Stripe retries instead of marking this delivered while nothing was written.
+    return { ok: false }
+  }
+
+  // File the buyer into the CRM as an event attendee with a category tag
+  // for this event (e.g. "event:It's Time to Rise") so Contacts can sort
+  // and filter by who came to what. Idempotent: email is unique, tags merge.
+  const buyerEmail = (session.customer_details?.email || metadata.buyer_email || '').toLowerCase().trim()
+  if (!ticketError && buyerEmail) {
+    const { data: orderEvent } = await supabase.from('events').select('title').eq('id', metadata.event_id).maybeSingle()
+    const eventTag = `event:${orderEvent?.title || 'Event'}`
+    const buyerName = metadata.buyer_name || session.customer_details?.name || 'Guest'
+    const { data: existingContact } = await supabase.from('contacts').select('id,kind,tags').eq('email', buyerEmail).maybeSingle()
+    if (existingContact) {
+      const tags = [...new Set([...(existingContact.tags || []), eventTag])]
+      await supabase.from('contacts').update({
+        tags,
+        kind: existingContact.kind === 'other' ? 'event-attendee' : existingContact.kind,
+        updated_at: new Date().toISOString(),
+      }).eq('id', existingContact.id)
+    } else {
+      await supabase.from('contacts').insert({
+        kind: 'event-attendee',
+        name: buyerName,
+        email: buyerEmail,
+        source: 'event-ticket',
+        tags: [eventTag],
+        last_contacted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+    }
+  }
+
+  // Send confirmation email exactly once per order. Stripe redelivers webhook
+  // events, so we atomically claim the order by setting confirmation_sent_at
+  // only where it is still null ,  a redelivery finds it already set and skips.
+  const { data: claimed } = await supabase
+    .from('event_ticket_orders')
+    .update({ confirmation_sent_at: new Date().toISOString() })
+    .eq('stripe_checkout_session_id', session.id)
+    .is('confirmation_sent_at', null)
+    .select('id')
+  const shouldSend = !ticketError && (claimed || []).length > 0
+  if (shouldSend) {
+    const { data: orderEvent } = await supabase.from('events').select('*').eq('id', metadata.event_id).maybeSingle()
+    const buyerEmail = session.customer_details?.email || metadata.buyer_email
+    const eventPageUrl = `${PUBLIC_BASE_URL}/event/${metadata.event_id}`
+    const calendarUrl = `${PUBLIC_BASE_URL}/api/stripe/event-order/${session.id}/calendar.ics`
+    const emailResult = await sendEmail({
+      to: buyerEmail,
+      subject: `Your tickets: ${orderEvent?.title || 'Event'}`,
+      html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>You're booked in! 🎟</h2><p>Hi ${(metadata.buyer_name || 'there').split(' ')[0]},</p><p>Thank you for your purchase. Here are your ticket details:</p><p><strong>Event:</strong> ${orderEvent?.title || 'Event'}<br><strong>Date:</strong> ${formatDateGB(orderEvent?.event_date)}${orderEvent?.event_time ? ` · ${orderEvent.event_time.slice(0, 5)}` : ''}<br><strong>Venue:</strong> ${orderEvent?.location || 'To be confirmed'}<br><strong>Ticket type:</strong> ${metadata.tier_name}<br><strong>Tickets:</strong> ${metadata.tickets}<br><strong>Total paid:</strong> ${money(metadata.total_pence)}</p><p><a href="${calendarUrl}" style="background:#c9a227;color:#0b3d2e;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Add to calendar</a>&nbsp;&nbsp;<a href="${eventPageUrl}" style="color:#0b3d2e">View event page</a></p><p>We can't wait to see you there.</p></div>`,
+      attachments: orderEvent?.event_date ? [{ filename: 'event.ics', content: Buffer.from(buildIcs({ title: orderEvent.title, date: orderEvent.event_date, startTime: orderEvent.event_time, endTime: orderEvent.event_end_time, location: orderEvent.location, description: orderEvent.description, url: eventPageUrl })).toString('base64') }] : [],
+    })
+    // If the send failed (e.g. Resend not configured), release the claim so a retry can send it.
+    if (!emailResult.sent) {
+      await supabase.from('event_ticket_orders').update({ confirmation_sent_at: null }).eq('stripe_checkout_session_id', session.id)
+      console.error('Confirmation email failed:', emailResult.reason)
+    }
+    await notifyAdmin('New event ticket sale', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New event ticket sale</h2><p><strong>Event:</strong> ${orderEvent?.title || 'Event'}<br><strong>Buyer:</strong> ${metadata.buyer_name || session.customer_details?.name || 'Guest'} (${buyerEmail})<br><strong>Tickets:</strong> ${metadata.tickets}<br><strong>Amount:</strong> ${money(metadata.total_pence)}</p>${dashboardButton('events-published', 'View event', metadata.event_id)}</div>`, 'event-ticket')
+  }
+  return { ok: true }
+}
+
+// Records a paid (or fully discounted, free) parent class booking. Used by the
+// Stripe webhook and by £0 checkouts. Returns { ok: false } on a failed write
+// so the webhook answers non-200 and Stripe retries.
+async function recordClassBooking(session) {
+  const metadata = session.metadata || {}
+  const planType = metadata.plan_type || 'day_pass'
+  const { data: existingStudents } = await supabase.from('students').select('*').eq('booking_id', metadata.booking_id)
+  const studentList = existingStudents || []
+  const { error: familyError } = await supabase.from('parent_families').upsert({
+    id: metadata.family_id,
+    guardian_name: metadata.parent_name,
+    guardian_email: session.customer_details?.email || metadata.parent_email,
+    plan_type: planType,
+    membership_status: 'active',
+    // Only set when this checkout has them, so a free or one-off booking never
+    // wipes the Stripe customer/subscription an earlier membership checkout saved.
+    ...(session.customer ? { stripe_customer_id: session.customer } : {}),
+    ...(session.subscription ? { stripe_subscription_id: session.subscription } : {}),
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'id' })
+  if (familyError) console.error('Family creation failed:', familyError)
+  const { error } = await supabase.from('bookings').upsert({
+    id: metadata.booking_id,
+    family_id: metadata.family_id,
+    school_id: metadata.school_id || null,
+    contact_name: metadata.parent_name,
+    contact_email: session.customer_details?.email || metadata.parent_email,
+    date: metadata.class_date,
+    session_type: `${metadata.class_name} (${planType})`,
+    price: Number(metadata.amount_pence || 0) / 100,
+    student_count: studentList.length,
+    status: 'Confirmed',
+    invoice_status: 'Paid',
+    invoice_number: '',
+    notes: [String(session.id).startsWith('free-') ? 'No payment taken (fully discounted)' : `Stripe payment ${session.payment_intent || session.id}`, metadata.discount_code ? `Discount code ${metadata.discount_code} (-${money(metadata.discount_pence)} of ${money(metadata.subtotal_pence)})` : ''].filter(Boolean).join('. '),
+    stripe_checkout_session_id: session.id,
+    payment_status: 'paid',
+    requested_by: null,
+  }, { onConflict: 'id' })
+  if (error) {
+    console.error('Booking creation failed:', error)
+    // Non-200 so Stripe retries instead of marking this delivered while nothing was written.
+    return { ok: false }
+  }
+  if (!familyError && studentList.length) {
+    const { error: studentError } = await supabase.from('students').update({ membership_status: 'active' }).eq('booking_id', metadata.booking_id)
+    if (studentError) console.error('Student creation failed:', studentError)
+  }
+  if (!error) {
+    const bookingLabel = Number(metadata.amount_pence || 0) === 0 ? 'New class booking (free with discount code)' : 'New paid class booking'
+    await notifyAdmin(bookingLabel, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>${bookingLabel}</h2><p><strong>Parent:</strong> ${escHtml(metadata.parent_name || '')} (${escHtml(session.customer_details?.email || metadata.parent_email || '')})<br><strong>Class:</strong> ${escHtml(metadata.class_name || '')} (${planType})<br><strong>Date:</strong> ${metadata.class_date}<br><strong>Amount:</strong> ${money(metadata.amount_pence)}${metadata.discount_code ? `<br><strong>Discount code:</strong> ${escHtml(metadata.discount_code)} (-${money(metadata.discount_pence)})` : ''}<br><strong>Children:</strong> ${studentList.length}</p>${dashboardButton('bookings', 'View booking', metadata.booking_id)}</div>`, 'new-booking')
+
+    // Parent confirmation email, exactly once per booking ,  same idempotency
+    // pattern as event tickets: atomically claim the booking by setting
+    // confirmation_sent_at only where still null; a redelivery skips.
+    const { data: claimed } = await supabase
+      .from('bookings')
+      .update({ confirmation_sent_at: new Date().toISOString() })
+      .eq('id', metadata.booking_id)
+      .is('confirmation_sent_at', null)
+      .select('id')
+    if ((claimed || []).length > 0) {
+      const parentEmailTo = session.customer_details?.email || metadata.parent_email
+      const [{ data: classSession }, { data: bookingStudents }] = await Promise.all([
+        supabase.from('class_sessions').select('start_time,end_time,description').eq('name', metadata.class_name).eq('active', true).maybeSingle(),
+        supabase.from('students').select('name').eq('booking_id', metadata.booking_id),
+      ])
+      const studentNames = (bookingStudents || []).map((student) => student.name).filter(Boolean)
+      const planLabel = planType === 'monthly_membership' ? 'Monthly Membership (£25/month)' : 'Day Pass (£10)'
+      const classTime = classSession?.start_time ? ` · ${String(classSession.start_time).slice(0, 5)}${classSession.end_time ? ` to ${String(classSession.end_time).slice(0, 5)}` : ''}` : ''
+      const classesUrl = `${PUBLIC_BASE_URL}#classes`
+      const ics = metadata.class_date ? buildIcs({ title: `${metadata.class_name} at King's Ark Dance Academy`, date: metadata.class_date, startTime: classSession?.start_time || '10:00', endTime: classSession?.end_time || classSession?.start_time || '11:00', location: "King's Ark Dance Academy, 395 College Rd, Birmingham B44 0HF", description: classSession?.description || '', url: classesUrl }) : ''
+      const emailResult = await sendEmail({
+        to: parentEmailTo,
+        subject: `Booking confirmed: ${metadata.class_name}`,
+        html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6"><h1 style="color:#0b3d2e">King's Ark Dance Academy</h1><h2>You're booked in! 🎉</h2><p>Hi ${(metadata.parent_name || 'there').split(' ')[0]},</p><p>Thank you. Your payment was successful and your child's place is confirmed:</p><p><strong>Class:</strong> ${metadata.class_name}<br><strong>Date:</strong> ${formatDateGB(metadata.class_date)}${classTime}<br><strong>Children:</strong> ${studentNames.join(', ') || studentList.length}<br><strong>Plan:</strong> ${planLabel}<br><strong>Total paid:</strong> ${money(metadata.amount_pence)}</p><p><a href="${classesUrl}" style="background:#c9a227;color:#0b3d2e;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">View classes</a></p><p>A calendar file is attached. Tap it to add the class to your phone's calendar. We can't wait to see you there.</p></div>`,
+        attachments: ics ? [{ filename: 'class.ics', content: Buffer.from(ics).toString('base64') }] : [],
+      })
+      // If the send failed, release the claim so a webhook retry can send it.
+      if (!emailResult.sent) {
+        await supabase.from('bookings').update({ confirmation_sent_at: null }).eq('id', metadata.booking_id)
+        console.error('Class booking confirmation email failed:', emailResult.reason)
+      }
+    }
+  }
+  return { ok: true }
+}
 
 app.use(express.json())
 
@@ -452,11 +557,14 @@ app.post('/api/public/contact', async (request, response) => {
 app.post('/api/notify-admin', async (request, response) => {
   const user = await authenticatedUser(request)
   if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
-  const { type, detail = {} } = request.body || {}
+  const { type, detail: rawDetail = {} } = request.body || {}
+  // The detail comes from the browser, so escape it before it goes into the email.
+  const detail = Object.fromEntries(Object.entries(rawDetail || {}).map(([key, value]) => [key, escHtml(String(value ?? '').slice(0, 300))]))
+  const recordId = (value) => (/^[\w-]+$/.test(String(value || '')) ? String(value) : '')
   const templates = {
     'job-claim': () => ['Job claim needs review', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Job claim pending review</h2><p><strong>Job:</strong> ${detail.sessionType || ''} on ${detail.date || ''}<br><strong>Claimed by:</strong> ${detail.claimedBy || ''}</p>${dashboardButton('jobs', 'Review job claim')}</div>`],
-    'dbs-upload': () => ['New DBS certificate uploaded', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>DBS certificate uploaded</h2><p><strong>Instructor:</strong> ${detail.instructorName || ''}</p>${dashboardButton('instructors', 'Review certificate', detail.instructorId)}</div>`],
-    'school-enquiry': () => ['New school enquiry', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New school booking enquiry</h2><p><strong>School:</strong> ${detail.schoolName || ''}<br><strong>Contact:</strong> ${detail.contactName || ''} (${detail.email || ''})<br><strong>Session:</strong> ${detail.sessionType || ''} on ${detail.date || ''}<br><strong>Students:</strong> ${detail.studentCount || ''}</p>${dashboardButton('schools', 'View school', detail.schoolId)}</div>`],
+    'dbs-upload': () => ['New DBS certificate uploaded', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>DBS certificate uploaded</h2><p><strong>Instructor:</strong> ${detail.instructorName || ''}</p>${dashboardButton('instructors', 'Review certificate', recordId(rawDetail.instructorId))}</div>`],
+    'school-enquiry': () => ['New school enquiry', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New school booking enquiry</h2><p><strong>School:</strong> ${detail.schoolName || ''}<br><strong>Contact:</strong> ${detail.contactName || ''} (${detail.email || ''})<br><strong>Session:</strong> ${detail.sessionType || ''} on ${detail.date || ''}<br><strong>Students:</strong> ${detail.studentCount || ''}${detail.discountCode ? `<br><strong>Discount code:</strong> ${detail.discountCode}` : ''}</p>${dashboardButton('schools', 'View school', recordId(rawDetail.schoolId))}</div>`],
   }
   const template = templates[type]
   if (!template) return response.status(400).json({ error: 'Unknown notification type.' })
@@ -465,20 +573,350 @@ app.post('/api/notify-admin', async (request, response) => {
   response.json(result)
 })
 
+/* ------------------------------------------------------------------ */
+/* New account alerts. People sign up in the browser straight against  */
+/* Supabase Auth, so nothing on the server sees it happen. Instead the  */
+/* server sweeps for accounts created in the last two days and emails   */
+/* the admin once per account, stamping signup_notified_at in the       */
+/* account's app_metadata (which only the service role can write).     */
+/* Accounts made through Team & access invites are skipped.             */
+/* ------------------------------------------------------------------ */
+const SIGNUP_LOOKBACK_MS = 48 * 3600000
+const SIGNUP_ROLE_LABELS = { parent: 'Parent', instructor: 'Instructor', school: 'School' }
+
+async function listAllAuthUsers() {
+  const users = []
+  for (let page = 1; page < 50; page += 1) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage: 1000 }) // eslint-disable-line no-await-in-loop
+    if (error) throw error
+    users.push(...(data?.users || []))
+    if ((data?.users || []).length < 1000) break
+  }
+  return users
+}
+
+let signupSweepRunning = false
+async function notifyNewSignups() {
+  if (!supabase || signupSweepRunning) return { notified: 0 }
+  signupSweepRunning = true
+  const notified = []
+  try {
+    const since = Date.now() - SIGNUP_LOOKBACK_MS
+    const fresh = (await listAllAuthUsers()).filter((item) => Date.parse(item.created_at) >= since && !item.app_metadata?.signup_notified_at)
+    if (!fresh.length) return { notified: 0 }
+    const [{ data: profiles }, { data: invites }] = await Promise.all([
+      supabase.from('profiles').select('id,role,full_name').in('id', fresh.map((item) => item.id)),
+      supabase.from('invitations').select('email').in('email', fresh.map((item) => (item.email || '').toLowerCase())),
+    ])
+    const profileById = new Map((profiles || []).map((row) => [row.id, row]))
+    const invited = new Set((invites || []).map((row) => row.email))
+    for (const account of fresh) {
+      const profile = profileById.get(account.id)
+      const role = profile?.role || account.user_metadata?.role || 'school'
+      const stamp = () => supabase.auth.admin.updateUserById(account.id, { app_metadata: { ...(account.app_metadata || {}), signup_notified_at: new Date().toISOString() } })
+      if (!SIGNUP_ROLE_LABELS[role] || invited.has((account.email || '').toLowerCase())) {
+        await stamp() // eslint-disable-line no-await-in-loop
+        continue
+      }
+      const name = profile?.full_name || account.user_metadata?.full_name || ''
+      const children = Array.isArray(account.user_metadata?.children) ? account.user_metadata.children.filter((child) => child?.name) : []
+      const lines = [
+        ['Name', name || 'Not given'],
+        ['Email', account.email || ''],
+        ['Email confirmed', account.email_confirmed_at ? 'Yes' : 'Not yet (they must click the link in their confirmation email before they can sign in)'],
+        ...(role === 'school' && account.user_metadata?.school_name ? [['School', account.user_metadata.school_name]] : []),
+        ...(role === 'parent' ? [['Children added', children.length ? children.map((child) => child.name).join(', ') : 'None yet']] : []),
+      ].map(([label, value]) => `<strong>${label}:</strong> ${escHtml(value)}`).join('<br>')
+      const next = role === 'instructor'
+        ? '<p>Add or link their instructor record (same email) under Instructors so they can upload a DBS certificate and see the job board.</p>'
+        : role === 'parent' ? '<p>If this family already owes an invoice or has a record with us, it is linked to this account automatically by email once they sign in.</p>' : ''
+      const result = await notifyAdmin( // eslint-disable-line no-await-in-loop
+        `New ${SIGNUP_ROLE_LABELS[role].toLowerCase()} sign-up: ${name || account.email}`,
+        `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New ${SIGNUP_ROLE_LABELS[role].toLowerCase()} account</h2><p>${lines}</p>${next}${dashboardButton(role === 'instructor' ? 'instructors' : role === 'school' ? 'schools' : 'students', 'Open dashboard')}</div>`,
+        'signup',
+      )
+      // Unsent alerts are retried on the next sweep; switched-off alerts are stamped.
+      if (result.sent || /disabled in Settings/.test(result.reason || '')) {
+        await stamp() // eslint-disable-line no-await-in-loop
+        notified.push({ id: account.id, role, email: account.email, sent: result.sent, resendId: result.id || null })
+      } else {
+        console.error(`Sign-up alert for ${account.email} not sent:`, result.reason)
+      }
+    }
+    return { notified: notified.length, accounts: notified }
+  } catch (error) {
+    console.error('Sign-up sweep failed:', error.message)
+    return { notified: notified.length, accounts: notified, error: error.message }
+  } finally {
+    signupSweepRunning = false
+  }
+}
+const SIGNUP_SWEEP_INTERVAL_MS = Number(process.env.SIGNUP_SWEEP_INTERVAL_MS || 120000)
+setInterval(() => { void notifyNewSignups() }, SIGNUP_SWEEP_INTERVAL_MS)
+setTimeout(() => { void notifyNewSignups() }, 15000)
+
+// The sign-up form pings this so the alert goes out straight away rather than
+// on the next sweep. It takes no input: it can only alert about real accounts.
+const signupPingLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
+app.post('/api/public/signup-ping', signupPingLimiter, async (_request, response) => {
+  response.json({ ok: true })
+  void notifyNewSignups()
+})
+
+// Recent self-service sign-ups for the dashboard's Needs attention panel.
+app.get('/api/admin/recent-signups', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  try {
+    const since = Date.now() - 14 * 86400000
+    const fresh = (await listAllAuthUsers()).filter((item) => Date.parse(item.created_at) >= since)
+    const ids = fresh.map((item) => item.id)
+    const [{ data: profiles }, { data: invites }] = await Promise.all([
+      ids.length ? supabase.from('profiles').select('id,role,full_name').in('id', ids) : { data: [] },
+      ids.length ? supabase.from('invitations').select('email').in('email', fresh.map((item) => (item.email || '').toLowerCase())) : { data: [] },
+    ])
+    const profileById = new Map((profiles || []).map((row) => [row.id, row]))
+    const invited = new Set((invites || []).map((row) => row.email))
+    response.json({
+      signups: fresh
+        .map((item) => ({ id: item.id, email: item.email, role: profileById.get(item.id)?.role || item.user_metadata?.role || '', name: profileById.get(item.id)?.full_name || item.user_metadata?.full_name || '', createdAt: item.created_at, confirmed: Boolean(item.email_confirmed_at) }))
+        .filter((item) => SIGNUP_ROLE_LABELS[item.role] && !invited.has((item.email || '').toLowerCase()))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    })
+  } catch (error) {
+    response.status(500).json({ error: `Sign-ups could not be loaded: ${error.message}` })
+  }
+})
+
+/* ------------------------------------------------------------------ */
+/* Job board. Admins and staff with the 'jobs' permission publish       */
+/* bookings as jobs and accept or reject instructor claims. Writes run  */
+/* here (service role) so the permission check is the server's.         */
+/* Instructors still claim through RLS from the browser.                */
+/* ------------------------------------------------------------------ */
+async function requireJobsAccess(request, response) {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
+  const { data: profile } = await supabase.from('profiles').select('role,permissions,full_name').eq('id', user.id).maybeSingle()
+  const allowed = profile?.role === 'admin' || (profile?.role === 'staff' && (profile.permissions || []).includes('jobs'))
+  if (!allowed) { response.status(403).json({ error: 'You need the job board permission for this.' }); return null }
+  return { user, profile }
+}
+
+app.post('/api/jobs/publish', async (request, response) => {
+  const access = await requireJobsAccess(request, response)
+  if (!access) return
+  const { bookingId, pay, location = '' } = request.body || {}
+  const instructorPay = Math.round(Number(pay) * 100) / 100
+  if (!Number.isFinite(instructorPay) || instructorPay <= 0) return response.status(400).json({ error: 'Set an instructor pay rate before publishing.' })
+  const { data: booking } = await supabase.from('bookings').select('id,date,session_type,student_count,status').eq('id', String(bookingId || '')).maybeSingle()
+  if (!booking) return response.status(404).json({ error: 'Booking not found.' })
+  if (booking.status === 'Cancelled') return response.status(400).json({ error: 'This booking is cancelled.' })
+  if (!booking.date) return response.status(400).json({ error: 'Give the booking a date before publishing it as a job.' })
+  const { data: existing } = await supabase.from('job_board_jobs').select('id').eq('booking_id', booking.id).maybeSingle()
+  if (existing) return response.status(409).json({ error: 'This booking is already on the job board.' })
+  const { data: job, error } = await supabase.from('job_board_jobs').insert({
+    id: `job-${booking.id}`,
+    booking_id: booking.id,
+    date: booking.date,
+    session_type: booking.session_type,
+    student_count: booking.student_count || 0,
+    location_area: String(location || '').trim().slice(0, 120) || 'Location shared after acceptance',
+    instructor_pay: instructorPay,
+    status: 'open',
+    published_at: new Date().toISOString(),
+  }).select('*').single()
+  if (error) return response.status(500).json({ error: `The job could not be published: ${error.message}` })
+  await supabase.from('bookings').update({ instructor_pay: instructorPay }).eq('id', booking.id)
+  response.json({ job })
+})
+
+app.post('/api/jobs/:id/decision', async (request, response) => {
+  const access = await requireJobsAccess(request, response)
+  if (!access) return
+  const { decision, reason = '' } = request.body || {}
+  if (!['accepted', 'rejected', 'undo'].includes(decision)) return response.status(400).json({ error: 'Unknown decision.' })
+  const { data: job } = await supabase.from('job_board_jobs').select('*').eq('id', request.params.id).maybeSingle()
+  if (!job) return response.status(404).json({ error: 'Job not found.' })
+  if (decision === 'undo' ? !['accepted', 'rejected'].includes(job.status) : job.status !== 'pending' || !job.claimed_by) {
+    return response.status(409).json({ error: decision === 'undo' ? 'Only an accepted or rejected claim can be undone.' : 'This job has no claim waiting for a decision.' })
+  }
+  const cleanReason = String(reason || '').trim().slice(0, 500)
+  if (decision === 'rejected' && !cleanReason) return response.status(400).json({ error: 'Give a reason for rejecting the claim.' })
+  const update = decision === 'undo'
+    ? { status: 'pending', rejection_reason: null, decided_at: null }
+    : { status: decision, rejection_reason: decision === 'rejected' ? cleanReason : null, decided_at: new Date().toISOString() }
+  // Conditional on the status read above, so two people deciding at once can't both win.
+  const { data: saved, error } = await supabase.from('job_board_jobs').update(update).eq('id', job.id).eq('status', job.status).select('*')
+  if (error) return response.status(500).json({ error: `The decision could not be saved: ${error.message}` })
+  if (!saved?.length) return response.status(409).json({ error: 'Someone else has just changed this job. Refresh and try again.' })
+  if (decision === 'accepted') await supabase.from('bookings').update({ instructor_id: job.claimed_by }).eq('id', job.booking_id)
+  if (decision === 'undo' && job.status === 'accepted') await supabase.from('bookings').update({ instructor_id: null }).eq('id', job.booking_id).eq('instructor_id', job.claimed_by)
+  let notification = null
+  if (decision === 'accepted') {
+    const [{ data: instructor }, { data: booking }] = await Promise.all([
+      supabase.from('instructors').select('name,email').eq('id', job.claimed_by).maybeSingle(),
+      supabase.from('bookings').select('school_id,schools(name)').eq('id', job.booking_id).maybeSingle(),
+    ])
+    notification = await notifyAdmin(
+      `Job accepted: ${instructor?.name || 'Instructor'} on ${job.date}`,
+      `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Job claim accepted</h2><p><strong>Instructor:</strong> ${escHtml(instructor?.name || job.claimed_by)}${instructor?.email ? ` (${escHtml(instructor.email)})` : ''}<br><strong>Job:</strong> ${escHtml(job.session_type || '')} on ${escHtml(job.date)}<br><strong>School:</strong> ${escHtml(booking?.schools?.name || 'Not set')}<br><strong>Pay:</strong> £${Number(job.instructor_pay || 0).toFixed(2)}<br><strong>Accepted by:</strong> ${escHtml(access.profile?.full_name || access.user.email)}</p><p>The instructor is now assigned to the booking.</p>${dashboardButton('bookings', 'View booking', job.booking_id)}</div>`,
+      'jobs',
+    )
+  }
+  response.json({ job: saved[0], notification })
+})
+
+/* ------------------------------------------------------------------ */
+/* Parent family resolution. A family can exist before the parent has  */
+/* an account: a guest checkout, or a booking/invoice the admin raised  */
+/* for them offline. When they sign up, the sign-up trigger makes an    */
+/* empty family for the new login, which would hide the real one. Once  */
+/* the email is confirmed, this folds that empty family into the        */
+/* existing one (matched by email, case-insensitively) and links any    */
+/* stray bookings or children filed under the same email, so earlier    */
+/* bookings, children and unpaid invoices all show in the new account. */
+/* Children typed on the sign-up form (user_metadata.children) are      */
+/* created here once.                                                   */
+/* ------------------------------------------------------------------ */
+const likeExact = (value) => String(value).replace(/[\\%_]/g, (match) => `\\${match}`)
+
+function cleanChild(child) {
+  const name = String(child?.name || '').trim().slice(0, 120)
+  const dateOfBirth = String(child?.dateOfBirth || child?.date_of_birth || '').slice(0, 10)
+  return name && /^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth) && !Number.isNaN(Date.parse(dateOfBirth)) ? { name, dateOfBirth } : null
+}
+
+async function resolveParentFamily(user) {
+  const email = String(user.email || '').trim().toLowerCase()
+  const { data: owned, error } = await supabase.from('parent_families').select('*').eq('owner_user_id', user.id).order('created_at')
+  if (error) throw error
+  let family = owned?.[0] || null
+  if (user.email_confirmed_at && email) {
+    const { data: unowned } = await supabase.from('parent_families').select('*').is('owner_user_id', null).ilike('guardian_email', likeExact(email)).order('created_at')
+    const existing = unowned?.[0]
+    if (existing) {
+      const { data: claimed } = await supabase.from('parent_families').update({ owner_user_id: user.id, updated_at: new Date().toISOString() }).eq('id', existing.id).is('owner_user_id', null).select('*')
+      if (claimed?.length) {
+        // Fold the sign-up shell (and any other family this login owned) into the existing one.
+        for (const shell of owned || []) {
+          await supabase.from('students').update({ family_id: existing.id }).eq('family_id', shell.id) // eslint-disable-line no-await-in-loop
+          await supabase.from('bookings').update({ family_id: existing.id }).eq('family_id', shell.id) // eslint-disable-line no-await-in-loop
+          if (!shell.stripe_customer_id && !shell.stripe_subscription_id) await supabase.from('parent_families').delete().eq('id', shell.id) // eslint-disable-line no-await-in-loop
+          else await supabase.from('parent_families').update({ owner_user_id: null }).eq('id', shell.id) // eslint-disable-line no-await-in-loop
+        }
+        family = claimed[0]
+        await supabase.from('profiles').update({ family_id: family.id }).eq('id', user.id)
+      }
+    }
+    if (family) {
+      // Bookings and children filed under this email without a family (not school bookings).
+      await supabase.from('bookings').update({ family_id: family.id }).is('family_id', null).is('school_id', null).ilike('contact_email', likeExact(email))
+      await supabase.from('students').update({ family_id: family.id }).is('family_id', null).ilike('parent_email', likeExact(email))
+    }
+  }
+  if (!family) return null
+
+  const signupChildren = (Array.isArray(user.user_metadata?.children) ? user.user_metadata.children : []).map(cleanChild).filter(Boolean).slice(0, 12)
+  if (signupChildren.length && !user.app_metadata?.children_created_at) {
+    const { data: current } = await supabase.from('students').select('name,date_of_birth').eq('family_id', family.id)
+    const known = new Set((current || []).map((row) => `${row.name.trim().toLowerCase()}|${row.date_of_birth}`))
+    const rows = signupChildren.filter((child) => !known.has(`${child.name.toLowerCase()}|${child.dateOfBirth}`)).map((child) => ({
+      id: `student-${crypto.randomUUID()}`,
+      family_id: family.id,
+      parent_name: family.guardian_name,
+      parent_email: family.guardian_email,
+      name: child.name,
+      date_of_birth: child.dateOfBirth,
+      membership_status: 'inactive',
+    }))
+    const { error: childError } = rows.length ? await supabase.from('students').insert(rows) : { error: null }
+    if (childError) console.error('Sign-up children could not be created:', childError.message)
+    else await supabase.auth.admin.updateUserById(user.id, { app_metadata: { ...(user.app_metadata || {}), children_created_at: new Date().toISOString() } })
+  }
+  return family
+}
+
+// What the parent sees on their Invoices tab: every invoice sent to the family,
+// with the amount due after any discount and a Pay now link while it is unpaid.
+function parentInvoices(bookings) {
+  const today = londonNow().date
+  return (bookings || [])
+    .filter((row) => row.invoice_sent_at && ['Sent', 'Paid'].includes(row.invoice_status) && row.status !== 'Cancelled')
+    .map((row) => {
+      const invoice = buildInvoice(row, null)
+      const outstanding = isInvoiceOutstanding(row)
+      return {
+        id: row.id,
+        invoiceNumber: row.invoice_number || '',
+        description: invoice.invoiceBooking.invoiceDescription || row.session_type || 'Invoice',
+        date: row.date || '',
+        amountPence: outstanding ? invoice.amountPence : Number(row.invoice_paid_amount_pence ?? invoice.amountPence),
+        status: outstanding ? 'outstanding' : 'paid',
+        sentAt: row.invoice_sent_at,
+        dueDate: row.invoice_due_date || '',
+        daysOverdue: outstanding ? daysOverdue(row.invoice_due_date, today) : null,
+        paidAt: row.invoice_paid_at || null,
+        payUrl: outstanding && invoice.amountPence >= 30 ? invoicePayUrl(row) : '',
+      }
+    })
+    .sort((a, b) => (a.status === b.status ? String(b.sentAt).localeCompare(String(a.sentAt)) : a.status === 'outstanding' ? -1 : 1))
+}
+
 app.get('/api/parent/dashboard', async (request, response) => {
   const user = await authenticatedUser(request)
   if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
-  const { data: families, error: familyError } = await supabase.from('parent_families').select('*').or(`owner_user_id.eq.${user.id},guardian_email.eq.${user.email}`)
-  if (familyError) return response.status(500).json({ error: 'Family data could not be loaded.' })
-  // Prefer the family that owns this login; legacy guest-checkout families match by email only.
-  const family = (families || []).find((item) => item.owner_user_id === user.id) || families?.[0] || null
-  if (!family) return response.json({ family: null, bookings: [], students: [] })
+  let family
+  try {
+    family = await resolveParentFamily(user)
+  } catch (error) {
+    console.error('Family lookup failed:', error.message)
+    return response.status(500).json({ error: 'Family data could not be loaded.' })
+  }
+  if (!family) return response.json({ family: null, bookings: [], students: [], invoices: [] })
   const [{ data: bookings, error: bookingError }, { data: students, error: studentError }] = await Promise.all([
     supabase.from('bookings').select('*').eq('family_id', family.id).order('date'),
     supabase.from('students').select('*').eq('family_id', family.id).order('name'),
   ])
   if (bookingError || studentError) return response.status(500).json({ error: 'Parent records could not be loaded.' })
-  response.json({ family, bookings, students })
+  response.json({ family, bookings, students, invoices: parentInvoices(bookings) })
+})
+
+// Parents add children to their account at any time, not only during a booking.
+app.post('/api/parent/children', async (request, response) => {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
+  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle()
+  if (profile?.role !== 'parent') return response.status(403).json({ error: 'Only parent accounts can add children.' })
+  const children = (Array.isArray(request.body?.children) ? request.body.children : [request.body]).map(cleanChild)
+  if (!children.length || children.some((child) => !child)) return response.status(400).json({ error: "Add each child's name and date of birth." })
+  let family
+  try {
+    family = await resolveParentFamily(user)
+  } catch {
+    return response.status(500).json({ error: 'Family data could not be loaded.' })
+  }
+  if (!family) {
+    const { data: created, error } = await supabase.from('parent_families').insert({ id: crypto.randomUUID(), owner_user_id: user.id, guardian_name: user.user_metadata?.full_name || 'Parent', guardian_email: user.email, membership_status: 'pending' }).select('*').single()
+    if (error) return response.status(500).json({ error: 'Your family record could not be created.' })
+    family = created
+    await supabase.from('profiles').update({ family_id: family.id }).eq('id', user.id)
+  }
+  const { data: current } = await supabase.from('students').select('name,date_of_birth').eq('family_id', family.id)
+  const known = new Set((current || []).map((row) => `${row.name.trim().toLowerCase()}|${row.date_of_birth}`))
+  const duplicate = children.find((child) => known.has(`${child.name.toLowerCase()}|${child.dateOfBirth}`))
+  if (duplicate) return response.status(409).json({ error: `${duplicate.name} is already on your account.` })
+  const { data: saved, error } = await supabase.from('students').insert(children.slice(0, 12).map((child) => ({
+    id: `student-${crypto.randomUUID()}`,
+    family_id: family.id,
+    parent_name: family.guardian_name,
+    parent_email: family.guardian_email,
+    name: child.name,
+    date_of_birth: child.dateOfBirth,
+    membership_status: 'inactive',
+  }))).select('*')
+  if (error) return response.status(500).json({ error: `The child could not be added: ${error.message}` })
+  response.json({ students: saved })
 })
 
 app.post('/api/instructor/mark-done', async (request, response) => {
@@ -557,7 +995,7 @@ app.post('/api/admin/invoice-permissions', async (request, response) => {
 /* accounts. Roles/permissions/job titles live on profiles; emails     */
 /* come from auth.users (service role only).                           */
 /* ------------------------------------------------------------------ */
-const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'attendance', 'homework', 'formations', 'events', 'messages', 'site', 'sales']
+const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'attendance', 'homework', 'formations', 'jobs', 'template', 'events', 'messages', 'site', 'sales']
 const cleanPermissions = (value) => (Array.isArray(value) ? value.filter((item) => TEAM_PERMISSIONS.includes(item)) : [])
 
 async function requireAdmin(request, response) {
@@ -1054,54 +1492,139 @@ async function campaignRecipients(audience, customEmails = []) {
     recipients.push({ id: contact.id || null, name: contact.name || '', email })
   }
   if (audience !== 'custom') {
-    let query = supabase.from('contacts').select('id,name,email,kind')
-    if (audience !== 'all') query = query.eq('kind', audience)
-    const { data } = await query
-    ;(data || []).forEach(add)
+    // PostgREST returns at most 1,000 rows per request, so page through the CRM.
+    for (let from = 0; ; from += 1000) {
+      let query = supabase.from('contacts').select('id,name,email,kind').order('id').range(from, from + 999)
+      if (audience !== 'all') query = query.eq('kind', audience)
+      const { data, error } = await query // eslint-disable-line no-await-in-loop
+      if (error) throw new Error(`Contacts could not be loaded: ${error.message}`)
+      ;(data || []).forEach(add)
+      if ((data || []).length < 1000) break
+    }
   }
   // One-off list always sends, whether it is the audience or extra addresses.
   cleanEmailList(customEmails).forEach((email) => add({ email, name: email.split('@')[0].replace(/[._-]+/g, ' ') }))
   return recipients
 }
 
-async function runDueCampaigns() {
-  if (!supabase) return { sent: 0 }
+/* Whether the Resend delivery-tracking columns exist (cached, probed once). */
+let deliveryTrackingSupported = null
+async function hasDeliveryTracking() {
+  if (deliveryTrackingSupported !== null) return deliveryTrackingSupported
+  const { error } = await supabase.from('campaign_sends').select('resend_id').limit(0)
+  deliveryTrackingSupported = !error
+  return deliveryTrackingSupported
+}
+
+// Every row of a query, 1,000 at a time (PostgREST's per-request cap).
+async function selectAll(buildQuery) {
+  const rows = []
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await buildQuery().range(from, from + 999) // eslint-disable-line no-await-in-loop
+    if (error) throw error
+    rows.push(...(data || []))
+    if ((data || []).length < 1000) return rows
+  }
+}
+
+/* Campaign sending runs in two steps so a big list is sent exactly once:     */
+/*  1. A due campaign is claimed by moving its schedule on first (conditional */
+/*     on the values just read), then one 'queued' row per recipient is made. */
+/*  2. Queued rows are sent one by one, paced under Resend's rate limit. Each */
+/*     row is its own Resend email with an idempotency key, so a restart part */
+/*     way through simply carries on with the rows still queued.              */
+const CAMPAIGN_SEND_INTERVAL_MS = Number(process.env.CAMPAIGN_SEND_INTERVAL_MS || 550)
+let campaignRunning = false
+
+async function queueDueCampaigns() {
   const now = new Date()
-  const { data: due } = await supabase.from('campaigns').select('*')
-    .in('status', ['scheduled', 'active']).lte('scheduled_at', now.toISOString())
-  let sent = 0
-  for (const campaign of (due || [])) {
+  const { data: due, error } = await supabase.from('campaigns').select('*').in('status', ['scheduled', 'active']).lte('scheduled_at', now.toISOString())
+  if (error) throw error
+  let queued = 0
+  for (const campaign of due || []) {
+    const next = campaign.recurrence !== 'none' ? new Date(now.getTime() + (RECURRENCE_MS[campaign.recurrence] || 0)) : null
+    const { data: claimed } = await supabase.from('campaigns') // eslint-disable-line no-await-in-loop
+      .update({ status: next ? 'active' : 'done', scheduled_at: next ? next.toISOString() : null, updated_at: now.toISOString() })
+      .eq('id', campaign.id).eq('status', campaign.status).eq('scheduled_at', campaign.scheduled_at)
+      .select('id')
+    if (!claimed?.length) continue // another run got there first
     // Recover the one-off list: from the column when migrated, else from the
     // campaign-name marker (pre-migration fallback). Marked campaigns are
     // treated as a pure one-off list, never a CRM audience blast.
     const markerMatch = /\s*\[one-off: ([^\]]+)\]$/.exec(campaign.name || '')
     const isOneOff = Boolean(markerMatch)
     const list = (campaign.custom_emails && campaign.custom_emails.length) ? campaign.custom_emails : (isOneOff ? cleanEmailList(markerMatch[1]) : [])
-    const recipients = isOneOff ? list.map((email) => ({ id: null, name: email.split('@')[0].replace(/[._-]+/g, ' '), email })) : await campaignRecipients(campaign.audience, list)
-    // Pre-create send rows so each email gets a tracking id, then send with the
-    // open pixel and click-redirect links keyed to that row (only when the
-    // analytics schema is present; otherwise send plain).
-    const track = await hasAnalytics()
-    const rows = []
-    for (const recipient of recipients) {
-      const { data: sendRow } = await supabase.from('campaign_sends').insert({ campaign_id: campaign.id, contact_id: recipient.id, email: recipient.email, status: 'queued' }).select('id').maybeSingle() // eslint-disable-line no-await-in-loop
-      const trackedHtml = track && sendRow ? instrumentCampaignHtml(campaign.body_html.replace(/{{name}}/g, recipient.name || 'there'), sendRow.id) : campaign.body_html.replace(/{{name}}/g, recipient.name || 'there')
-      const result = await sendEmail({ to: recipient.email, subject: campaign.subject, html: trackedHtml }) // eslint-disable-line no-await-in-loop
-      if (sendRow) {
-        await supabase.from('campaign_sends').update({ status: result.sent ? 'sent' : 'failed', error: result.sent ? null : result.reason, sent_at: result.sent ? new Date().toISOString() : null }).eq('id', sendRow.id) // eslint-disable-line no-await-in-loop
-      } else {
-        rows.push({ campaign_id: campaign.id, contact_id: recipient.id, email: recipient.email, status: result.sent ? 'sent' : 'failed', error: result.sent ? null : result.reason, sent_at: result.sent ? new Date().toISOString() : null })
-      }
-      if (result.sent) sent += 1
+    let recipients = isOneOff ? list.map((email) => ({ id: null, email })) : await campaignRecipients(campaign.audience, list) // eslint-disable-line no-await-in-loop
+    if (campaign.recurrence === 'none') {
+      // A one-off campaign that was paused and rescheduled carries on: nobody gets it twice.
+      const already = await selectAll(() => supabase.from('campaign_sends').select('email').eq('campaign_id', campaign.id).in('status', ['queued', 'sent'])) // eslint-disable-line no-await-in-loop
+      const done = new Set(already.map((row) => row.email))
+      recipients = recipients.filter((recipient) => !done.has(recipient.email))
     }
-    if (rows.length) await supabase.from('campaign_sends').insert(rows)
-    const next = campaign.recurrence !== 'none' ? new Date(now.getTime() + (RECURRENCE_MS[campaign.recurrence] || 0)) : null
-    await supabase.from('campaigns').update({ status: next ? 'active' : 'done', scheduled_at: next ? next.toISOString() : null, updated_at: now.toISOString() }).eq('id', campaign.id)
-    console.log(`Campaign "${campaign.name}" sent: ${rows.filter((row) => row.status === 'sent').length}/${rows.length} delivered${rows.length === 0 ? ' (no recipients matched)' : ''}`)
+    for (let index = 0; index < recipients.length; index += 500) {
+      const { error: insertError } = await supabase.from('campaign_sends').insert(recipients.slice(index, index + 500).map((recipient) => ({ campaign_id: campaign.id, contact_id: recipient.id, email: recipient.email, status: 'queued' }))) // eslint-disable-line no-await-in-loop
+      if (insertError) throw new Error(`Campaign "${campaign.name}" could not be queued: ${insertError.message}`)
+    }
+    queued += recipients.length
+    console.log(`Campaign "${campaign.name}" queued for ${recipients.length} recipient${recipients.length === 1 ? '' : 's'}`)
   }
-  return { sent }
+  return queued
+}
+
+async function sendQueuedCampaignEmails() {
+  const track = await hasAnalytics()
+  const tracking = await hasDeliveryTracking()
+  const campaigns = new Map()
+  let sent = 0
+  let failed = 0
+  for (;;) {
+    const { data: batch, error } = await supabase.from('campaign_sends').select('id,campaign_id,contact_id,email').eq('status', 'queued').order('created_at').limit(100) // eslint-disable-line no-await-in-loop
+    if (error) throw error
+    if (!batch?.length) break
+    const missing = [...new Set(batch.map((row) => row.campaign_id))].filter((id) => !campaigns.has(id))
+    if (missing.length) {
+      const { data: rows } = await supabase.from('campaigns').select('id,name,subject,body_html,status').in('id', missing) // eslint-disable-line no-await-in-loop
+      ;(rows || []).forEach((row) => campaigns.set(row.id, row))
+    }
+    const contactIds = batch.map((row) => row.contact_id).filter(Boolean)
+    const { data: contacts } = contactIds.length ? await supabase.from('contacts').select('id,name').in('id', contactIds) : { data: [] } // eslint-disable-line no-await-in-loop
+    const nameById = new Map((contacts || []).map((contact) => [contact.id, contact.name]))
+    let progressed = false
+    for (const row of batch) {
+      const campaign = campaigns.get(row.campaign_id)
+      if (campaign?.status === 'paused') continue // left queued; picked up again if it is rescheduled
+      progressed = true
+      const name = (nameById.get(row.contact_id) || row.email.split('@')[0].replace(/[._-]+/g, ' ')).trim() || 'there'
+      const html = String(campaign?.body_html || '').replace(/{{name}}/g, escHtml(name))
+      const result = campaign
+        ? await sendEmail({ to: row.email, subject: campaign.subject, html: track ? instrumentCampaignHtml(html, row.id) : html, idempotencyKey: `campaign-send-${row.id}` }) // eslint-disable-line no-await-in-loop
+        : { sent: false, reason: 'Campaign was deleted.' }
+      const update = { status: result.sent ? 'sent' : 'failed', error: result.sent ? null : result.reason, sent_at: result.sent ? new Date().toISOString() : null }
+      if (tracking && result.sent) Object.assign(update, { resend_id: result.id, last_event: 'sent' })
+      await supabase.from('campaign_sends').update(update).eq('id', row.id).eq('status', 'queued') // eslint-disable-line no-await-in-loop
+      if (result.sent) sent += 1
+      else failed += 1
+      await sleep(CAMPAIGN_SEND_INTERVAL_MS) // eslint-disable-line no-await-in-loop
+    }
+    if (!progressed) break // only paused campaigns left in the queue
+  }
+  return { sent, failed }
+}
+
+async function runDueCampaigns() {
+  if (!supabase || campaignRunning) return { queued: 0, sent: 0, failed: 0, alreadyRunning: campaignRunning }
+  campaignRunning = true
+  try {
+    const queued = await queueDueCampaigns()
+    const result = await sendQueuedCampaignEmails()
+    if (queued || result.sent || result.failed) console.log(`Campaign run: ${queued} queued, ${result.sent} accepted by Resend, ${result.failed} failed`)
+    return { queued, ...result }
+  } finally {
+    campaignRunning = false
+  }
 }
 setInterval(() => { runDueCampaigns().catch((error) => console.error('Campaign scheduler error:', error)) }, 60000)
+setTimeout(() => { runDueCampaigns().catch((error) => console.error('Campaign scheduler error:', error)) }, 20000)
 
 app.post('/api/admin/campaigns', async (request, response) => {
   const user = await requireAdmin(request, response)
@@ -1133,10 +1656,10 @@ app.get('/api/admin/campaigns', async (request, response) => {
   const { data, error } = await supabase.from('campaigns').select('id,name,subject,audience,status,recurrence,scheduled_at,updated_at').order('updated_at', { ascending: false })
   if (error) return response.status(500).json({ error: 'Campaigns could not be loaded.' })
   const counts = {}
-  const { data: sendRows } = await supabase.from('campaign_sends').select('campaign_id,status')
-  ;(sendRows || []).forEach((row) => {
-    counts[row.campaign_id] = counts[row.campaign_id] || { sent: 0, failed: 0 }
-    counts[row.campaign_id][row.status === 'sent' ? 'sent' : 'failed'] += 1
+  const sendRows = await selectAll(() => supabase.from('campaign_sends').select('campaign_id,status').order('id')).catch(() => [])
+  sendRows.forEach((row) => {
+    counts[row.campaign_id] = counts[row.campaign_id] || { sent: 0, failed: 0, queued: 0 }
+    counts[row.campaign_id][row.status === 'sent' ? 'sent' : row.status === 'queued' ? 'queued' : 'failed'] += 1
   })
   response.json({ campaigns: (data || []).map((campaign) => {
     const oneOff = /\s*\[one-off: ([^\]]+)\]$/.exec(campaign.name || '')?.[1]
@@ -1147,8 +1670,24 @@ app.get('/api/admin/campaigns', async (request, response) => {
       name: oneOff ? campaign.name.replace(/\s*\[one-off: [^\]]+\]$/, '') : campaign.name,
       sentCount: counts[campaign.id]?.sent || 0,
       failedCount: counts[campaign.id]?.failed || 0,
+      queuedCount: counts[campaign.id]?.queued || 0,
     }
   }) })
+})
+
+// How many people a campaign will actually reach (unique addresses), shown
+// before sending so a big send is never a surprise.
+app.post('/api/admin/campaigns/audience-count', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  const { audience = 'all', customEmails = [] } = request.body || {}
+  if (!CAMPAIGN_AUDIENCES.includes(audience)) return response.status(400).json({ error: 'Unknown audience.' })
+  try {
+    const recipients = await campaignRecipients(audience, cleanEmailList(customEmails))
+    response.json({ count: recipients.length })
+  } catch (error) {
+    response.status(500).json({ error: error.message })
+  }
 })
 
 app.post('/api/admin/campaigns/:id/schedule', async (request, response) => {
@@ -1167,8 +1706,10 @@ app.post('/api/admin/campaigns/:id/send-now', async (request, response) => {
   const { data: campaign } = await supabase.from('campaigns').select('*').eq('id', request.params.id).maybeSingle()
   if (!campaign) return response.status(404).json({ error: 'Campaign not found.' })
   await supabase.from('campaigns').update({ status: 'scheduled', scheduled_at: new Date().toISOString() }).eq('id', campaign.id)
-  const result = await runDueCampaigns()
-  response.json(result)
+  // A big list takes a while (paced under Resend's rate limit), so the send runs in
+  // the background; the campaign list and Stats show progress as rows go out.
+  runDueCampaigns().catch((error) => console.error('Campaign send error:', error))
+  response.json({ started: true })
 })
 
 app.post('/api/admin/campaigns/:id/pause', async (request, response) => {
@@ -1448,24 +1989,82 @@ app.post('/api/track/pageview', async (request, response) => {
   await supabase.from('page_views').insert({ path: pathName, referrer, user_agent: userAgent })
 })
 
-/* Admin analytics: per-campaign engagement. */
+/* Admin analytics: per-campaign delivery and engagement. "Sent" only means     */
+/* Resend accepted the email; delivered / bounced / spam come from Resend's own */
+/* events (webhook, or a sync from Resend's API). Opens are the human opens    */
+/* counted by our pixel plus Resend's open events when its tracking is on.     */
 app.get('/api/admin/campaigns/:id/analytics', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
   const truthful = await hasTruthfulOpens()
-  const { data: sends, error } = await supabase.from('campaign_sends').select(`id,email,status,opens,clicks,first_opened_at,last_clicked_at,sent_at${truthful ? ',machine_opens' : ''}`).eq('campaign_id', request.params.id).order('sent_at', { ascending: false })
-  if (error) return response.status(500).json({ error: 'Analytics could not be loaded.' })
-  const list = sends || []
-  const delivered = list.filter((row) => row.status === 'sent')
+  const tracking = await hasDeliveryTracking()
+  const columns = `id,email,status,error,opens,clicks,first_opened_at,last_clicked_at,sent_at${truthful ? ',machine_opens' : ''}${tracking ? ',resend_id,last_event,delivered_at,delivery_delayed_at,bounced_at,bounce_type,bounce_message,complained_at,resend_opened_at,resend_clicked_at,events_synced_at' : ''}`
+  let list
+  try {
+    list = await selectAll(() => supabase.from('campaign_sends').select(columns).eq('campaign_id', request.params.id).order('sent_at', { ascending: false }).order('id'))
+  } catch {
+    return response.status(500).json({ error: 'Analytics could not be loaded.' })
+  }
+  const accepted = list.filter((row) => row.status === 'sent')
+  const delivered = accepted.filter((row) => row.delivered_at || ['delivered', 'opened', 'clicked', 'complained'].includes(row.last_event))
+  const bounced = accepted.filter((row) => row.bounced_at || row.last_event === 'bounced')
+  const complained = accepted.filter((row) => row.complained_at || row.last_event === 'complained')
+  const awaiting = accepted.filter((row) => !delivered.includes(row) && !bounced.includes(row) && row.last_event !== 'failed')
+  const opened = accepted.filter((row) => row.opens > 0 || row.resend_opened_at)
+  const clicked = accepted.filter((row) => row.clicks > 0 || row.resend_clicked_at)
+  const lastEvent = tracking ? (await supabase.from('resend_events').select('received_at').order('received_at', { ascending: false }).limit(1)).data?.[0]?.received_at || null : null
   response.json({
     total: list.length,
-    sent: delivered.length,
-    failed: list.filter((row) => row.status === 'failed').length,
-    opened: delivered.filter((row) => row.opens > 0).length,
-    clicked: delivered.filter((row) => row.clicks > 0).length,
+    queued: list.filter((row) => row.status === 'queued').length,
+    sent: accepted.length,
+    failed: list.filter((row) => row.status === 'failed').length + accepted.filter((row) => row.last_event === 'failed').length,
+    delivered: delivered.length,
+    bounced: bounced.length,
+    complained: complained.length,
+    delayed: awaiting.filter((row) => row.delivery_delayed_at).length,
+    awaiting: awaiting.length,
+    opened: opened.length,
+    clicked: clicked.length,
     machineOpens: list.reduce((sum, row) => sum + (row.machine_opens || 0), 0),
+    tracking: { deliveryColumns: tracking, webhookConfigured: Boolean(process.env.RESEND_WEBHOOK_SECRET), lastWebhookEventAt: lastEvent },
     recipients: list,
   })
+})
+
+// Pulls each email's current status straight from Resend's API (the same record
+// Resend's dashboard shows). Fills gaps if a webhook was missed or set up late.
+// Paced under Resend's rate limit, so it runs in the background.
+const resendSyncRunning = new Set()
+app.post('/api/admin/campaigns/:id/sync-resend', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  if (!(await hasDeliveryTracking())) return response.status(409).json({ error: 'Apply supabase/migrations/20261001_delivery_tracking_jobs_messaging.sql first.' })
+  const campaignId = request.params.id
+  if (resendSyncRunning.has(campaignId)) return response.json({ started: false, running: true })
+  const rows = await selectAll(() => supabase.from('campaign_sends').select('id,resend_id,last_event').eq('campaign_id', campaignId).eq('status', 'sent').not('resend_id', 'is', null).order('id')).catch(() => [])
+  const pending = rows.filter((row) => !['bounced', 'complained', 'clicked', 'failed'].includes(row.last_event))
+  response.json({ started: true, checking: pending.length })
+  resendSyncRunning.add(campaignId)
+  try {
+    for (const row of pending) {
+      const result = await fetch(`https://api.resend.com/emails/${row.resend_id}`, { headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}` } }) // eslint-disable-line no-await-in-loop
+      if (result.status === 429) { await sleep(2000); continue } // eslint-disable-line no-await-in-loop
+      const email = await result.json().catch(() => null) // eslint-disable-line no-await-in-loop
+      if (result.ok && email?.last_event) {
+        // A later state implies the earlier ones (an opened email was delivered).
+        const event = email.last_event
+        if (['opened', 'clicked', 'complained'].includes(event)) await applyResendEvent({ emailId: row.resend_id, type: 'delivered' }) // eslint-disable-line no-await-in-loop
+        if (event === 'clicked') await applyResendEvent({ emailId: row.resend_id, type: 'opened' }) // eslint-disable-line no-await-in-loop
+        await applyResendEvent({ emailId: row.resend_id, type: event }) // eslint-disable-line no-await-in-loop
+        await supabase.from('campaign_sends').update({ events_synced_at: new Date().toISOString() }).eq('id', row.id) // eslint-disable-line no-await-in-loop
+      }
+      await sleep(CAMPAIGN_SEND_INTERVAL_MS) // eslint-disable-line no-await-in-loop
+    }
+  } catch (error) {
+    console.error('Resend sync failed:', error.message)
+  } finally {
+    resendSyncRunning.delete(campaignId)
+  }
 })
 
 /* Admin site analytics: traffic over the last 30 days. */
@@ -1567,28 +2166,49 @@ function invoiceOverrides(booking, overrides = {}) {
   const invoiceRate = overrides.rate ?? overrides.invoiceRate
   const invoiceAmount = overrides.amount ?? overrides.invoiceAmount
   const discountPercent = overrides.discountPercent
+  const discountAmount = overrides.discountAmount
+  const discountType = overrides.discountType
+  const discountCode = overrides.discountCode
   return {
     ...booking,
     ...(invoiceDescription !== undefined ? { invoiceDescription } : {}),
     ...(invoiceRate !== undefined && Number.isFinite(Number(invoiceRate)) ? { invoiceRate: Number(invoiceRate) } : {}),
     ...(invoiceAmount !== undefined && Number.isFinite(Number(invoiceAmount)) ? { invoiceAmount: Number(invoiceAmount) } : {}),
     ...(discountPercent !== undefined && Number.isFinite(Number(discountPercent)) ? { discountPercent: Number(discountPercent) } : {}),
+    ...(discountAmount !== undefined && Number.isFinite(Number(discountAmount)) ? { discountAmount: Number(discountAmount) } : {}),
+    ...(['percent', 'amount'].includes(discountType) ? { discountType } : {}),
+    ...(typeof discountCode === 'string' && discountCode ? { discountCode } : {}),
   }
 }
 
-// Subtotal, discount and total due, exactly as printed on the PDF.
+// Subtotal, discount and total due, exactly as printed on the PDF. The discount is
+// either a percentage (discountPercent) or a fixed £ amount (discountAmount, when
+// discountType is 'amount'); invoices saved before fixed amounts existed are percentages.
 function invoiceTotals(booking) {
-  const subtotal = Number(booking.invoiceAmount ?? booking.price ?? 0)
-  const discountPercent = Math.min(100, Math.max(0, Number(booking.discountPercent || 0)))
-  const discount = subtotal * discountPercent / 100
-  return { subtotal, discountPercent, discount, totalDue: Math.max(0, subtotal - discount) }
+  const subtotal = Math.max(0, Number(booking.invoiceAmount ?? booking.price ?? 0))
+  const discountType = booking.discountType === 'amount' ? 'amount' : 'percent'
+  const discountPercent = discountType === 'percent' ? Math.min(100, Math.max(0, Number(booking.discountPercent || 0))) : 0
+  const discountAmount = discountType === 'amount' ? Math.min(subtotal, Math.max(0, Number(booking.discountAmount || 0))) : 0
+  const discount = Math.round((discountType === 'amount' ? discountAmount : subtotal * discountPercent / 100) * 100) / 100
+  const label = discount > 0 ? `Discount${booking.discountCode ? ` ${booking.discountCode}` : ''} (${discountType === 'amount' ? `£${discountAmount.toFixed(2)} off` : `${discountPercent.toFixed(2).replace(/\.?0+$/, '')}%`})` : ''
+  return { subtotal, discountType, discountPercent, discountAmount, discount, discountLabel: label, totalDue: Math.max(0, Math.round((subtotal - discount) * 100) / 100) }
 }
 
-// The edits made in the invoice preview, kept on the booking when it is sent so
-// Pay now, reminders and re-generated PDFs all show the same figures.
-const INVOICE_OVERRIDE_KEYS = ['description', 'rate', 'amount', 'discountPercent']
+// The edits made in the invoice preview, kept on the booking when it is sent (or
+// saved) so Pay now, reminders and re-generated PDFs all show the same figures.
+const INVOICE_OVERRIDE_KEYS = ['description', 'rate', 'amount', 'discountType', 'discountPercent', 'discountAmount', 'discountCode']
 function storableOverrides(overrides = {}) {
-  return Object.fromEntries(Object.entries(overrides || {}).filter(([key, value]) => INVOICE_OVERRIDE_KEYS.includes(key) && value !== undefined && value !== null && value !== ''))
+  const kept = Object.fromEntries(Object.entries(overrides || {}).filter(([key, value]) => INVOICE_OVERRIDE_KEYS.includes(key) && value !== undefined && value !== null && value !== ''))
+  if (kept.discountType && !['percent', 'amount'].includes(kept.discountType)) delete kept.discountType
+  for (const key of ['rate', 'amount', 'discountPercent', 'discountAmount']) {
+    if (key in kept && !Number.isFinite(Number(kept[key]))) delete kept[key]
+    else if (key in kept) kept[key] = Number(kept[key])
+  }
+  if ('discountPercent' in kept) kept.discountPercent = Math.min(100, Math.max(0, kept.discountPercent))
+  if ('discountAmount' in kept) kept.discountAmount = Math.max(0, kept.discountAmount)
+  if ('description' in kept) kept.description = String(kept.description).slice(0, 300)
+  if ('discountCode' in kept) kept.discountCode = String(kept.discountCode).slice(0, 40)
+  return kept
 }
 
 // A stable link (not a Stripe session, which expires after 24h) that opens a
@@ -1630,7 +2250,8 @@ app.get('/api/invoices/pdf/:bookingId', async (request, response) => {
   const { data: school } = booking.school_id ? await supabase.from('schools').select('*').eq('id', booking.school_id).maybeSingle() : { data: null }
   const { data: settings, error: settingsError } = await supabase.from('invoice_settings').select('account_name,sort_code,account_number').eq('id', 'default').single()
   if (settingsError) return response.status(500).json({ error: 'Invoice payment details could not be loaded.' })
-  const invoiceBooking = invoiceOverrides({ ...booking, studentCount: booking.student_count, sessionType: booking.session_type, contactName: booking.contact_name, contactEmail: booking.contact_email, invoiceNumber, price: booking.price }, request.query)
+  // Saved edits first, then whatever the preview is showing right now.
+  const invoiceBooking = invoiceOverrides(invoiceOverrides({ ...booking, studentCount: booking.student_count, sessionType: booking.session_type, contactName: booking.contact_name, contactEmail: booking.contact_email, invoiceNumber, price: booking.price }, booking.invoice_overrides || {}), request.query)
   const pdf = await generateInvoicePdf({ booking: invoiceBooking, school: school ? { name: school.name, contactName: school.contact_name, email: school.email } : null, settings, preparedBy: profile.full_name || user.email, payUrl: isInvoiceOutstanding(booking) ? invoicePayUrl(booking) : '' })
   response.type('application/pdf').set({ 'Content-Disposition': `attachment; filename="${invoiceNumber || booking.id}.pdf"`, 'X-Invoice-Number': invoiceNumber }).send(pdf)
 })
@@ -1709,7 +2330,7 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy, payUr
   const ivory = '#faf6ec'
   const rule = '#ddd0aa'
   const money = (value) => `£${Number(value || 0).toFixed(2)}`
-  const { subtotal, discountPercent, discount, totalDue } = invoiceTotals(booking)
+  const { subtotal, discount, discountLabel, totalDue } = invoiceTotals(booking)
   const formatDate = (value) => value ? new Date(`${value}T00:00:00`).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'To be confirmed'
   // Once sent, the invoice keeps its original dates (reminders re-attach the same invoice).
   const invoiceDate = booking.invoice_sent_at ? new Date(booking.invoice_sent_at) : new Date()
@@ -1768,10 +2389,13 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy, payUr
   document.font('Helvetica').fontSize(9.5).fillColor(muted).text('Subtotal', labelX, totalsY)
   document.fillColor(ink).text(money(subtotal), valueX - 90, totalsY, { width: 90, align: 'right' })
   totalsY += 17.01
-  if (discountPercent > 0) {
-    document.fillColor(muted).text(`Discount (${discountPercent.toFixed(2).replace(/\.00$/, '')}%)`, labelX, totalsY)
+  if (discount > 0) {
+    // Long labels ("Discount FAMILY10 (£10.00 off)") wrap; leave room for every line.
+    const labelWidth = 150
+    document.fillColor(muted).text(discountLabel, valueX - 96 - labelWidth, totalsY, { width: labelWidth, align: 'right' })
+    const labelHeight = document.heightOfString(discountLabel, { width: labelWidth })
     document.fillColor(ink).text(`-${money(discount)}`, valueX - 90, totalsY, { width: 90, align: 'right' })
-    totalsY += 17.01
+    totalsY += Math.max(17.01, labelHeight + 5)
   }
   document.moveTo(labelX, totalsY - 5.67).lineTo(valueX, totalsY - 5.67).strokeColor(rule).stroke()
   totalsY += 17.01
@@ -1851,6 +2475,7 @@ async function sendInvoiceReminder({ bookingId, template, kind = 'manual', sentB
   const { row } = invoice
   if (!isInvoiceOutstanding(row)) return { sent: false, status: 409, reason: 'This invoice is paid or cancelled, so there is nothing to chase.' }
   if (row.invoice_status !== 'Sent') return { sent: false, status: 409, reason: 'Send the invoice before sending reminders for it.' }
+  if (invoice.amountPence === 0) return { sent: false, status: 409, reason: 'This invoice is fully discounted, so there is nothing to chase.', skip: true }
   if (!invoice.recipient) return { sent: false, status: 400, reason: 'There is no email address for this invoice. Add one to the school or booking.' }
   const overdue = daysOverdue(row.invoice_due_date)
 
@@ -1925,6 +2550,7 @@ async function runInvoiceReminders() {
     const kind = overdue === REMINDER_FIRM_DAY ? 'auto_firm' : 'auto_friendly'
     if (done.has(`${row.id}:${kind}`)) continue
     const result = await sendInvoiceReminder({ bookingId: row.id, template: kind === 'auto_firm' ? 'firm' : 'friendly', kind }) // eslint-disable-line no-await-in-loop
+    if (result.skip) continue
     if (!result.duplicate) sent.push({ bookingId: row.id, invoiceNumber: row.invoice_number, kind, daysOverdue: overdue, sent: result.sent, reason: result.reason || undefined })
     if (!result.sent && !result.duplicate) console.error(`Invoice reminder (${kind}) for ${row.invoice_number || row.id} failed:`, result.reason)
   }
@@ -2011,6 +2637,10 @@ async function payableInvoice(request, response) {
   }
   if (invoice.row.status === 'Cancelled') {
     invoicePayPage(response, { title: 'Invoice cancelled', body: `<p>${label} has been cancelled, so no payment is needed. Please contact us if you think this is a mistake.</p>` })
+    return null
+  }
+  if (invoice.amountPence === 0) {
+    invoicePayPage(response, { title: 'Nothing to pay', body: `<p>${label} has been fully discounted, so there is nothing to pay. Thank you!</p>` })
     return null
   }
   if (!stripe || invoice.amountPence < 30) {
@@ -2135,6 +2765,7 @@ app.get('/api/invoices/arrears', async (request, response) => {
   const payers = new Map()
   for (const row of list) {
     const invoice = buildInvoice(row, schools.get(row.school_id))
+    if (invoice.amountPence === 0) continue // fully discounted: nothing owed
     const family = families.get(row.family_id)
     const key = row.school_id ? `school:${row.school_id}` : row.family_id ? `family:${row.family_id}` : `email:${(row.contact_email || row.id).toLowerCase()}`
     const payer = payers.get(key) || {
@@ -2182,6 +2813,21 @@ app.get('/api/invoices/arrears', async (request, response) => {
   response.json({ payers: result, today, schedule: { friendlyFromDay: REMINDER_FRIENDLY_FROM_DAY, firmDay: REMINDER_FIRM_DAY }, isAdmin: access.profile?.role === 'admin' })
 })
 
+// Save the invoice's edits (description, amounts, discount) without sending it,
+// so a discount added now is on every later preview, PDF, reminder and Pay now.
+app.post('/api/invoices/:bookingId/overrides', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  const { data: row } = await supabase.from('bookings').select('id,invoice_status,invoice_paid_at,invoice_overrides').eq('id', request.params.bookingId).maybeSingle()
+  if (!row) return response.status(404).json({ error: 'Booking not found.' })
+  if (row.invoice_status === 'Paid' || row.invoice_paid_at) return response.status(409).json({ error: 'This invoice is already paid, so its figures can no longer change.' })
+  const overrides = storableOverrides(request.body?.overrides)
+  const { error } = await supabase.from('bookings').update({ invoice_overrides: overrides }).eq('id', row.id)
+  if (error) return response.status(500).json({ error: `Invoice changes could not be saved: ${error.message}` })
+  const invoice = await loadInvoice({ bookingId: row.id })
+  response.json({ overrides, totals: invoiceTotals(invoice.invoiceBooking), amountPence: invoice.amountPence })
+})
+
 app.post('/api/invoices/:bookingId/remind', async (request, response) => {
   const access = await requireInvoiceAccess(request, response)
   if (!access) return
@@ -2224,10 +2870,192 @@ function londonNow() {
   return { date: `${get('year')}-${get('month')}-${get('day')}`, minutes: Number(get('hour')) * 60 + Number(get('minute')) }
 }
 
+/* ------------------------------------------------------------------ */
+/* Discount codes, managed in Operations > Administration > Settings.   */
+/* Stored in app_settings ('discount_codes'), which only admins and the */
+/* server can read, so codes can't be listed from the browser. A code   */
+/* applies to any mix of parent class bookings, school bookings and     */
+/* event tickets; takes any percentage (0-100) or a fixed £ amount off; */
+/* and can be switched off without deleting it. Prices are always       */
+/* recalculated here, never trusted from the browser.                   */
+/* ------------------------------------------------------------------ */
+const DISCOUNT_SCOPES = ['class', 'school', 'event']
+const DISCOUNT_SCOPE_LABELS = { class: 'class bookings', school: 'school bookings', event: 'event tickets' }
+const CLASS_PRICES_PENCE = { day_pass: 1000, monthly_membership: 2500 }
+const normalizeDiscountCode = (value) => String(value || '').trim().toUpperCase().replace(/\s+/g, '')
+
+async function loadDiscountCodes() {
+  const { data, error } = await supabase.from('app_settings').select('value').eq('key', 'discount_codes').maybeSingle()
+  if (error) throw error
+  return Array.isArray(data?.value?.codes) ? data.value.codes : []
+}
+
+async function saveDiscountCodes(codes) {
+  const { error } = await supabase.from('app_settings').upsert({ key: 'discount_codes', value: { codes }, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+  if (error) throw error
+}
+
+// Validates an admin's create/edit. Returns { code } or { error }.
+function cleanDiscountInput(input = {}, existing = null) {
+  const code = normalizeDiscountCode(input.code ?? existing?.code)
+  if (!/^[A-Z0-9_-]{3,30}$/.test(code)) return { error: 'Codes are 3 to 30 letters, numbers, dashes or underscores (e.g. FAMILY10).' }
+  const appliesTo = [...new Set((Array.isArray(input.appliesTo) ? input.appliesTo : existing?.appliesTo || []).filter((scope) => DISCOUNT_SCOPES.includes(scope)))]
+  if (!appliesTo.length) return { error: 'Choose at least one place the code can be used.' }
+  const type = (input.type ?? existing?.type) === 'amount' ? 'amount' : 'percent'
+  const rawValue = Number(input.value ?? (existing ? (existing.type === 'amount' ? existing.amountOffPence / 100 : existing.percentOff) : NaN))
+  if (!Number.isFinite(rawValue) || rawValue < 0) return { error: 'Enter how much the code takes off.' }
+  if (type === 'percent' && rawValue > 100) return { error: 'A percentage discount can be at most 100%.' }
+  if (type === 'amount' && rawValue <= 0) return { error: 'A fixed discount must be more than £0.' }
+  return {
+    code: {
+      id: existing?.id || crypto.randomUUID(),
+      code,
+      description: String(input.description ?? existing?.description ?? '').trim().slice(0, 200),
+      appliesTo,
+      type,
+      percentOff: type === 'percent' ? Math.round(rawValue * 100) / 100 : null,
+      amountOffPence: type === 'amount' ? Math.round(rawValue * 100) : null,
+      // Monthly memberships: take the discount off the first payment only, or every month.
+      membershipDuration: (input.membershipDuration ?? existing?.membershipDuration) === 'forever' ? 'forever' : 'once',
+      active: input.active === undefined ? existing?.active ?? true : Boolean(input.active),
+      createdAt: existing?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  }
+}
+
+const discountLabel = (code) => (code.type === 'percent' ? `${code.percentOff}% off` : `${money(code.amountOffPence)} off`)
+
+function applyDiscount(code, subtotalPence) {
+  const subtotal = Math.max(0, Math.round(Number(subtotalPence) || 0))
+  const discountPence = code ? Math.min(subtotal, code.type === 'percent' ? Math.round(subtotal * code.percentOff / 100) : code.amountOffPence) : 0
+  return { subtotalPence: subtotal, discountPence, totalPence: subtotal - discountPence }
+}
+
+// Looks up an active code for a scope. Returns { code } (null when none given) or { error }.
+async function findDiscountCode(rawCode, scope) {
+  const wanted = normalizeDiscountCode(rawCode)
+  if (!wanted) return { code: null }
+  const found = (await loadDiscountCodes()).find((item) => item.code === wanted)
+  if (!found || !found.active) return { error: `The discount code ${wanted} isn't valid.` }
+  if (!found.appliesTo.includes(scope)) return { error: `The discount code ${wanted} can't be used on ${DISCOUNT_SCOPE_LABELS[scope]}.` }
+  return { code: found }
+}
+
+// Stripe coupons can't be edited, so the id carries the code and its terms: an
+// edited code gets a new coupon and old checkouts keep the terms they showed.
+async function stripeCouponId({ code, amountOffPence = null, duration = 'once' }) {
+  const terms = amountOffPence !== null ? `a${amountOffPence}` : code.type === 'percent' ? `p${String(code.percentOff).replace('.', '_')}` : `a${code.amountOffPence}`
+  const id = `kada-${code.code}-${terms}-${duration}`.slice(0, 200)
+  try {
+    await stripe.coupons.retrieve(id)
+    return id
+  } catch (error) {
+    if (error?.code !== 'resource_missing') throw error
+  }
+  const off = amountOffPence !== null ? { amount_off: amountOffPence, currency: 'gbp' } : code.type === 'percent' ? { percent_off: code.percentOff } : { amount_off: code.amountOffPence, currency: 'gbp' }
+  try {
+    await stripe.coupons.create({ id, name: code.code.slice(0, 40), duration, ...off })
+  } catch (error) {
+    if (error?.code !== 'resource_already_exists') throw error // created by a parallel checkout
+  }
+  return id
+}
+
+const discountMetadata = (code, totals) => (code ? { discount_code: code.code, discount_pence: String(totals.discountPence), subtotal_pence: String(totals.subtotalPence) } : {})
+
+app.get('/api/admin/discount-codes', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  try {
+    response.json({ codes: await loadDiscountCodes() })
+  } catch (error) {
+    response.status(500).json({ error: `Discount codes could not be loaded: ${error.message}` })
+  }
+})
+
+// Create (no id) or edit (with id) a code. Deactivating is an edit with active: false.
+app.post('/api/admin/discount-codes', async (request, response) => {
+  const user = await requireAdmin(request, response)
+  if (!user) return
+  try {
+    const codes = await loadDiscountCodes()
+    const existing = request.body?.id ? codes.find((item) => item.id === request.body.id) : null
+    if (request.body?.id && !existing) return response.status(404).json({ error: 'Discount code not found.' })
+    const { code, error } = cleanDiscountInput(request.body || {}, existing)
+    if (error) return response.status(400).json({ error })
+    if (codes.some((item) => item.code === code.code && item.id !== code.id)) return response.status(409).json({ error: `There is already a code called ${code.code}.` })
+    const next = existing ? codes.map((item) => (item.id === code.id ? code : item)) : [code, ...codes]
+    await saveDiscountCodes(next)
+    response.json({ code, codes: next })
+  } catch (error) {
+    response.status(500).json({ error: `The discount code could not be saved: ${error.message}` })
+  }
+})
+
+// Public price check for the booking forms. The server works out the price
+// itself; only the school form passes its own quote (schools are invoiced).
+const discountCheckLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
+app.post('/api/discount-codes/check', discountCheckLimiter, async (request, response) => {
+  if (!supabase) return response.status(503).json({ error: 'Discounts are not available right now.' })
+  const { code: rawCode, scope, planType, eventId, tierId, quantity, subtotalPence } = request.body || {}
+  if (!DISCOUNT_SCOPES.includes(scope)) return response.status(400).json({ error: 'Unknown booking type.' })
+  let subtotal = 0
+  if (scope === 'class') subtotal = CLASS_PRICES_PENCE[planType] || 0
+  if (scope === 'school') subtotal = Math.max(0, Math.round(Number(subtotalPence) || 0))
+  if (scope === 'event') {
+    const { data: event } = await supabase.from('events').select('ticket_tiers,status,ticketing_enabled').eq('id', String(eventId || '')).maybeSingle()
+    const tier = (event?.ticket_tiers || []).find((item) => item.id === tierId)
+    const qty = Math.floor(Number(quantity))
+    if (!tier || !Number.isInteger(qty) || qty < 1) return response.status(400).json({ error: 'Choose a ticket first.' })
+    subtotal = Math.round(Number(tier.pricePence)) * qty
+  }
+  try {
+    const { code, error } = await findDiscountCode(rawCode, scope)
+    if (error || !code) return response.status(400).json({ error: error || 'Enter a discount code.' })
+    const totals = applyDiscount(code, subtotal)
+    response.json({ valid: true, code: code.code, label: discountLabel(code), membershipDuration: code.membershipDuration, ...totals })
+  } catch {
+    response.status(500).json({ error: 'The code could not be checked. Please try again.' })
+  }
+})
+
+// School bookings are invoiced, so a school's code becomes a discount on the
+// booking's invoice. Only the school that made the enquiry (or an admin) can
+// apply one, and only before the invoice has been sent.
+app.post('/api/discount-codes/apply-booking', async (request, response) => {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
+  const { bookingId, code: rawCode } = request.body || {}
+  const [{ data: profile }, { data: booking }] = await Promise.all([
+    supabase.from('profiles').select('role').eq('id', user.id).maybeSingle(),
+    supabase.from('bookings').select('id,requested_by,invoice_status,invoice_overrides,notes').eq('id', String(bookingId || '')).maybeSingle(),
+  ])
+  if (!booking) return response.status(404).json({ error: 'Booking not found.' })
+  if (profile?.role !== 'admin' && booking.requested_by !== user.id) return response.status(403).json({ error: 'You can only add a code to your own booking.' })
+  if (booking.invoice_status !== 'Not sent') return response.status(409).json({ error: 'The invoice for this booking has already been sent.' })
+  const { code, error } = await findDiscountCode(rawCode, 'school')
+  if (error || !code) return response.status(400).json({ error: error || 'Enter a discount code.' })
+  const overrides = {
+    ...storableOverrides(booking.invoice_overrides || {}),
+    discountType: code.type,
+    ...(code.type === 'percent' ? { discountPercent: code.percentOff, discountAmount: undefined } : { discountAmount: code.amountOffPence / 100, discountPercent: undefined }),
+    discountCode: code.code,
+  }
+  const { error: saveError } = await supabase.from('bookings').update({ invoice_overrides: storableOverrides(overrides), notes: `${booking.notes ? `${booking.notes}. ` : ''}Discount code ${code.code} (${discountLabel(code)})`.slice(0, 2000) }).eq('id', booking.id)
+  if (saveError) return response.status(500).json({ error: 'The discount could not be saved on the booking.' })
+  response.json({ applied: true, code: code.code, label: discountLabel(code) })
+})
+
+// A booking or ticket order that a discount brings to £0 skips Stripe but is
+// recorded exactly as a paid one would be (same functions the webhook uses), so
+// it gets a real booking/order row, confirmation email and admin alert.
+const freeCheckoutSession = ({ metadata, email, name }) => ({ id: `free-${crypto.randomUUID()}`, metadata, customer_details: { email, name }, amount_total: 0, customer: null, subscription: null, payment_intent: null })
+
 app.post('/api/stripe/create-checkout-session', async (request, response) => {
   if (!stripe) return response.status(503).json({ error: 'Stripe is not configured on the server.' })
 
-  const { planType, className, classDate, parentName, parentEmail, students } = request.body || {}
+  const { planType, className, classDate, parentName, parentEmail, students, discountCode = '' } = request.body || {}
   const priceId = planType === 'monthly_membership' ? process.env.STRIPE_MONTHLY_PRICE_ID : process.env.STRIPE_DAY_PASS_PRICE_ID
   if (!priceId || !['monthly_membership', 'day_pass'].includes(planType) || !className || !classDate || !parentName || !parentEmail || !Array.isArray(students) || !students.length || students.some((student) => !student?.name || !student?.dateOfBirth)) {
     return response.status(400).json({ error: 'Plan, class, date, parent details, and at least one complete student record are required.' })
@@ -2257,14 +3085,31 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
     }
   }
 
+  let discount
+  try {
+    discount = await findDiscountCode(discountCode, 'class')
+  } catch {
+    return response.status(500).json({ error: 'The discount code could not be checked. Please try again.' })
+  }
+  if (discount.error) return response.status(400).json({ error: discount.error })
+  const code = discount.code
+  const totals = applyDiscount(code, CLASS_PRICES_PENCE[planType])
+  const isMembership = planType === 'monthly_membership'
+  const membershipDuration = code?.membershipDuration || 'once'
+  // £0 means no Stripe at all, except a membership that is free only for its first
+  // month: that still needs a Stripe subscription (and card) for the months after.
+  const free = totals.totalPence === 0 && (!isMembership || membershipDuration === 'forever')
+  if (!free && totals.totalPence > 0 && totals.totalPence < 30) return response.status(400).json({ error: 'With that discount the total is too small to pay by card. Please contact us to book.' })
+
   const user = await authenticatedUser(request)
 
   // Reuse the parent's existing family when we can find one (signed-in owner, or
   // a previous booking under the same email) so repeat bookings land in one place
   // instead of a duplicate family the parent dashboard can no longer resolve.
-  const familyMatch = [`guardian_email.eq.${parentEmail}`]
-  if (user?.id) familyMatch.push(`owner_user_id.eq.${user.id}`)
-  const { data: existingFamilies } = await supabase.from('parent_families').select('id,owner_user_id').or(familyMatch.join(',')).limit(1)
+  // Owned family first, then any family filed under this email (case-insensitive).
+  const { data: ownedFamilies } = user?.id ? await supabase.from('parent_families').select('id,owner_user_id').eq('owner_user_id', user.id).limit(1) : { data: [] }
+  const { data: emailFamilies } = ownedFamilies?.length ? { data: [] } : await supabase.from('parent_families').select('id,owner_user_id').ilike('guardian_email', likeExact(String(parentEmail).trim())).limit(1)
+  const existingFamilies = ownedFamilies?.length ? ownedFamilies : emailFamilies
   let familyId = existingFamilies?.[0]?.id || ''
   if (familyId) {
     if (user?.id && !existingFamilies[0].owner_user_id) {
@@ -2275,24 +3120,65 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
     const { error: familyError } = await supabase.from('parent_families').insert({ id: familyId, owner_user_id: user?.id || null, guardian_name: parentName, guardian_email: parentEmail, plan_type: planType, membership_status: 'pending' })
     if (familyError) return response.status(500).json({ error: 'Family record could not be created.' })
   }
-  const { error: bookingError } = await supabase.from('bookings').insert({ id: bookingId, family_id: familyId, contact_name: parentName, contact_email: parentEmail, date: classDate, session_type: className, price: planType === 'monthly_membership' ? 25 : 10, student_count: students.length, status: 'Enquiry', invoice_status: 'Not sent', payment_status: 'pending' })
+  const { error: bookingError } = await supabase.from('bookings').insert({ id: bookingId, family_id: familyId, contact_name: parentName, contact_email: parentEmail, date: classDate, session_type: className, price: totals.totalPence / 100, student_count: students.length, status: 'Enquiry', invoice_status: 'Not sent', payment_status: 'pending' })
   if (bookingError) return response.status(500).json({ error: 'Booking record could not be created.' })
-  const { error: studentsError } = await supabase.from('students').insert(students.map((student, index) => ({ id: `student-${bookingId}-${index + 1}`, booking_id: bookingId, family_id: familyId, parent_name: parentName, parent_email: parentEmail, name: student.name, date_of_birth: student.dateOfBirth, class_name: className, term: classDate, membership_status: 'inactive' })))
+  // A child already on the family's account and not yet booked into anything
+  // (added at sign-up or from the Children tab) is attached to this booking
+  // rather than duplicated; anyone else gets a new record for this booking.
+  const { data: familyChildren } = await supabase.from('students').select('id,name,date_of_birth,booking_id').eq('family_id', familyId)
+  // A child on a checkout that was never paid (still 'pending') is free to move.
+  const childBookingIds = [...new Set((familyChildren || []).map((child) => child.booking_id).filter(Boolean))]
+  const { data: childBookings } = childBookingIds.length ? await supabase.from('bookings').select('id,payment_status').in('id', childBookingIds) : { data: [] }
+  const abandoned = new Set((childBookings || []).filter((row) => row.payment_status === 'pending').map((row) => row.id))
+  const unbooked = (familyChildren || []).filter((child) => !child.booking_id || abandoned.has(child.booking_id))
+  const newStudents = []
+  for (const [index, student] of students.entries()) {
+    const match = unbooked.find((child) => child.name.trim().toLowerCase() === String(student.name).trim().toLowerCase() && child.date_of_birth === student.dateOfBirth)
+    if (match) {
+      unbooked.splice(unbooked.indexOf(match), 1)
+      const attach = supabase.from('students').update({ booking_id: bookingId, class_name: className, term: classDate }).eq('id', match.id)
+      const { error: attachError } = await (match.booking_id ? attach.eq('booking_id', match.booking_id) : attach.is('booking_id', null)) // eslint-disable-line no-await-in-loop
+      if (attachError) return response.status(500).json({ error: 'Student records could not be updated.' })
+    } else {
+      newStudents.push({ id: `student-${bookingId}-${index + 1}`, booking_id: bookingId, family_id: familyId, parent_name: parentName, parent_email: parentEmail, name: student.name, date_of_birth: student.dateOfBirth, class_name: className, term: classDate, membership_status: 'inactive' })
+    }
+  }
+  const { error: studentsError } = newStudents.length ? await supabase.from('students').insert(newStudents) : { error: null }
   if (studentsError) return response.status(500).json({ error: 'Student records could not be created.' })
   // Return to the host the parent actually used (same pattern as event checkout) , 
   // so dev/localhost sessions redirect back to dev, not to the live site.
   const requestOrigin = request.headers.origin || request.headers.referer?.replace(/\/[^/]*$/, '') || ''
   const clientUrl = requestOrigin.startsWith('http') ? requestOrigin : (process.env.CLIENT_URL || 'http://localhost:5173')
-  const session = await stripe.checkout.sessions.create({
-    mode: planType === 'monthly_membership' ? 'subscription' : 'payment',
-    customer_email: parentEmail,
-    line_items: [{ price: priceId, quantity: 1 }],
-    metadata: { booking_id: bookingId, family_id: familyId, plan_type: planType, class_name: className, class_date: classDate, amount_pence: planType === 'monthly_membership' ? '2500' : '1000', parent_name: parentName, parent_email: parentEmail },
-    success_url: `${clientUrl}?payment=success&session_id={CHECKOUT_SESSION_ID}#classes`,
-    cancel_url: `${clientUrl}#classes`,
-  })
+  const metadata = { booking_id: bookingId, family_id: familyId, plan_type: planType, class_name: className, class_date: classDate, amount_pence: String(totals.totalPence), parent_name: parentName, parent_email: parentEmail, ...discountMetadata(code, totals), ...(code && isMembership ? { discount_duration: membershipDuration } : {}) }
 
-  response.json({ url: session.url })
+  if (free) {
+    const freeSession = freeCheckoutSession({ metadata, email: parentEmail, name: parentName })
+    const result = await recordClassBooking(freeSession)
+    if (!result.ok) return response.status(500).json({ error: 'Your booking could not be saved. Please try again.' })
+    return response.json({ url: `${clientUrl}?payment=success&session_id=${freeSession.id}#classes`, free: true })
+  }
+
+  let discounts = []
+  try {
+    if (code && totals.discountPence > 0) {
+      // One-off payments get the exact £ off; memberships carry the code's own
+      // terms for the first month or every month.
+      discounts = [{ coupon: await stripeCouponId(isMembership ? { code, duration: membershipDuration } : { code, amountOffPence: totals.discountPence }) }]
+    }
+    const session = await stripe.checkout.sessions.create({
+      mode: isMembership ? 'subscription' : 'payment',
+      customer_email: parentEmail,
+      line_items: [{ price: priceId, quantity: 1 }],
+      ...(discounts.length ? { discounts } : {}),
+      metadata,
+      success_url: `${clientUrl}?payment=success&session_id={CHECKOUT_SESSION_ID}#classes`,
+      cancel_url: `${clientUrl}#classes`,
+    })
+    response.json({ url: session.url })
+  } catch (error) {
+    console.error('Class checkout creation failed:', error)
+    response.status(502).json({ error: 'Checkout could not be started. Please try again.' })
+  }
 })
 
 // ------------------------------------------------------------------
@@ -2302,7 +3188,7 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
 // ------------------------------------------------------------------
 app.post('/api/stripe/create-event-checkout', async (request, response) => {
   if (!stripe || !supabase) return response.status(503).json({ error: 'Ticketing is not configured on the server.' })
-  const { eventId, tierId, quantity, buyerName, buyerEmail, attendeeNames = [] } = request.body || {}
+  const { eventId, tierId, quantity, buyerName, buyerEmail, attendeeNames = [], discountCode = '' } = request.body || {}
   const qty = Math.floor(Number(quantity))
   if (!eventId || !tierId || !Number.isInteger(qty) || qty < 1 || qty > 20 || !buyerName?.trim() || !/.+@.+\..+/.test(buyerEmail || '')) {
     return response.status(400).json({ error: 'Event, ticket tier, quantity (1-20), and your name and email are required.' })
@@ -2321,42 +3207,67 @@ app.post('/api/stripe/create-event-checkout', async (request, response) => {
   const cleanNames = (Array.isArray(attendeeNames) ? attendeeNames : []).map((name) => String(name || '').trim())
   const finalNames = Array.from({ length: ticketCount }, (_, index) => cleanNames[index] || buyerName.trim())
 
+  let discount
+  try {
+    discount = await findDiscountCode(discountCode, 'event')
+  } catch {
+    return response.status(500).json({ error: 'The discount code could not be checked. Please try again.' })
+  }
+  if (discount.error) return response.status(400).json({ error: discount.error })
+  const code = discount.code
+  const totals = applyDiscount(code, unitAmount * qty)
+  if (totals.totalPence > 0 && totals.totalPence < 30) return response.status(400).json({ error: 'With that discount the total is too small to pay by card. Please contact us.' })
+
   const tierDescription = [bundleSize > 1 ? `${bundleSize} tickets per purchase` : '', event.event_date ? `Event date: ${event.event_date}` : ''].filter(Boolean).join(' · ')
   // Return to the host the buyer actually used (works through the Codespaces forwarded
   // URL, where plain localhost isn't reachable from the browser).
   const requestOrigin = request.headers.origin || request.headers.referer?.replace(/\/[^/]*$/, '') || ''
   const clientUrl = requestOrigin.startsWith('http') ? requestOrigin : (process.env.CLIENT_URL || 'http://localhost:5173')
-  const session = await stripe.checkout.sessions.create({
-    mode: 'payment',
-    customer_email: buyerEmail.trim(),
-    line_items: [{
-      quantity: qty,
-      price_data: {
-        currency: 'gbp',
-        unit_amount: unitAmount,
-        product_data: {
-          name: `${event.title} - ${tier.name}`,
-          ...(tierDescription ? { description: tierDescription } : {}),
+  const metadata = {
+    kind: 'event_ticket',
+    event_id: event.id,
+    tier_id: tier.id,
+    tier_name: tier.name,
+    quantity: String(qty),
+    bundle_size: String(bundleSize),
+    tickets: String(qty * bundleSize),
+    total_pence: String(totals.totalPence),
+    buyer_name: buyerName.trim(),
+    buyer_email: buyerEmail.trim(),
+    attendee_names: JSON.stringify(finalNames),
+    ...discountMetadata(code, totals),
+  }
+  if (totals.totalPence === 0) {
+    const freeSession = freeCheckoutSession({ metadata, email: buyerEmail.trim(), name: buyerName.trim() })
+    const result = await recordEventTicketOrder(freeSession)
+    if (!result.ok) return response.status(500).json({ error: 'Your tickets could not be saved. Please try again.' })
+    return response.json({ url: `${clientUrl}/event/${event.id}?ticket=success&session_id=${freeSession.id}`, free: true })
+  }
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      customer_email: buyerEmail.trim(),
+      line_items: [{
+        quantity: qty,
+        price_data: {
+          currency: 'gbp',
+          unit_amount: unitAmount,
+          product_data: {
+            name: `${event.title} - ${tier.name}`,
+            ...(tierDescription ? { description: tierDescription } : {}),
+          },
         },
-      },
-    }],
-    metadata: {
-      kind: 'event_ticket',
-      event_id: event.id,
-      tier_id: tier.id,
-      tier_name: tier.name,
-      quantity: String(qty),
-      bundle_size: String(bundleSize),
-      tickets: String(qty * bundleSize),
-      total_pence: String(unitAmount * qty),
-      buyer_name: buyerName.trim(),
-      buyer_email: buyerEmail.trim(),
-      attendee_names: JSON.stringify(finalNames),
-    },
-    success_url: `${clientUrl}/event/${event.id}?ticket=success&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${clientUrl}/event/${event.id}`,
-  })
-  response.json({ url: session.url })
+      }],
+      ...(code && totals.discountPence > 0 ? { discounts: [{ coupon: await stripeCouponId({ code, amountOffPence: totals.discountPence }) }] } : {}),
+      metadata,
+      success_url: `${clientUrl}/event/${event.id}?ticket=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${clientUrl}/event/${event.id}`,
+    })
+    response.json({ url: session.url })
+  } catch (error) {
+    console.error('Event checkout creation failed:', error)
+    response.status(502).json({ error: 'Checkout could not be started. Please try again.' })
+  }
 })
 
 // Public order lookup for the post-payment success page. The Stripe session id acts as the secret.

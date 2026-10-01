@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { useSiteLogo } from './lib/useSiteLogo'
 import { normalizeEvent, formatTierPrice, formatEventTimeRange, flyerPublicUrl } from './ops/EventsPage'
+import { DiscountCodeField } from './lib/DiscountCodeField'
 
 const emerald = '#0b3d2e'
 const emeraldLight = '#145c40'
@@ -49,6 +50,8 @@ export function EventTicketPage({ eventId, onBack }) {
   const [attendeeNames, setAttendeeNames] = useState([''])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [discountCode, setDiscountCode] = useState('')
+  const [discount, setDiscount] = useState(null)
   // successState: null (no redirect) | 'loading' | 'found' | 'pending'
   const [successState, setSuccessState] = useState(null)
   const [successOrder, setSuccessOrder] = useState(null)
@@ -130,7 +133,7 @@ export function EventTicketPage({ eventId, onBack }) {
       const response = await fetch('/api/stripe/create-event-checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ eventId, tierId: selectedTierId, quantity, buyerName: buyerName.trim(), buyerEmail: buyerEmail.trim(), attendeeNames: names }),
+        body: JSON.stringify({ eventId, tierId: selectedTierId, quantity, buyerName: buyerName.trim(), buyerEmail: buyerEmail.trim(), attendeeNames: names, discountCode: discountCode.trim() }),
       })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Checkout could not be started.')
@@ -295,9 +298,18 @@ export function EventTicketPage({ eventId, onBack }) {
               </div>
             )}
 
+            {selectedTier && (
+              <div style={{ marginBottom: 12 }}>
+                <DiscountCodeField scope="event" request={{ eventId, tierId: selectedTierId, quantity }} value={discountCode} onChange={setDiscountCode} onApplied={setDiscount} inputStyle={inputStyle} labelStyle={{ display: 'block', fontSize: 12, fontWeight: 700, color: emerald, marginBottom: 4 }} buttonStyle={{ border: `1px solid ${rule}`, borderRadius: 8, background: emerald, color: ivory, padding: '0 14px', fontWeight: 700, cursor: 'pointer' }} />
+              </div>
+            )}
+
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', borderTop: `1px solid ${rule}`, paddingTop: 12, marginBottom: 14 }}>
               <span style={{ fontSize: 13, color: muted }}>{totalTickets} ticket{totalTickets === 1 ? '' : 's'} total</span>
-              <span style={{ fontFamily: serif, fontSize: 24, fontWeight: 700, color: emerald }}>{formatTierPrice(totalPence)}</span>
+              <span style={{ fontFamily: serif, fontSize: 24, fontWeight: 700, color: emerald }}>
+                {discount && discount.discountPence > 0 && <span style={{ fontSize: 15, color: muted, textDecoration: 'line-through', marginRight: 8, fontWeight: 400 }}>{formatTierPrice(totalPence)}</span>}
+                {discount ? (discount.totalPence === 0 ? 'Free' : formatTierPrice(discount.totalPence)) : formatTierPrice(totalPence)}
+              </span>
             </div>
 
             {error && <p style={{ color: '#a3401f', fontSize: 13, margin: '0 0 10px' }}>{error}</p>}
@@ -309,7 +321,7 @@ export function EventTicketPage({ eventId, onBack }) {
                 background: canBuy ? gold : '#ddd6c2', color: emeraldLight, cursor: canBuy ? 'pointer' : 'not-allowed',
               }}
             >
-              {busy ? 'Taking you to secure checkout…' : 'Buy tickets'}
+              {busy ? (discount?.totalPence === 0 ? 'Booking your tickets…' : 'Taking you to secure checkout…') : discount?.totalPence === 0 ? 'Get free tickets' : 'Buy tickets'}
             </button>
             <p style={{ fontSize: 11.5, color: muted, textAlign: 'center', margin: '10px 0 0' }}>Secure payment by Stripe. A receipt is emailed to you after payment.</p>
           </form>

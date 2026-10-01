@@ -56,6 +56,8 @@ The Stripe secret supplied in chat should be revoked and replaced before testing
 
 Confirmed school bookings are sent through Resend by `server/index.js`. Add `RESEND_API_KEY`, `INVOICE_FROM_EMAIL` (a verified Resend sender), and `ADMIN_NOTIFICATION_EMAIL` to `.env`. The admin address is BCC'd on every invoice. Resend's default `onboarding@resend.dev` sender is suitable only for limited testing and generally requires the recipient to be the Resend account owner; verify a domain for real school recipients.
 
+Campaign delivery tracking: in Resend > Webhooks, add an endpoint `https://<your-domain>/api/resend/webhook` for the `email.sent`, `email.delivered`, `email.delivery_delayed`, `email.bounced`, `email.complained`, `email.opened` and `email.clicked` events, and set its signing secret as `RESEND_WEBHOOK_SECRET`. Campaign Stats then show delivered, bounced and marked-as-spam figures from Resend's own events; "Check with Resend" re-reads each email's status from Resend's API if any event was missed.
+
 ## Contacts CRM, team access & settings
 
 Three migrations add the CRM, staff accounts and settings (apply each in Supabase Dashboard > SQL Editor ,  all idempotent):

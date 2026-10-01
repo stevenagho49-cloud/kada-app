@@ -37,6 +37,7 @@ export function CampaignsPage({ session }) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [draft, setDraft] = useState(emptyDraft)
+  const [audienceCount, setAudienceCount] = useState(null)
   const [saving, setSaving] = useState(false)
   const [templateCategory, setTemplateCategory] = useState(TEMPLATE_CATEGORIES[0])
   const [aiPrompt, setAiPrompt] = useState('')
@@ -66,6 +67,19 @@ export function CampaignsPage({ session }) {
     }
     setLoading(false)
   }
+  // How many unique addresses this campaign will reach, before anything is sent.
+  useEffect(() => {
+    let mounted = true
+    setAudienceCount(null)
+    const timer = window.setTimeout(() => {
+      fetch('/api/admin/campaigns/audience-count', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` }, body: JSON.stringify({ audience: draft.audience, customEmails: draft.customEmails }) })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((result) => { if (mounted && result) setAudienceCount(result.count) })
+        .catch(() => {})
+    }, 400)
+    return () => { mounted = false; window.clearTimeout(timer) }
+  }, [draft.audience, draft.customEmails, session])
+
   useEffect(() => { void load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const applyTemplate = (template) => {
@@ -107,8 +121,8 @@ export function CampaignsPage({ session }) {
         }),
       })
       if (sendNow) {
-        const result = await authedFetch(`/api/admin/campaigns/${campaign.id}/send-now`, { method: 'POST' })
-        setNotice(`Campaign sent ,  ${result.sent} email${result.sent === 1 ? '' : 's'} delivered.`)
+        await authedFetch(`/api/admin/campaigns/${campaign.id}/send-now`, { method: 'POST' })
+        setNotice('Sending has started. Large lists go out over several minutes (paced to stay within Resend limits). Open Stats to watch delivery.')
       } else {
         await authedFetch(`/api/admin/campaigns/${campaign.id}/schedule`, { method: 'POST', body: JSON.stringify({ scheduledAt: draft.scheduledAt, recurrence: draft.recurrence }) })
         setNotice(draft.recurrence === 'none' ? `Scheduled for ${new Date(draft.scheduledAt).toLocaleString('en-GB')}.` : `Scheduled ,  repeats ${draft.recurrence} starting ${new Date(draft.scheduledAt).toLocaleString('en-GB')}.`)
@@ -193,6 +207,7 @@ export function CampaignsPage({ session }) {
             <select style={opsInputStyle} value={draft.audience} onChange={(event) => setDraft({ ...draft, audience: event.target.value })}>
               {AUDIENCES.map((audience) => <option key={audience.value} value={audience.value}>{audience.label}</option>)}
             </select>
+            <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>{audienceCount === null ? 'Counting recipients…' : `Will be sent to ${audienceCount.toLocaleString('en-GB')} ${audienceCount === 1 ? 'person' : 'people'} (one email each)`}</span>
           </label>
           <label style={{ display: 'block' }}><span style={labelStyle}>Subject line</span><input style={opsInputStyle} value={draft.subject} onChange={(event) => setDraft({ ...draft, subject: event.target.value })} /></label>
           <label style={{ display: 'block' }}><span style={labelStyle}>Inbox preview text</span><input style={opsInputStyle} value={draft.previewText} onChange={(event) => setDraft({ ...draft, previewText: event.target.value })} /></label>
@@ -236,11 +251,11 @@ export function CampaignsPage({ session }) {
                 <div style={{ fontSize: 12, color: OPS_COLORS.muted }}>
                   {AUDIENCES.find((audience) => audience.value === campaign.audience)?.label}{campaign.audience === 'custom' && campaign.custom_emails?.length ? ` (${campaign.custom_emails.length} address${campaign.custom_emails.length === 1 ? '' : 'es'})` : ''} · {RECURRENCE.find((option) => option.value === campaign.recurrence)?.label}
                   {campaign.scheduled_at ? ` · ${new Date(campaign.scheduled_at).toLocaleString('en-GB')}` : ''}
-                  {campaign.sentCount ? ` · ${campaign.sentCount} sent` : ''}{campaign.failedCount ? ` · ${campaign.failedCount} failed` : ''}
+                  {campaign.queuedCount ? ` · ${campaign.queuedCount} still sending` : ''}{campaign.sentCount ? ` · ${campaign.sentCount} accepted by Resend` : ''}{campaign.failedCount ? ` · ${campaign.failedCount} failed` : ''}
                 </div>
               </div>
               <Pill text={campaign.status} tone={STATUS_TONES[campaign.status]} />
-              {campaign.sentCount > 0 && <OpsButton small variant="ghost" onClick={() => setAnalyticsFor(campaign)}>Stats</OpsButton>}
+              {(campaign.sentCount > 0 || campaign.queuedCount > 0 || campaign.failedCount > 0) && <OpsButton small variant="ghost" onClick={() => setAnalyticsFor(campaign)}>Stats</OpsButton>}
               {(campaign.status === 'scheduled' || campaign.status === 'active') && <OpsButton small variant="ghost" onClick={() => pause(campaign)}>Pause</OpsButton>}
               <OpsButton small variant="danger" onClick={() => remove(campaign)}>Delete</OpsButton>
             </div>
@@ -271,11 +286,16 @@ export function CampaignsPage({ session }) {
   )
 }
 
-/* Per-campaign analytics: delivery, open and click engagement, plus a        */
-/* per-recipient table showing who opened and who clicked.                    */
+/* Per-campaign analytics. "Accepted" only means Resend took the email; whether */
+/* it was delivered, bounced or marked as spam comes from Resend's own events   */
+/* (webhook, or "Check with Resend" which reads each email's status from        */
+/* Resend's API). Opens are real readers counted by our pixel (machine fetches  */
+/* filtered out) plus Resend's open events if its open tracking is switched on. */
 function CampaignAnalytics({ session, campaign, onClose }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
+  const [syncNote, setSyncNote] = useState('')
+  const [refreshKey, setRefreshKey] = useState(0)
 
   useEffect(() => {
     let mounted = true
@@ -287,25 +307,58 @@ function CampaignAnalytics({ session, campaign, onClose }) {
       })
       .catch((err) => { if (mounted) setError(err.message) })
     return () => { mounted = false }
-  }, [campaign.id, session])
+  }, [campaign.id, session, refreshKey])
+
+  // While emails are still going out or awaiting a delivery result, refresh every 10 seconds.
+  useEffect(() => {
+    if (!data || (!data.queued && !data.awaiting)) return undefined
+    const timer = window.setTimeout(() => setRefreshKey((key) => key + 1), 10000)
+    return () => window.clearTimeout(timer)
+  }, [data])
+
+  const syncWithResend = async () => {
+    setSyncNote('')
+    const response = await fetch(`/api/admin/campaigns/${campaign.id}/sync-resend`, { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}` } })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) { setSyncNote(result.error || 'Could not check with Resend.'); return }
+    setSyncNote(result.running ? 'Already checking with Resend…' : `Checking ${result.checking} email${result.checking === 1 ? '' : 's'} with Resend. Figures update as each one is read.`)
+    window.setTimeout(() => setRefreshKey((key) => key + 1), 4000)
+  }
 
   const pct = (part, whole) => (whole ? `${Math.round((part / whole) * 100)}%` : '0%')
+  const deliveryKnown = data?.tracking?.deliveryColumns
+  const statusOf = (recipient) => {
+    if (recipient.status !== 'sent') return { text: recipient.status, tone: recipient.status === 'failed' ? 'red' : 'default' }
+    if (recipient.complained_at || recipient.last_event === 'complained') return { text: 'Marked as spam', tone: 'red' }
+    if (recipient.bounced_at || recipient.last_event === 'bounced') return { text: 'Bounced', tone: 'red' }
+    if (recipient.last_event === 'failed') return { text: 'Failed', tone: 'red' }
+    if (recipient.delivered_at || ['delivered', 'opened', 'clicked'].includes(recipient.last_event)) return { text: 'Delivered', tone: 'green' }
+    if (recipient.delivery_delayed_at) return { text: 'Delayed', tone: 'gold' }
+    return { text: deliveryKnown ? 'Awaiting result' : 'Accepted', tone: 'default' }
+  }
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(35,35,35,0.55)', zIndex: 60, display: 'grid', placeItems: 'center', padding: 20 }} onClick={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <div style={{ background: OPS_COLORS.cream, borderRadius: 12, padding: 22, width: '100%', maxWidth: 680, maxHeight: '88vh', overflowY: 'auto', boxShadow: '0 18px 60px rgba(0,0,0,0.3)' }}>
+      <div style={{ background: OPS_COLORS.cream, borderRadius: 12, padding: 22, width: '100%', maxWidth: 760, maxHeight: '88vh', overflowY: 'auto', boxShadow: '0 18px 60px rgba(0,0,0,0.3)' }}>
         <h3 style={{ margin: '0 0 2px', fontFamily: "'Iowan Old Style', Georgia, serif", color: OPS_COLORS.emerald, fontWeight: 400 }}>{campaign.name}</h3>
         <p style={{ margin: '0 0 16px', fontSize: 13, color: OPS_COLORS.muted }}>Subject: {campaign.subject}</p>
         {error && <p style={{ color: OPS_COLORS.warn, fontSize: 13 }}>{error}</p>}
         {!error && !data && <p style={{ color: OPS_COLORS.muted, fontSize: 13 }}>Loading…</p>}
         {data && (
           <>
-            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
               {[
-                ['Sent', data.sent],
-                ['Failed', data.failed],
-                ['Opened', `${data.opened} (${pct(data.opened, data.sent)})`],
-                ['Clicked', `${data.clicked} (${pct(data.clicked, data.sent)})`],
+                ...(data.queued ? [['Still sending', data.queued]] : []),
+                ['Accepted by Resend', data.sent],
+                ...(deliveryKnown ? [
+                  ['Delivered', `${data.delivered} (${pct(data.delivered, data.sent)})`],
+                  ['Bounced', `${data.bounced} (${pct(data.bounced, data.sent)})`],
+                  ['Marked as spam', `${data.complained} (${pct(data.complained, data.delivered)})`],
+                  ...(data.awaiting ? [['Awaiting result', data.awaiting]] : []),
+                ] : []),
+                ['Failed to send', data.failed],
+                ['Opened', `${data.opened} (${pct(data.opened, deliveryKnown ? data.delivered : data.sent)})`],
+                ['Clicked', `${data.clicked} (${pct(data.clicked, deliveryKnown ? data.delivered : data.sent)})`],
               ].map(([label, value]) => (
                 <div key={label} style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: '10px 14px', background: OPS_COLORS.ivory, minWidth: 110 }}>
                   <div style={{ fontSize: 11, color: OPS_COLORS.muted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
@@ -313,23 +366,28 @@ function CampaignAnalytics({ session, campaign, onClose }) {
                 </div>
               ))}
             </div>
-            {data.machineOpens > 0 && (
-              <p style={{ margin: '-4px 0 12px', fontSize: 12, color: OPS_COLORS.muted }}>
-                {data.machineOpens} machine open{data.machineOpens === 1 ? '' : 's'} filtered out (privacy proxies and security scanners fetch images before anyone reads). Only real readers are counted, and a click always counts as an open.
-              </p>
-            )}
+            <div style={{ fontSize: 12, color: OPS_COLORS.muted, margin: '0 0 12px', lineHeight: 1.55 }}>
+              {!deliveryKnown && <p style={{ margin: '0 0 6px', color: OPS_COLORS.warn }}>Delivery tracking isn't set up yet, so these figures only show that Resend accepted each email, not whether it arrived. Apply the 20261001 migration in Supabase to track deliveries, bounces and spam reports.</p>}
+              {deliveryKnown && !data.tracking.webhookConfigured && <p style={{ margin: '0 0 6px', color: OPS_COLORS.warn }}>Resend's webhook isn't connected on this server (RESEND_WEBHOOK_SECRET), so delivery results only update when you press "Check with Resend".</p>}
+              {deliveryKnown && <p style={{ margin: '0 0 6px' }}>Delivered, bounced and marked-as-spam come from Resend's own records{data.tracking.lastWebhookEventAt ? ` (last update from Resend ${new Date(data.tracking.lastWebhookEventAt).toLocaleString('en-GB')})` : ''}. "Marked as spam" is people pressing Report spam; mail providers don't tell anyone when they quietly file an email in a spam folder.</p>}
+              {data.machineOpens > 0 && <p style={{ margin: 0 }}>{data.machineOpens} machine open{data.machineOpens === 1 ? '' : 's'} filtered out (privacy proxies and security scanners fetch images before anyone reads). Only real readers are counted, and a click always counts as an open.</p>}
+            </div>
+            {deliveryKnown && <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}><OpsButton small variant="ghost" onClick={syncWithResend}>Check with Resend</OpsButton><OpsButton small variant="ghost" onClick={() => setRefreshKey((key) => key + 1)}>Refresh</OpsButton>{syncNote && <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>{syncNote}</span>}</div>}
             <div style={{ maxHeight: 320, overflowY: 'auto', border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8 }}>
               <table className="ops-table">
                 <thead><tr><th>Recipient</th><th>Status</th><th>Opened</th><th>Clicked</th></tr></thead>
                 <tbody>
-                  {data.recipients.map((recipient) => (
-                    <tr key={recipient.id}>
-                      <td style={{ fontSize: 12.5 }}>{recipient.email}</td>
-                      <td><Pill text={recipient.status} tone={recipient.status === 'sent' ? 'green' : recipient.status === 'failed' ? 'red' : 'default'} /></td>
-                      <td style={{ fontSize: 12.5 }}>{recipient.opens > 0 ? `Yes (${recipient.opens}×)` : 'Not yet'}</td>
-                      <td style={{ fontSize: 12.5 }}>{recipient.clicks > 0 ? `Yes (${recipient.clicks}×)` : 'Not yet'}</td>
-                    </tr>
-                  ))}
+                  {data.recipients.map((recipient) => {
+                    const status = statusOf(recipient)
+                    return (
+                      <tr key={recipient.id}>
+                        <td style={{ fontSize: 12.5 }}>{recipient.email}{(recipient.bounce_message || recipient.error) && <div style={{ fontSize: 11, color: OPS_COLORS.muted }}>{recipient.bounce_message || recipient.error}</div>}</td>
+                        <td><Pill text={status.text} tone={status.tone} /></td>
+                        <td style={{ fontSize: 12.5 }}>{recipient.opens > 0 ? `Yes (${recipient.opens}×)` : recipient.resend_opened_at ? 'Yes' : 'Not yet'}</td>
+                        <td style={{ fontSize: 12.5 }}>{recipient.clicks > 0 ? `Yes (${recipient.clicks}×)` : recipient.resend_clicked_at ? 'Yes' : 'Not yet'}</td>
+                      </tr>
+                    )
+                  })}
                   {!data.recipients.length && <tr><td colSpan="4" style={{ color: OPS_COLORS.muted, fontSize: 13 }}>No recipients recorded.</td></tr>}
                 </tbody>
               </table>

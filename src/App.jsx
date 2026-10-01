@@ -178,7 +178,39 @@ function normalizeBooking(row = {}) {
     completedAt: row.completed_at ?? row.completedAt ?? '',
     // 'pending' = checkout started but never paid ,  excluded from stats and notifications.
     paymentStatus: row.payment_status ?? row.paymentStatus ?? '',
+    // Edits saved on the invoice (description, amounts, discount). Read-only here:
+    // only the invoice endpoints write them.
+    invoiceOverrides: row.invoice_overrides ?? row.invoiceOverrides ?? null,
+    invoiceSentAt: row.invoice_sent_at ?? row.invoiceSentAt ?? '',
   }
+}
+
+// The invoice preview edits, seeded from what was last saved on the booking.
+function withSavedInvoiceEdits(booking) {
+  const saved = booking.invoiceOverrides || {}
+  return {
+    ...booking,
+    ...(saved.description !== undefined ? { invoiceDescription: saved.description } : {}),
+    ...(saved.rate !== undefined ? { invoiceRate: saved.rate } : {}),
+    ...(saved.amount !== undefined ? { invoiceAmount: saved.amount } : {}),
+    discountType: saved.discountType === 'amount' ? 'amount' : 'percent',
+    discountPercent: saved.discountPercent ?? 0,
+    discountAmount: saved.discountAmount ?? 0,
+    discountCode: saved.discountCode || '',
+  }
+}
+
+const invoiceEditPayload = (booking) => ({ description: booking.invoiceDescription, rate: booking.invoiceRate, amount: booking.invoiceAmount, discountType: booking.discountType || 'percent', discountPercent: booking.discountType === 'amount' ? undefined : booking.discountPercent, discountAmount: booking.discountType === 'amount' ? booking.discountAmount : undefined, discountCode: booking.discountCode || undefined })
+const invoicePdfParams = (booking) => new URLSearchParams(Object.entries({ description: booking.invoiceDescription ?? booking.sessionType ?? '', rate: String(booking.invoiceRate ?? booking.price ?? 0), amount: String(booking.invoiceAmount ?? booking.price ?? 0), discountType: booking.discountType || 'percent', discountPercent: String(booking.discountPercent ?? 0), discountAmount: String(booking.discountAmount ?? 0), discountCode: booking.discountCode || '' }).filter(([, value]) => value !== ''))
+
+// Totals exactly as the server prints them on the PDF (see invoiceTotals in server/index.js).
+function invoicePreviewTotals(booking) {
+  const subtotal = Math.max(0, Number(booking.invoiceAmount ?? booking.price ?? 0))
+  const discount = booking.discountType === 'amount'
+    ? Math.min(subtotal, Math.max(0, Number(booking.discountAmount || 0)))
+    : subtotal * Math.min(100, Math.max(0, Number(booking.discountPercent || 0))) / 100
+  const rounded = Math.round(discount * 100) / 100
+  return { subtotal, discount: rounded, total: Math.max(0, Math.round((subtotal - rounded) * 100) / 100) }
 }
 
 function normalizeSchool(row = {}) {
@@ -240,6 +272,7 @@ function toDbBooking(row) {
     instructor_pay: Number(row.instructorPay || 0),
     needs_admin_attention: Boolean(row.needsAdminAttention),
     completed_at: row.completedAt || null,
+    family_id: row.familyId || null,
   }
 }
 
@@ -435,12 +468,49 @@ function statusTone(status) { return status === 'Confirmed' ? 'green' : status =
 function invoiceTone(status) { return status === 'Paid' ? 'green' : status === 'Sent' ? 'gold' : 'red' }
 function Badge({ text, tone = 'default' }) { const colors = { default: ['#f1eee2', muted], green: ['#e6f0e9', okGreen], gold: ['#faf1d9', '#8a6d10'], red: ['#f7e9e4', warn] }; return <span style={{ background: colors[tone][0], color: colors[tone][1], borderRadius: 20, padding: '3px 9px', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{text}</span> }
 
-function BookingForm({ booking, schools, instructors, onSave, onDelete }) {
+function BookingForm({ booking, schools, instructors, families = [], onSave, onDelete, onCreateFamily }) {
   const [form, setForm] = useState(booking)
+  // Bill a school, or a parent/family (e.g. an offline family who owes for classes).
+  const [billTo, setBillTo] = useState(booking.familyId && !booking.schoolId ? 'family' : 'school')
+  const [newFamily, setNewFamily] = useState({ name: '', email: '' })
+  const [saving, setSaving] = useState(false)
   const set = (field) => (event) => setForm({ ...form, [field]: event.target.value })
-  return <form onSubmit={(event) => { event.preventDefault(); onSave({ ...form, price: Number(form.price || 0), studentCount: Number(form.studentCount || 0) }) }}>
+  const pickFamily = (familyId) => {
+    const family = families.find((item) => item.id === familyId)
+    setForm({ ...form, familyId, schoolId: '', ...(family ? { contactName: family.guardian_name || '', contactEmail: family.guardian_email || '' } : {}) })
+  }
+  const submit = async (event) => {
+    event.preventDefault()
+    const next = { ...form, price: Number(form.price || 0), studentCount: Number(form.studentCount || 0) }
+    if (billTo === 'family') {
+      next.schoolId = ''
+      if (next.familyId === '__new') {
+        setSaving(true)
+        const familyId = await onCreateFamily({ name: newFamily.name.trim(), email: newFamily.email.trim().toLowerCase() })
+        setSaving(false)
+        if (!familyId) return
+        Object.assign(next, { familyId, contactName: newFamily.name.trim(), contactEmail: newFamily.email.trim().toLowerCase() })
+      }
+    } else {
+      next.familyId = ''
+    }
+    onSave(next)
+  }
+  return <form onSubmit={submit}>
+    <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 13.5 }}>
+      <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}><input type="radio" checked={billTo === 'school'} onChange={() => setBillTo('school')} /> School booking</label>
+      <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}><input type="radio" checked={billTo === 'family'} onChange={() => setBillTo('family')} /> Parent / family</label>
+    </div>
+    {billTo === 'family' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+      <Field label="Family"><select style={inputStyle} value={form.familyId || ''} onChange={(event) => pickFamily(event.target.value)} required><option value="">Select family</option>{families.map((family) => <option key={family.id} value={family.id}>{family.guardian_name || 'Family'} · {family.guardian_email}</option>)}<option value="__new">New family (not signed up yet)…</option></select></Field>
+      {form.familyId === '__new' ? <>
+        <Field label="Parent / guardian name"><input style={inputStyle} value={newFamily.name} onChange={(event) => setNewFamily({ ...newFamily, name: event.target.value })} required /></Field>
+        <Field label="Parent / guardian email"><input type="email" style={inputStyle} value={newFamily.email} onChange={(event) => setNewFamily({ ...newFamily, email: event.target.value })} required /></Field>
+        <p style={{ gridColumn: '1 / -1', margin: '-6px 0 8px', fontSize: 12, color: muted }}>When this parent signs up with the same email, this booking and its invoice appear in their account automatically.</p>
+      </> : null}
+    </div>}
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-      <Field label="School"><select style={inputStyle} value={form.schoolId} onChange={set('schoolId')} required><option value="">Select school</option>{schools.map((school) => <option key={school.id} value={school.id}>{school.name}</option>)}</select></Field>
+      {billTo === 'school' && <Field label="School"><select style={inputStyle} value={form.schoolId} onChange={set('schoolId')} required><option value="">Select school</option>{schools.map((school) => <option key={school.id} value={school.id}>{school.name}</option>)}</select></Field>}
       <Field label="Date"><input type="date" style={inputStyle} value={form.date} onChange={set('date')} required /></Field>
       <Field label="Session type"><select style={inputStyle} value={form.sessionType} onChange={set('sessionType')}><option>Full day (£490)</option><option>Half day</option><option>Single workshop</option><option>Custom</option></select></Field>
       <Field label="Price (£)"><input type="number" style={inputStyle} value={form.price} onChange={set('price')} /></Field>
@@ -454,7 +524,7 @@ function BookingForm({ booking, schools, instructors, onSave, onDelete }) {
     <Field label="Contact name"><input style={inputStyle} value={form.contactName} onChange={set('contactName')} /></Field>
     <Field label="Contact email"><input type="email" style={inputStyle} value={form.contactEmail} onChange={set('contactEmail')} /></Field>
     <Field label="Notes"><textarea style={{ ...inputStyle, minHeight: 70 }} value={form.notes} onChange={set('notes')} /></Field>
-    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 16 }}><div>{onDelete && <Button variant="danger" onClick={onDelete}>Delete booking</Button>}</div><Button type="submit">Save booking</Button></div>
+    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 16 }}><div>{onDelete && <Button variant="danger" onClick={onDelete}>Delete booking</Button>}</div><Button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save booking'}</Button></div>
   </form>
 }
 
@@ -469,10 +539,20 @@ function SchoolRecord({ school, bookings, instructorLabel, onEdit, onBooking, on
   return <Modal title={school.name} onClose={onClose} wide><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}><div><strong>Contact</strong><p>{school.contactName || 'Not set'}<br />{school.email || 'No email'}<br />{school.phone || 'No phone'}</p></div><div><strong>Notes</strong><p>{school.notes || 'No notes'}</p></div></div><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}><h4 style={{ margin: 0, color: emerald }}>Bookings</h4><Button small onClick={() => onBooking({ ...emptyBooking(), schoolId: school.id, contactName: school.contactName, contactEmail: school.email })}>New booking</Button></div>{related.length === 0 ? <p style={{ color: muted }}>No bookings for this school.</p> : related.map((booking) => <div key={booking.id} onClick={() => onBooking(booking)} style={{ borderTop: `1px solid ${rule}`, padding: '10px 0', cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }}><span>{booking.date || 'No date'} · {booking.sessionType}<br /><small>{instructorLabel(booking) || 'Unassigned'}</small></span><span style={{ display: 'flex', gap: 6 }}><Badge text={booking.status} tone={statusTone(booking.status)} /><Badge text={booking.invoiceStatus} tone={invoiceTone(booking.invoiceStatus)} /></span></div>)}<div style={{ marginTop: 18, display: 'flex', gap: 8 }}><Button variant="ghost" onClick={() => onEdit(school)}>Edit school</Button><Button variant="ghost" onClick={() => onMessage(school)}>Message school</Button></div></Modal>
 }
 
-function InvoicePreview({ booking, onUpdate, onSave, onSend, onDownload, onRemind, sending, onClose, pdfUrl }) {
+function InvoicePreview({ booking, onUpdate, onSave, onSaveEdits, onSend, onDownload, onRemind, sending, onClose, pdfUrl }) {
   const invoiceNumber = booking.invoiceNumber || 'Not numbered'
   const setInvoice = (field) => (event) => onUpdate({ [field]: event.target.value })
-  return <Modal title={`Invoice ${invoiceNumber}`} onClose={onClose} wide><div style={{ display: 'grid', gridTemplateColumns: 'minmax(240px, 0.8fr) minmax(0, 1.4fr)', gap: 18, alignItems: 'start' }}><div><h4 style={{ margin: '0 0 10px', color: emerald }}>Edit before sending</h4><Field label="Line item description"><input style={inputStyle} value={booking.invoiceDescription ?? booking.sessionType ?? ''} onChange={setInvoice('invoiceDescription')} /></Field><Field label="Rate"><input type="number" min="0" step="0.01" style={inputStyle} value={booking.invoiceRate ?? booking.price ?? 0} onChange={setInvoice('invoiceRate')} /></Field><Field label="Amount"><input type="number" min="0" step="0.01" style={inputStyle} value={booking.invoiceAmount ?? booking.price ?? 0} onChange={setInvoice('invoiceAmount')} /></Field><Field label="Discount (%)"><input type="number" min="0" max="100" step="0.01" style={inputStyle} value={booking.discountPercent ?? 0} onChange={setInvoice('discountPercent')} /></Field></div><div style={{ border: `1px solid ${rule}`, background: '#e9e5da', padding: 10, minHeight: 520 }}>{pdfUrl ? <iframe title={`Invoice ${invoiceNumber} PDF preview`} src={pdfUrl} style={{ display: 'block', width: '100%', height: 620, border: 0, background: '#fff' }} /> : <p style={{ padding: 18, color: muted }}>Loading designed invoice preview…</p>}</div></div><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}><Button variant="gold" disabled={sending || booking.invoiceStatus === 'Paid'} onClick={() => onSend(booking)}>{sending ? 'Sending…' : 'Send invoice'}</Button><Button variant="ghost" onClick={() => onDownload(booking)}>Download PDF</Button>{booking.invoiceStatus === 'Sent' && <Button variant="ghost" disabled={sending} onClick={() => onRemind(booking)}>Send reminder</Button>}<Button variant="ghost" onClick={() => onSave({ ...booking, invoiceStatus: 'Sent' })}>Mark sent</Button>{['Not sent', 'Sent', 'Paid'].map((status) => <Button key={status} variant={booking.invoiceStatus === status ? 'primary' : 'ghost'} onClick={() => onSave({ ...booking, invoiceStatus: status })}>{status}</Button>)}</div></Modal>
+  const totals = invoicePreviewTotals(booking)
+  const paid = booking.invoiceStatus === 'Paid'
+  const money = (value) => `£${Number(value || 0).toFixed(2)}`
+  return <Modal title={`Invoice ${invoiceNumber}`} onClose={onClose} wide><div style={{ display: 'grid', gridTemplateColumns: 'minmax(240px, 0.8fr) minmax(0, 1.4fr)', gap: 18, alignItems: 'start' }}><div><h4 style={{ margin: '0 0 10px', color: emerald }}>{paid ? 'Paid invoice' : 'Edit before sending'}</h4><Field label="Line item description"><input style={inputStyle} disabled={paid} value={booking.invoiceDescription ?? booking.sessionType ?? ''} onChange={setInvoice('invoiceDescription')} /></Field><Field label="Rate"><input type="number" min="0" step="0.01" style={inputStyle} disabled={paid} value={booking.invoiceRate ?? booking.price ?? 0} onChange={setInvoice('invoiceRate')} /></Field><Field label="Amount"><input type="number" min="0" step="0.01" style={inputStyle} disabled={paid} value={booking.invoiceAmount ?? booking.price ?? 0} onChange={setInvoice('invoiceAmount')} /></Field>
+    <Field label="Discount"><div style={{ display: 'grid', gridTemplateColumns: '110px 1fr', gap: 8 }}><select style={inputStyle} disabled={paid} value={booking.discountType || 'percent'} onChange={setInvoice('discountType')}><option value="percent">% off</option><option value="amount">£ off</option></select>{booking.discountType === 'amount'
+      ? <input type="number" min="0" step="0.01" aria-label="Discount in pounds" style={inputStyle} disabled={paid} value={booking.discountAmount ?? 0} onChange={setInvoice('discountAmount')} />
+      : <input type="number" min="0" max="100" step="0.01" aria-label="Discount percentage" style={inputStyle} disabled={paid} value={booking.discountPercent ?? 0} onChange={setInvoice('discountPercent')} />}</div></Field>
+    {booking.discountCode && <p style={{ margin: '-6px 0 10px', fontSize: 12, color: muted }}>From discount code <strong>{booking.discountCode}</strong>.</p>}
+    <div style={{ border: `1px solid ${rule}`, borderRadius: 8, background: ivory, padding: '10px 12px', fontSize: 13, display: 'grid', gap: 4 }}><div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Subtotal</span><span>{money(totals.subtotal)}</span></div>{totals.discount > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', color: muted }}><span>Discount</span><span>-{money(totals.discount)}</span></div>}<div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700, color: emerald }}><span>Total due</span><span>{money(totals.total)}</span></div></div>
+    {!paid && <div style={{ marginTop: 10 }}><Button small variant="ghost" disabled={sending} onClick={() => onSaveEdits(booking)}>Save changes</Button></div>}
+  </div><div style={{ border: `1px solid ${rule}`, background: '#e9e5da', padding: 10, minHeight: 520 }}>{pdfUrl ? <iframe title={`Invoice ${invoiceNumber} PDF preview`} src={pdfUrl} style={{ display: 'block', width: '100%', height: 620, border: 0, background: '#fff' }} /> : <p style={{ padding: 18, color: muted }}>Loading designed invoice preview…</p>}</div></div><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}><Button variant="gold" disabled={sending || paid} onClick={() => onSend(booking)}>{sending ? 'Sending…' : 'Send invoice'}</Button><Button variant="ghost" onClick={() => onDownload(booking)}>Download PDF</Button>{booking.invoiceStatus === 'Sent' && <Button variant="ghost" disabled={sending} onClick={() => onRemind(booking)}>Send reminder</Button>}<Button variant="ghost" onClick={() => onSave({ ...booking, invoiceStatus: 'Sent' })}>Mark sent</Button>{['Not sent', 'Sent', 'Paid'].map((status) => <Button key={status} variant={booking.invoiceStatus === status ? 'primary' : 'ghost'} onClick={() => onSave({ ...booking, invoiceStatus: status })}>{status}</Button>)}</div></Modal>
 }
 
 function InvoiceSettings({ settings, onSave, saving }) {
@@ -509,8 +589,12 @@ function InstructorForm({ instructor, onSave, onDelete }) {
   return <form onSubmit={(event) => { event.preventDefault(); onSave({ ...form, rate: Number(form.rate || 0) }) }}><Field label="Name"><input style={inputStyle} value={form.name} onChange={set('name')} required /></Field><Field label="Email"><input type="email" style={inputStyle} value={form.email} onChange={set('email')} /></Field><Field label="Phone"><input style={inputStyle} value={form.phone} onChange={set('phone')} /></Field><Field label="Rate per session (£)"><input type="number" style={inputStyle} value={form.rate} onChange={set('rate')} /></Field><Field label="Locations / areas"><input style={inputStyle} value={form.locationAreas} onChange={set('locationAreas')} placeholder="e.g. Birmingham, Solihull" /></Field><Field label="Gender (optional)"><select style={inputStyle} value={form.gender} onChange={set('gender')}><option value="">Prefer not to say</option><option>Female</option><option>Male</option><option>Non-binary</option><option>Self-describe</option></select></Field><div style={{ display: 'flex', justifyContent: 'space-between' }}><div>{onDelete && <Button variant="danger" onClick={onDelete}>Delete</Button>}</div><Button type="submit">Save instructor</Button></div></form>
 }
 
-function TemplateView({ template, onSave }) {
+function TemplateView({ template, onSave, readOnly = false }) {
   const [local, setLocal] = useState(template)
+  if (readOnly) {
+    const total = template.sections.reduce((sum, section) => sum + Number(section.minutes || 0), 0)
+    return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Workshop template</h2><p style={{ color: muted }}>How every KADA workshop runs: {template.defaultDuration} minutes, up to {template.maxStudentsPerStaff} students per instructor.</p><Card style={{ padding: 20 }}>{template.sections.length ? template.sections.map((section, index) => <div key={section.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '9px 0', borderTop: index ? `1px solid ${rule}` : 0 }}><span>{index + 1}. {section.title || 'Untitled section'}</span><strong>{section.minutes} min</strong></div>) : <p style={{ color: muted, margin: 0 }}>No sections yet.</p>}<p style={{ color: muted, fontSize: 12, margin: '10px 0 0' }}>{total} minutes in total</p>{template.notes && <p style={{ margin: '14px 0 0', lineHeight: 1.6 }}>{template.notes}</p>}</Card></div>
+  }
   const setSection = (id, field, value) => setLocal({ ...local, sections: local.sections.map((section) => section.id === id ? { ...section, [field]: value } : section) })
   const total = local.sections.reduce((sum, section) => sum + Number(section.minutes || 0), 0)
   return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Workshop template</h2><p style={{ color: muted }}>Edit the live template used by instructors.</p><Card style={{ padding: 20 }}><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}><Field label="Default duration (minutes)"><input type="number" style={inputStyle} value={local.defaultDuration} onChange={(event) => setLocal({ ...local, defaultDuration: event.target.value })} /></Field><Field label="Max students per staff"><input type="number" style={inputStyle} value={local.maxStudentsPerStaff} onChange={(event) => setLocal({ ...local, maxStudentsPerStaff: event.target.value })} /></Field></div><p style={{ color: total === Number(local.defaultDuration) ? okGreen : warn, fontSize: 12 }}>{total} minutes total</p>{local.sections.length === 0 && <EmptyState icon="📝" title="No sections yet" body="Build the template instructors follow in every session, one section at a time." ctaLabel="Add first section" onCta={() => setLocal({ ...local, sections: [{ id: crypto.randomUUID(), title: '', minutes: 10 }] })} />}{local.sections.map((section, index) => <div key={section.id} style={{ display: 'grid', gridTemplateColumns: '28px 1fr 90px', gap: 8, marginBottom: 8, alignItems: 'center' }}><span>{index + 1}</span><input style={inputStyle} value={section.title} onChange={(event) => setSection(section.id, 'title', event.target.value)} /><input type="number" style={inputStyle} value={section.minutes} onChange={(event) => setSection(section.id, 'minutes', event.target.value)} /></div>)}<Button variant="ghost" onClick={() => setLocal({ ...local, sections: [...local.sections, { id: crypto.randomUUID(), title: '', minutes: 10 }] })}>Add section</Button><Field label="Notes"><textarea style={{ ...inputStyle, minHeight: 80 }} value={local.notes} onChange={(event) => setLocal({ ...local, notes: event.target.value })} /></Field><Button onClick={() => onSave(local)}>Save template</Button></Card></div>
@@ -522,14 +606,19 @@ function BirthdayNotice({ students }) {
   return <Card style={{ padding: 16, marginBottom: 18, background: '#fff8e8', borderColor: '#ead7a3' }}><strong style={{ color: emerald }}>Birthdays coming up</strong>{upcoming.map((student) => <p key={student.id} style={{ margin: '6px 0 0', color: ink, fontSize: 13 }}>{student.name} · {birthdayDistance(student.dateOfBirth) === 0 ? 'today' : `in ${birthdayDistance(student.dateOfBirth)} days`} · turning {ageFromDob(student.dateOfBirth) + 1}</p>)}</Card>
 }
 
-function NeedsAttention({ jobs, bookings, instructors, messages, schools, isAdmin, onOpenJobs, onOpenBookings, onOpenInstructors, onOpenMessages, dismissed, onDismiss }) {
+function NeedsAttention({ jobs, bookings, instructors, messages, schools, signups = [], isAdmin, canManageMessages, onOpenJobs, onOpenBookings, onOpenInstructors, onOpenMessages, onOpenStudents, dismissed, onDismiss }) {
+  const weekAgo = Date.now() - 7 * 86400000
+  const roleLabel = { parent: 'parent', instructor: 'instructor', school: 'school' }
   const notifications = [
+    ...signups.map((signup) => ({ id: `signup:${signup.id}`, label: `New ${roleLabel[signup.role] || 'account'} sign-up · ${signup.name || signup.email} · ${signup.email}${signup.confirmed ? '' : ' · email not confirmed yet'}`, onOpen: signup.role === 'instructor' ? onOpenInstructors : signup.role === 'parent' ? onOpenStudents : onOpenBookings })),
     ...jobs.filter((job) => job.status === 'pending').map((job) => ({ id: `claim:${job.id}:${job.claimedAt || ''}`, label: `Job claim pending approval · ${job.date} · ${instructors.find((instructor) => instructor.id === job.claimedBy)?.name || 'Instructor'}`, onOpen: onOpenJobs })),
+    ...jobs.filter((job) => job.status === 'accepted' && job.decidedAt && Date.parse(job.decidedAt) >= weekAgo).map((job) => ({ id: `accepted:${job.id}:${job.decidedAt}`, label: `Job accepted · ${job.date} · ${instructors.find((instructor) => instructor.id === job.claimedBy)?.name || 'Instructor'} assigned`, onOpen: onOpenJobs })),
     ...bookings.filter((booking) => booking.needsAdminAttention).map((booking) => ({ id: `completed:${booking.id}:${booking.completedAt || ''}`, label: `Session delivered · payment review needed · ${booking.date}`, onOpen: onOpenBookings })),
-    ...bookings.filter((booking) => booking.familyId && booking.status !== 'Cancelled' && booking.paymentStatus !== 'pending').map((booking) => ({ id: `parent-booking:${booking.id}`, label: `New parent booking · ${booking.date} · ${booking.sessionType}`, onOpen: onOpenBookings })),
+    // Paid (or free) checkouts only: a family invoice raised by the admin isn't a new booking.
+    ...bookings.filter((booking) => booking.familyId && booking.status !== 'Cancelled' && booking.paymentStatus === 'paid' && !booking.invoiceSentAt).map((booking) => ({ id: `parent-booking:${booking.id}`, label: `New parent booking · ${booking.date} · ${booking.sessionType}`, onOpen: onOpenBookings })),
     ...bookings.filter((booking) => booking.status === 'Enquiry' && !booking.familyId).map((booking) => ({ id: `school-enquiry:${booking.id}`, label: `New school enquiry · ${booking.contactName || 'School contact'} · ${booking.date || 'Date to confirm'}`, onOpen: onOpenBookings })),
     ...(isAdmin ? instructors.filter((instructor) => instructor.dbsStatus === 'Pending').map((instructor) => ({ id: `dbs:${instructor.id}:${instructor.dbsUploadedAt || ''}`, label: `DBS certificate uploaded · review required · ${instructor.name}`, onOpen: onOpenInstructors })) : []),
-    ...(isAdmin ? messages.filter((message) => !message.readAt && message.recipientKind === 'admin').map((message) => ({ id: `message:${message.id}`, label: `New message · ${message.senderKind === 'instructor' ? instructors.find((instructor) => instructor.id === message.senderInstructorId)?.name || 'Instructor' : schools.find((school) => school.id === message.senderSchoolId)?.name || 'School'} · ${message.body.slice(0, 60)}${message.body.length > 60 ? '…' : ''}`, onOpen: onOpenMessages })) : []),
+    ...(canManageMessages ? messages.filter((message) => !message.readAt && message.recipientKind === 'admin').map((message) => ({ id: `message:${message.id}`, label: `New message · ${message.senderKind === 'instructor' ? instructors.find((instructor) => instructor.id === message.senderInstructorId)?.name || 'Instructor' : schools.find((school) => school.id === message.senderSchoolId)?.name || 'School'} · ${message.body.slice(0, 60)}${message.body.length > 60 ? '…' : ''}`, onOpen: onOpenMessages })) : []),
   ].filter((notification) => !dismissed.includes(notification.id))
   if (!notifications.length) return null
   return <Card style={{ padding: 18, marginBottom: 20, borderColor: '#ead7a3', background: '#fff8e8' }}><h3 style={{ margin: '0 0 10px', color: emerald }}>Needs attention</h3>{notifications.map((notification) => <div key={notification.id} style={{ display: 'flex', alignItems: 'center', gap: 8, borderTop: `1px solid ${rule}` }}><button type="button" onClick={notification.onOpen} style={{ flex: 1, display: 'block', padding: '9px 0', textAlign: 'left', border: 0, background: 'transparent', cursor: 'pointer', color: ink }}>{notification.label}</button><button type="button" aria-label={`Dismiss ${notification.label}`} title="Dismiss notification" onClick={() => onDismiss(notification.id)} style={{ border: 0, background: 'transparent', color: muted, cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 6 }}>×</button></div>)}</Card>
@@ -548,17 +637,23 @@ function DbsUpload({ instructor, onUpload, uploading }) {
   return <Card style={{ padding: 18, marginBottom: 20, borderColor: instructor.dbsStatus === 'Approved' ? rule : '#ead7a3', background: instructor.dbsStatus === 'Approved' ? ivory : '#fff8e8' }}><h3 style={{ margin: '0 0 10px', color: emerald }}>DBS certificate</h3><p style={{ color: muted, margin: '0 0 10px' }}>Your DBS must be approved before job board listings become available.</p><div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><Badge text={instructor.dbsStatus} tone={instructor.dbsStatus === 'Approved' ? 'green' : instructor.dbsStatus === 'Rejected' ? 'red' : 'gold'} />{instructor.dbsStatus === 'Rejected' && instructor.dbsRejectionReason && <span style={{ color: warn, fontSize: 12 }}>Rejected: {instructor.dbsRejectionReason}</span>}<input type="file" accept="application/pdf,image/png,image/jpeg,image/webp" onChange={(event) => setFile(event.target.files?.[0] || null)} /><Button small disabled={!file || uploading} onClick={() => onUpload(file)}>{uploading ? 'Uploading…' : instructor.dbsStatus === 'Missing' ? 'Upload DBS' : 'Re-upload DBS'}</Button></div></Card>
 }
 
-function MessagesView({ messages, myKind, myInstructorId, mySchoolId, schools, instructors, isAdmin, onSend, onMarkRead }) {
+// canManage: admins and staff with the 'messages' permission. They speak as KADA
+// admin and can open a conversation with any instructor or school. Everyone else
+// (instructors, schools) only ever talks to KADA admin.
+function MessagesView({ messages, myKind, myInstructorId, mySchoolId, schools, instructors, canManage, onSend, onMarkRead }) {
+  const isAdmin = canManage
   const [draft, setDraft] = useState('')
   const [target, setTarget] = useState(null)
+  const [starting, setStarting] = useState('')
   const threads = {}
   messages.forEach((message) => {
     const other = message.senderKind === 'admin' ? (message.recipientKind === 'instructor' ? `instructor:${message.recipientInstructorId}` : message.recipientKind === 'school' ? `school:${message.recipientSchoolId}` : 'admin') : (message.senderKind === 'instructor' ? `instructor:${message.senderInstructorId}` : message.senderKind === 'school' ? `school:${message.senderSchoolId}` : 'admin')
     threads[other] = [...(threads[other] || []), message]
   })
   const threadKeys = Object.keys(threads).sort((a, b) => (threads[b].at(-1)?.createdAt || '').localeCompare(threads[a].at(-1)?.createdAt || ''))
-  const active = target && threads[target] ? target : threadKeys[0] || null
-  const activeMessages = active ? threads[active].slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)) : []
+  // A conversation picked from "New conversation" is active before it has any messages.
+  const active = target && (threads[target] || isAdmin) ? target : threadKeys[0] || null
+  const activeMessages = active && threads[active] ? threads[active].slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)) : []
   const threadLabel = (key) => { const [kind, id] = key.split(':'); return kind === 'instructor' ? instructors.find((instructor) => instructor.id === id)?.name || 'Instructor' : kind === 'school' ? schools.find((school) => school.id === id)?.name || 'School' : 'KADA Admin' }
   const unreadInThread = (key) => threads[key].filter((message) => !message.readAt && !(message.senderKind === myKind && (myKind === 'admin' || message.senderInstructorId === myInstructorId || message.senderSchoolId === mySchoolId))).length
   const send = () => {
@@ -575,19 +670,46 @@ function MessagesView({ messages, myKind, myInstructorId, mySchoolId, schools, i
     setDraft('')
   }
   useEffect(() => {
-    if (!active) return
+    if (!active || !threads[active]) return
     threads[active]
       .filter((message) => !message.readAt && !(message.senderKind === myKind && (myKind === 'admin' || message.senderInstructorId === myInstructorId || message.senderSchoolId === mySchoolId)))
       .forEach((message) => onMarkRead(message))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, messages])
-  return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Messages</h2><p style={{ color: muted }}>{isAdmin ? 'Conversations with instructors and schools.' : 'Your conversation with KADA admin.'}</p><div style={{ display: 'grid', gridTemplateColumns: isAdmin ? '220px 1fr' : '1fr', gap: 14 }}>{isAdmin && <Card style={{ padding: 10 }}>{threadKeys.length ? threadKeys.map((key) => <button key={key} type="button" onClick={() => setTarget(key)} style={{ display: 'flex', justifyContent: 'space-between', width: '100%', padding: '9px 8px', border: 0, borderTop: `1px solid ${rule}`, background: active === key ? '#f1eee2' : 'transparent', cursor: 'pointer', color: ink, fontWeight: active === key ? 700 : 400, textAlign: 'left' }}><span>{threadLabel(key)}</span>{unreadInThread(key) > 0 && <span style={{ background: warn, color: '#fff', borderRadius: 10, padding: '1px 7px', fontSize: 11, fontWeight: 700 }}>{unreadInThread(key)}</span>}</button>) : <p style={{ color: muted, padding: 8, fontSize: 13 }}>No conversations yet.</p>}</Card>}<Card style={{ padding: 16 }}>{activeMessages.length ? activeMessages.map((message) => { const mine = message.senderKind === myKind && (myKind === 'admin' || message.senderInstructorId === myInstructorId || message.senderSchoolId === mySchoolId); return <div key={message.id} style={{ marginBottom: 10, textAlign: mine ? 'right' : 'left' }}><div style={{ display: 'inline-block', maxWidth: '75%', background: mine ? emerald : '#f1eee2', color: mine ? '#fff' : ink, borderRadius: 10, padding: '8px 12px', fontSize: 13, lineHeight: 1.5, textAlign: 'left' }}>{message.body}</div><div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{mine ? 'You' : threadLabel(`${message.senderKind}:${message.senderInstructorId || message.senderSchoolId || ''}`)} · {new Date(message.createdAt).toLocaleString()}{!mine && !message.readAt ? ' · new' : ''}</div></div> }) : <p style={{ color: muted }}>No messages yet. {isAdmin ? 'Open an instructor or school record to start one.' : 'Send a message below to reach KADA admin.'}</p>}<div style={{ display: 'flex', gap: 8, marginTop: 12 }}><input style={inputStyle} placeholder="Write a message…" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') send() }} /><Button small onClick={send} disabled={!draft.trim() || (isAdmin && !active)}>Send</Button></div></Card></div></div>
+  const startOptions = [
+    ...instructors.map((instructor) => ({ key: `instructor:${instructor.id}`, label: `Instructor · ${instructor.name}` })),
+    ...schools.map((school) => ({ key: `school:${school.id}`, label: `School · ${school.name}` })),
+  ].sort((a, b) => a.label.localeCompare(b.label))
+  const threadList = active && !threads[active] ? [active, ...threadKeys] : threadKeys
+  return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Messages</h2><p style={{ color: muted }}>{isAdmin ? 'Conversations with instructors and schools, as KADA admin.' : 'Your conversation with KADA admin.'}</p>{isAdmin && <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}><select aria-label="Start a conversation" style={{ ...inputStyle, maxWidth: 360 }} value={starting} onChange={(event) => setStarting(event.target.value)}><option value="">New conversation with…</option>{startOptions.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}</select><Button small disabled={!starting} onClick={() => { setTarget(starting); setStarting('') }}>Open</Button></div>}<div className="messages-grid" style={{ display: 'grid', gridTemplateColumns: isAdmin ? 'minmax(160px, 220px) 1fr' : '1fr', gap: 14 }}>{isAdmin && <Card style={{ padding: 10 }}>{threadList.length ? threadList.map((key) => <button key={key} type="button" onClick={() => setTarget(key)} style={{ display: 'flex', justifyContent: 'space-between', width: '100%', padding: '9px 8px', border: 0, borderTop: `1px solid ${rule}`, background: active === key ? '#f1eee2' : 'transparent', cursor: 'pointer', color: ink, fontWeight: active === key ? 700 : 400, textAlign: 'left' }}><span>{threadLabel(key)}</span>{threads[key] && unreadInThread(key) > 0 && <span style={{ background: warn, color: '#fff', borderRadius: 10, padding: '1px 7px', fontSize: 11, fontWeight: 700 }}>{unreadInThread(key)}</span>}</button>) : <p style={{ color: muted, padding: 8, fontSize: 13 }}>No conversations yet.</p>}</Card>}<Card style={{ padding: 16 }}>{isAdmin && active && <p style={{ margin: '0 0 10px', fontWeight: 700, color: emerald }}>{threadLabel(active)}</p>}{activeMessages.length ? activeMessages.map((message) => { const mine = message.senderKind === myKind && (myKind === 'admin' || message.senderInstructorId === myInstructorId || message.senderSchoolId === mySchoolId); return <div key={message.id} style={{ marginBottom: 10, textAlign: mine ? 'right' : 'left' }}><div style={{ display: 'inline-block', maxWidth: '75%', background: mine ? emerald : '#f1eee2', color: mine ? '#fff' : ink, borderRadius: 10, padding: '8px 12px', fontSize: 13, lineHeight: 1.5, textAlign: 'left' }}>{message.body}</div><div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{mine ? (myKind === 'admin' ? 'KADA admin' : 'You') : threadLabel(`${message.senderKind}:${message.senderInstructorId || message.senderSchoolId || ''}`)} · {new Date(message.createdAt).toLocaleString()}{!mine && !message.readAt ? ' · new' : ''}</div></div> }) : <p style={{ color: muted }}>No messages yet. {isAdmin ? (active ? 'Write the first message below.' : 'Choose who to message above.') : 'Send a message below to reach KADA admin.'}</p>}<div style={{ display: 'flex', gap: 8, marginTop: 12 }}><input style={inputStyle} placeholder="Write a message…" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') send() }} /><Button small onClick={send} disabled={!draft.trim() || (isAdmin && !active)}>Send</Button></div></Card></div></div>
 }
 
-function JobBoardView({ jobs, bookings, schools, instructors, isAdmin, onClaim, onDecision, onGoToBookings }) {
+// canManage: admins and staff with the 'jobs' permission post jobs and decide
+// claims. Instructors see open jobs and their own claims.
+function JobBoardView({ jobs, bookings, schools, instructors, canManage, onClaim, onDecision, onPublish, onGoToBookings }) {
+  const isAdmin = canManage
   const [reasonJob, setReasonJob] = useState(null)
   const [reason, setReason] = useState('')
-  return <div><div style={{ marginBottom: 18 }}><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Job board</h2><p style={{ color: muted }}>Available work is anonymized until an admin accepts a claim.</p></div><Card style={{ padding: 18 }}>{jobs.length ? jobs.map((job) => <div key={job.id} style={{ borderTop: `1px solid ${rule}`, padding: '14px 0', display: 'flex', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap' }}><div>{isAdmin && job.claimedBy && <p style={{ margin: '0 0 5px', color: emerald, fontWeight: 700 }}>Claimed by {instructors.find((instructor) => instructor.id === job.claimedBy)?.name || 'Instructor'}</p>}{isAdmin && job.claimedBy && <p style={{ margin: '0 0 5px', color: muted, fontSize: 12 }}>{(() => { const instructor = instructors.find((item) => item.id === job.claimedBy); return instructor ? `${instructor.email || 'No email'} · ${instructor.phone || 'No phone'} · ${instructor.locationAreas || 'No locations'} · ${instructor.gender || 'Gender not provided'}` : 'Instructor profile unavailable' })()}</p>}<strong>{job.status === 'accepted' && job.bookingId ? schools.find((school) => school.id === bookings.find((booking) => booking.id === job.bookingId)?.schoolId)?.name : 'School workshop'}</strong><p style={{ margin: '4px 0 0', color: muted }}>{job.date} · {job.sessionType} · {job.locationArea || 'Location shared after acceptance'} · {job.studentCount} students · {formatCurrency(job.instructorPay)}</p>{job.status === 'rejected' && <p style={{ color: warn, margin: '4px 0 0' }}>Rejected: {job.rejectionReason}</p>}</div><div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Badge text={job.status} tone={job.status === 'accepted' ? 'green' : job.status === 'rejected' ? 'red' : 'gold'} />{isAdmin && job.status === 'pending' && <><Button small onClick={() => onDecision(job, 'accepted')}>Accept</Button><Button small variant="danger" onClick={() => { setReasonJob(job); setReason('') }}>Reject</Button></>}{isAdmin && (job.status === 'accepted' || job.status === 'rejected') && <Button small variant="ghost" onClick={() => onDecision(job, 'undo')}>Undo</Button>}{!isAdmin && job.status === 'open' && <Button small onClick={() => onClaim(job)}>Claim job</Button>}{!isAdmin && job.status === 'pending' && <span style={{ color: muted, fontSize: 12 }}>Pending approval</span>}</div></div>) : <EmptyState icon="🧰" title="No jobs on the board yet" body={isAdmin ? 'Publish a booking to the job board so approved instructors can claim it.' : 'New jobs appear here once an admin publishes them. Check back soon.'} ctaLabel={isAdmin ? 'Go to bookings' : undefined} onCta={isAdmin ? onGoToBookings : undefined} />}</Card>{reasonJob && <Modal title="Reject claim" onClose={() => setReasonJob(null)}><Field label="Reason"><textarea style={{ ...inputStyle, minHeight: 80 }} value={reason} onChange={(event) => setReason(event.target.value)} required /></Field><Button onClick={() => { onDecision(reasonJob, 'rejected', reason); setReasonJob(null) }}>Reject claim</Button></Modal>}</div>
+  const [posting, setPosting] = useState(null) // { bookingId, pay, location }
+  const [busy, setBusy] = useState(false)
+  const postable = bookings.filter((booking) => booking.date && booking.status !== 'Cancelled' && booking.status !== 'Delivered' && !booking.familyId && !jobs.some((job) => job.bookingId === booking.id)).sort((a, b) => a.date.localeCompare(b.date))
+  const bookingLabel = (booking) => `${booking.date} · ${schools.find((school) => school.id === booking.schoolId)?.name || booking.contactName || 'School'} · ${booking.sessionType} · ${booking.studentCount || 0} students`
+  const publish = async () => {
+    setBusy(true)
+    const ok = await onPublish(posting)
+    setBusy(false)
+    if (ok) setPosting(null)
+  }
+  return <div><div style={{ marginBottom: 18, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}><div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400, margin: 0 }}>Job board</h2><p style={{ color: muted, margin: '6px 0 0' }}>Available work is anonymized until a claim is accepted.</p></div>{isAdmin && <Button onClick={() => setPosting({ bookingId: '', pay: '', location: '' })}>Post a job</Button>}</div><Card style={{ padding: 18 }}>{jobs.length ? jobs.map((job) => <div key={job.id} style={{ borderTop: `1px solid ${rule}`, padding: '14px 0', display: 'flex', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap' }}><div>{isAdmin && job.claimedBy && <p style={{ margin: '0 0 5px', color: emerald, fontWeight: 700 }}>Claimed by {instructors.find((instructor) => instructor.id === job.claimedBy)?.name || 'Instructor'}</p>}{isAdmin && job.claimedBy && <p style={{ margin: '0 0 5px', color: muted, fontSize: 12 }}>{(() => { const instructor = instructors.find((item) => item.id === job.claimedBy); return instructor ? `${instructor.email || 'No email'} · ${instructor.phone || 'No phone'} · ${instructor.locationAreas || 'No locations'} · ${instructor.gender || 'Gender not provided'}` : 'Instructor profile unavailable' })()}</p>}<strong>{job.status === 'accepted' && job.bookingId ? schools.find((school) => school.id === bookings.find((booking) => booking.id === job.bookingId)?.schoolId)?.name || 'School workshop' : 'School workshop'}</strong><p style={{ margin: '4px 0 0', color: muted }}>{job.date} · {job.sessionType} · {job.locationArea || 'Location shared after acceptance'} · {job.studentCount} students · {formatCurrency(job.instructorPay)}</p>{job.status === 'rejected' && <p style={{ color: warn, margin: '4px 0 0' }}>Rejected: {job.rejectionReason}</p>}</div><div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Badge text={job.status} tone={job.status === 'accepted' ? 'green' : job.status === 'rejected' ? 'red' : 'gold'} />{isAdmin && job.status === 'pending' && <><Button small onClick={() => onDecision(job, 'accepted')}>Accept</Button><Button small variant="danger" onClick={() => { setReasonJob(job); setReason('') }}>Reject</Button></>}{isAdmin && (job.status === 'accepted' || job.status === 'rejected') && <Button small variant="ghost" onClick={() => onDecision(job, 'undo')}>Undo</Button>}{!isAdmin && job.status === 'open' && <Button small onClick={() => onClaim(job)}>Claim job</Button>}{!isAdmin && job.status === 'pending' && <span style={{ color: muted, fontSize: 12 }}>Pending approval</span>}</div></div>) : <EmptyState icon="🧰" title="No jobs on the board yet" body={isAdmin ? 'Post a booking to the job board so approved instructors can claim it.' : 'New jobs appear here once KADA publishes them. Check back soon.'} ctaLabel={isAdmin ? 'Post a job' : undefined} onCta={isAdmin ? () => setPosting({ bookingId: '', pay: '', location: '' }) : undefined} />}</Card>
+    {reasonJob && <Modal title="Reject claim" onClose={() => setReasonJob(null)}><Field label="Reason"><textarea style={{ ...inputStyle, minHeight: 80 }} value={reason} onChange={(event) => setReason(event.target.value)} required /></Field><Button disabled={!reason.trim()} onClick={() => { onDecision(reasonJob, 'rejected', reason); setReasonJob(null) }}>Reject claim</Button></Modal>}
+    {posting && <Modal title="Post a job" onClose={() => setPosting(null)}>{postable.length ? <>
+      <Field label="Booking"><select style={inputStyle} value={posting.bookingId} onChange={(event) => { const booking = postable.find((item) => item.id === event.target.value); setPosting({ ...posting, bookingId: event.target.value, pay: posting.pay || (booking?.instructorPay ? String(booking.instructorPay) : '') }) }}><option value="">Choose a booking</option>{postable.map((booking) => <option key={booking.id} value={booking.id}>{bookingLabel(booking)}</option>)}</select></Field>
+      <Field label="Instructor pay (£)"><input type="number" min="1" step="0.01" style={inputStyle} value={posting.pay} onChange={(event) => setPosting({ ...posting, pay: event.target.value })} /></Field>
+      <Field label="Area shown to instructors (optional)"><input style={inputStyle} placeholder="e.g. North Birmingham" value={posting.location} onChange={(event) => setPosting({ ...posting, location: event.target.value })} /></Field>
+      <p style={{ fontSize: 12, color: muted, margin: '0 0 12px' }}>Instructors see the date, session, students, area and pay. The school is only shown once you accept a claim.</p>
+      <Button disabled={busy || !posting.bookingId || !(Number(posting.pay) > 0)} onClick={publish}>{busy ? 'Posting…' : 'Post to job board'}</Button>
+    </> : <><p style={{ color: muted, marginTop: 0 }}>Every upcoming school booking with a date is already on the board.</p><Button variant="ghost" onClick={() => { setPosting(null); onGoToBookings() }}>Go to bookings</Button></>}</Modal>}
+  </div>
 }
 
 
@@ -599,6 +721,7 @@ function AuthScreen({ onAuthenticated, requirePasswordSetup = false }) {
   const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
   const [schoolName, setSchoolName] = useState('')
+  const [children, setChildren] = useState([{ name: '', dateOfBirth: '' }])
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -616,14 +739,19 @@ function AuthScreen({ onAuthenticated, requirePasswordSetup = false }) {
       if (error) setMessage(error.message)
       else onAuthenticated()
     } else {
+      // Children are carried on the account and added to the family when the
+      // parent first signs in (see resolveParentFamily in server/index.js).
+      const childList = role === 'parent' ? children.map((child) => ({ name: child.name.trim(), dateOfBirth: child.dateOfBirth })).filter((child) => child.name && child.dateOfBirth) : []
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
-        options: { data: { role, full_name: fullName, school_name: schoolName } },
+        options: { data: { role, full_name: fullName, school_name: schoolName, ...(childList.length ? { children: childList } : {}) } },
       })
       if (error) {
         setMessage(error.message)
       } else if (data.user) {
+        // Tells the server to alert the admin about the new account now.
+        void fetch('/api/public/signup-ping', { method: 'POST' }).catch(() => {})
         setMessage('Account created. Check your email if confirmation is enabled, then sign in.')
       }
     }
@@ -635,13 +763,22 @@ function AuthScreen({ onAuthenticated, requirePasswordSetup = false }) {
       <div style={{ width: '100%', maxWidth: 430 }}>
         <p style={{ color: gold, fontSize: 11, letterSpacing: '0.18em', textTransform: 'uppercase', fontWeight: 700 }}>King's Ark Dance Academy</p>
         <h1 style={{ fontFamily: serif, color: emerald, fontSize: 32, fontWeight: 400, margin: '6px 0 8px' }}>{mode === 'setup' ? 'Set your password.' : mode === 'signin' ? 'Welcome back.' : 'Create an account.'}</h1>
-        <p style={{ color: muted, fontSize: 14, marginBottom: 24 }}>{mode === 'setup' ? 'Choose a password to finish setting up your account.' : mode === 'signin' ? 'Sign in to access your KADA workspace.' : 'Create a school or instructor account.'}</p>
+        <p style={{ color: muted, fontSize: 14, marginBottom: 24 }}>{mode === 'setup' ? 'Choose a password to finish setting up your account.' : mode === 'signin' ? 'Sign in to access your KADA workspace.' : 'Create a parent, school or instructor account.'}</p>
         <Card style={{ padding: 22 }}>
           <form onSubmit={submit}>
             {mode === 'signup' && <>
               <Field label="Account type"><select style={inputStyle} value={role} onChange={(event) => setRole(event.target.value)}><option value="parent">Parent</option><option value="school">School</option><option value="instructor">Instructor</option></select></Field>
               <Field label="Full name"><input style={inputStyle} value={fullName} onChange={(event) => setFullName(event.target.value)} required /></Field>
               {role === 'school' && <Field label="School name"><input style={inputStyle} value={schoolName} onChange={(event) => setSchoolName(event.target.value)} required /></Field>}
+              {role === 'parent' && <div style={{ marginBottom: 14 }}>
+                <span style={{ display: 'block', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: muted, marginBottom: 6 }}>Your children (you can add more later)</span>
+                {children.map((child, index) => <div key={index} style={{ display: 'grid', gridTemplateColumns: '1fr 150px auto', gap: 6, marginBottom: 6, alignItems: 'center' }}>
+                  <input aria-label={`Child ${index + 1} name`} style={inputStyle} placeholder={`Child ${index + 1} name`} value={child.name} onChange={(event) => setChildren(children.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} required={Boolean(child.dateOfBirth)} />
+                  <input aria-label={`Child ${index + 1} date of birth`} type="date" style={inputStyle} value={child.dateOfBirth} onChange={(event) => setChildren(children.map((item, itemIndex) => itemIndex === index ? { ...item, dateOfBirth: event.target.value } : item))} required={Boolean(child.name.trim())} />
+                  {children.length > 1 ? <button type="button" aria-label={`Remove child ${index + 1}`} onClick={() => setChildren(children.filter((_, itemIndex) => itemIndex !== index))} style={{ border: 0, background: 'none', color: warn, cursor: 'pointer', fontSize: 18 }}>×</button> : <span />}
+                </div>)}
+                <button type="button" onClick={() => setChildren([...children, { name: '', dateOfBirth: '' }])} style={{ background: 'none', border: 0, padding: 0, color: emerald, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>+ Add another child</button>
+              </div>}
             </>}
             {mode !== 'setup' && <Field label="Email"><input type="email" style={inputStyle} value={email} onChange={(event) => setEmail(event.target.value)} required /></Field>}
             <Field label={mode === 'setup' ? 'New password' : 'Password'}><input type="password" minLength="8" style={inputStyle} value={password} onChange={(event) => setPassword(event.target.value)} required /></Field>
@@ -712,6 +849,8 @@ function App() {
   const [parentBooking, setParentBooking] = useState({ planType: 'monthly_membership', className: 'Saturday Gospel Afrobeats', classDate: '', parentName: '', parentEmail: '', students: [{ name: '', dateOfBirth: '' }] })
   const [students, setStudents] = useState([])
   const [families, setFamilies] = useState([])
+  const [parentInvoices, setParentInvoices] = useState([])
+  const [signups, setSignups] = useState([])
   const [jobs, setJobs] = useState([])
   const [messages, setMessages] = useState([])
   const [events, setEvents] = useState([])
@@ -922,7 +1061,8 @@ function App() {
       setInstructors(nextInstructors)
         setPublicInstructors(nextPublicInstructors)
       setStudents(parentData ? parentData.students.map(normalizeStudent) : nextStudents)
-      setFamilies(parentData ? [parentData.family] : nextFamilies)
+      setFamilies(parentData ? (parentData.family ? [parentData.family] : []) : nextFamilies)
+      setParentInvoices(parentData?.invoices || [])
       setJobs(nextJobs)
       setMessages(nextMessages)
       setEvents(nextEvents)
@@ -1040,6 +1180,17 @@ function App() {
     })
     return () => { mounted = false }
   }, [tab, profile?.role])
+
+  // New self-service sign-ups (parents, instructors, schools) for Needs attention.
+  useEffect(() => {
+    if (!session || profile?.role !== 'admin' || tab !== 'dashboard') return undefined
+    let mounted = true
+    fetch('/api/admin/recent-signups', { headers: { Authorization: `Bearer ${session.access_token}` } })
+      .then((response) => (response.ok ? response.json() : { signups: [] }))
+      .then((result) => { if (mounted) setSignups(result.signups || []) })
+      .catch(() => {})
+    return () => { mounted = false }
+  }, [session, profile?.role, tab])
 
   // Re-runs whenever new .reveal elements can appear: async data mounting a section (e.g.
   // Upcoming events only renders once the events fetch returns), or HomePage remounting
@@ -1229,10 +1380,20 @@ function App() {
 
     setBookings(nextBookings)
     setSchools(nextSchools)
-    void saveTable('bookings', nextBookings)
     void saveTable('schools', nextSchools)
-    if (session) void fetch('/api/notify-admin', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'school-enquiry', detail: { schoolName: schoolRequest.schoolName, contactName: schoolRequest.contactName, email: schoolRequest.email, sessionType: schoolRequest.sessionType, date: schoolRequest.date, studentCount: schoolRequest.studentCount, schoolId } }) })
-    setToast(fits === false ? 'Booking sent. Our team will confirm instructor coverage for this date.' : 'Booking sent to the operations system.')
+    const discountCode = String(schoolRequest.discountCode || '').trim()
+    void (async () => {
+      await saveTable('bookings', nextBookings)
+      // School bookings are invoiced: the code becomes a discount on this booking's invoice.
+      let codeNote = ''
+      if (discountCode) {
+        const response = await fetch('/api/discount-codes/apply-booking', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId, code: discountCode }) })
+        const result = await response.json().catch(() => ({}))
+        codeNote = response.ok ? ` Discount code ${result.code} (${result.label}) will be on your invoice.` : ` ${result.error || 'The discount code could not be applied.'}`
+      }
+      void fetch('/api/notify-admin', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'school-enquiry', detail: { schoolName: schoolRequest.schoolName, contactName: schoolRequest.contactName, email: schoolRequest.email, sessionType: schoolRequest.sessionType, date: schoolRequest.date, studentCount: schoolRequest.studentCount, schoolId, discountCode } }) })
+      setToast(`${fits === false ? 'Booking sent. Our team will confirm instructor coverage for this date.' : 'Booking sent to the operations system.'}${codeNote}`)
+    })()
   }
 
   const quotePrice = quote ? quote.price : buildPrice(schoolRequest).price
@@ -1256,11 +1417,11 @@ function App() {
     const school = schools.find((item) => item.id === booking.schoolId)
     setInvoiceSending(true)
     try {
-      const invoiceOverrides = { description: booking.invoiceDescription, rate: booking.invoiceRate, amount: booking.invoiceAmount, discountPercent: booking.discountPercent }
+      const invoiceOverrides = invoiceEditPayload(booking)
       const response = await fetch('/api/invoices/send', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ booking: { ...booking, invoiceOverrides }, school }) })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Invoice could not be sent.')
-      const sentBooking = { ...booking, invoiceStatus: 'Sent', invoiceNumber: result.invoiceNumber || booking.invoiceNumber }
+      const sentBooking = { ...booking, invoiceStatus: 'Sent', invoiceNumber: result.invoiceNumber || booking.invoiceNumber, invoiceOverrides: result.overrides || invoiceOverrides }
       const next = bookings.some((item) => item.id === sentBooking.id) ? bookings.map((item) => item.id === sentBooking.id ? sentBooking : item) : [sentBooking, ...bookings]
       setBookings(next)
       setInvoiceBooking(sentBooking)
@@ -1274,8 +1435,10 @@ function App() {
   const saveBooking = async (booking) => {
     const previous = bookings.find((item) => item.id === booking.id)
     const next = bookings.some((item) => item.id === booking.id) ? bookings.map((item) => item.id === booking.id ? booking : item) : [booking, ...bookings]
-    persistRows('bookings', next, setBookings)
+    setBookings(next)
     setBookingModal(null)
+    // The row must exist before the invoice endpoint numbers it and marks it sent.
+    await saveTable('bookings', next)
     if (booking.status === 'Confirmed' && booking.invoiceStatus === 'Not sent' && previous?.status !== 'Confirmed' && (schools.find((item) => item.id === booking.schoolId)?.email || booking.contactEmail)) await sendInvoice(booking)
   }
   const saveSchool = (school) => { const next = schools.some((item) => item.id === school.id) ? schools.map((item) => item.id === school.id ? school : item) : [school, ...schools]; persistRows('schools', next, setSchools); setSchoolModal(null); setSchoolRecord(next.find((item) => item.id === school.id) || null) }
@@ -1291,9 +1454,37 @@ function App() {
     if (typeof window !== 'undefined') window.localStorage.setItem('bookings', JSON.stringify(next))
     setToast('Booking deleted.')
   }
-  const publishJob = (booking, draft) => { const pay = Number(draft.pay || booking.instructorPay || 0); if (!pay) { setToast('Set an instructor pay rate before publishing.'); return } const job = { id: `job-${booking.id}`, bookingId: booking.id, date: booking.date, sessionType: booking.sessionType, studentCount: booking.studentCount, locationArea: draft.location || 'Location shared after acceptance', instructorPay: pay, status: 'open', claimedBy: '' }; const updatedBooking = { ...booking, instructorPay: pay }; const nextBookings = bookings.map((item) => item.id === booking.id ? updatedBooking : item); persistRows('bookings', nextBookings, setBookings); persistRows('job_board_jobs', [job, ...jobs], setJobs) }
+  const authedPost = async (path, body) => {
+    const response = await fetch(path, { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(result.error || 'Something went wrong.')
+    return result
+  }
+  // Job board writes go through the server, which checks the job board permission.
+  const publishJob = async ({ bookingId, pay, location }) => {
+    try {
+      const { job } = await authedPost('/api/jobs/publish', { bookingId, pay, location })
+      setJobs((current) => [normalizeJob(job), ...current])
+      setBookings((current) => current.map((item) => item.id === bookingId ? { ...item, instructorPay: Number(job.instructor_pay) } : item))
+      setToast('Job posted to the job board.')
+      return true
+    } catch (error) {
+      setToast(error.message)
+      return false
+    }
+  }
   const claimJob = (job) => { const next = jobs.map((item) => item.id === job.id ? { ...item, status: 'pending', claimedBy: profile.instructor_id, claimedAt: new Date().toISOString(), decidedAt: '' } : item); persistRows('job_board_jobs', next, setJobs); if (session) void fetch('/api/notify-admin', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'job-claim', detail: { sessionType: job.sessionType, date: job.date, claimedBy: instructors.find((instructor) => instructor.id === profile.instructor_id)?.name || profile.instructor_id } }) }) }
-  const decideJob = (job, decision, rejectionReason = '') => { const timestamp = new Date().toISOString(); const nextStatus = decision === 'undo' ? 'pending' : decision; const next = jobs.map((item) => item.id === job.id ? { ...item, status: nextStatus, rejectionReason: decision === 'undo' ? '' : rejectionReason, decidedAt: decision === 'undo' ? '' : timestamp } : item); persistRows('job_board_jobs', next, setJobs); if (decision === 'accepted' || decision === 'undo') { const booking = bookings.find((item) => item.id === job.bookingId); if (booking) saveBooking({ ...booking, instructorId: decision === 'accepted' ? job.claimedBy : '' }) } }
+  const decideJob = async (job, decision, rejectionReason = '') => {
+    try {
+      const { job: saved } = await authedPost(`/api/jobs/${encodeURIComponent(job.id)}/decision`, { decision, reason: rejectionReason })
+      const updated = normalizeJob(saved)
+      setJobs((current) => current.map((item) => item.id === job.id ? updated : item))
+      if (decision === 'accepted' || (decision === 'undo' && job.status === 'accepted')) setBookings((current) => current.map((item) => item.id === job.bookingId ? { ...item, instructorId: decision === 'accepted' ? job.claimedBy : '' } : item))
+      setToast(decision === 'accepted' ? 'Claim accepted. The instructor is now assigned to the booking.' : decision === 'rejected' ? 'Claim rejected.' : 'Decision undone.')
+    } catch (error) {
+      setToast(error.message)
+    }
+  }
   const saveTemplate = async (next) => { setTemplate(next); window.localStorage.setItem('kada-template', JSON.stringify(next)); const { data: current } = await supabase.from('workshop_template').select('id').limit(1).maybeSingle(); const row = { id: current?.id || 'default', max_students_per_staff: Number(next.maxStudentsPerStaff), default_duration: Number(next.defaultDuration), sections: next.sections, notes: next.notes }; const { error } = await supabase.from('workshop_template').upsert(row, { onConflict: 'id' }); setToast(error ? 'Template could not be saved.' : 'Workshop template saved.') }
   const saveEvent = async (event) => {
     const previousEvents = events
@@ -1453,7 +1644,7 @@ function App() {
   }
   const openDbsFile = async (instructorId) => { const response = await fetch(`/api/dbs/file/${encodeURIComponent(instructorId)}`, { headers: { Authorization: `Bearer ${session.access_token}` } }); const result = await response.json(); if (response.ok) window.open(result.url, '_blank', 'noopener,noreferrer'); else setToast(result.error || 'DBS certificate could not be opened.') }
   const reviewDbs = async (instructor, decision, rejectionReason = '') => { const response = await fetch('/api/dbs/review', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ instructorId: instructor.id, decision, rejectionReason }) }); if (response.ok) { const updated = { ...instructor, dbsStatus: decision, dbsDecidedAt: new Date().toISOString(), dbsRejectionReason: decision === 'Rejected' ? rejectionReason : '' }; persistRows('instructors', instructors.map((item) => item.id === instructor.id ? updated : item), setInstructors) } setToast(response.ok ? `DBS ${decision.toLowerCase()}.` : 'DBS decision could not be saved.') }
-  const downloadInvoice = async (booking) => { const params = new URLSearchParams({ description: booking.invoiceDescription ?? '', rate: String(booking.invoiceRate ?? booking.price ?? 0), amount: String(booking.invoiceAmount ?? booking.price ?? 0), discountPercent: String(booking.discountPercent ?? 0) }); const response = await fetch(`/api/invoices/pdf/${encodeURIComponent(booking.id)}?${params}`, { headers: { Authorization: `Bearer ${session.access_token}` } }); if (!response.ok) { setToast('Invoice PDF could not be generated.'); return } const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${booking.invoiceNumber || booking.id}.pdf`; document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000) }
+  const downloadInvoice = async (booking) => { const params = invoicePdfParams(booking); const response = await fetch(`/api/invoices/pdf/${encodeURIComponent(booking.id)}?${params}`, { headers: { Authorization: `Bearer ${session.access_token}` } }); if (!response.ok) { setToast('Invoice PDF could not be generated.'); return } const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${booking.invoiceNumber || booking.id}.pdf`; document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000) }
   const sendMessage = async (draft) => {
     const row = { id: crypto.randomUUID(), sender_kind: draft.senderKind, sender_instructor_id: draft.senderInstructorId || null, sender_school_id: draft.senderSchoolId || null, recipient_kind: draft.recipientKind, recipient_instructor_id: draft.recipientInstructorId || null, recipient_school_id: draft.recipientSchoolId || null, body: draft.body }
     const { data, error } = await supabase.from('messages').insert(row).select().single()
@@ -1466,6 +1657,31 @@ function App() {
     const response = await fetch(`/api/invoices/${encodeURIComponent(booking.id)}/remind`, { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ template: 'friendly' }) })
     const result = await response.json().catch(() => ({}))
     setToast(response.ok ? `Reminder sent to ${result.recipient}.` : result.error || 'Reminder could not be sent.')
+  }
+  // Saves the invoice's figures (incl. a one-off discount) without sending it.
+  const saveInvoiceEdits = async (booking) => {
+    try {
+      const result = await authedPost(`/api/invoices/${encodeURIComponent(booking.id)}/overrides`, { overrides: invoiceEditPayload(booking) })
+      setBookings((current) => current.map((item) => item.id === booking.id ? { ...item, invoiceOverrides: result.overrides } : item))
+      setInvoiceBooking((current) => current && current.id === booking.id ? { ...current, invoiceOverrides: result.overrides } : current)
+      setToast(`Invoice saved. Total due £${(result.amountPence / 100).toFixed(2)}.`)
+    } catch (error) {
+      setToast(error.message)
+    }
+  }
+  // A family record for a parent who hasn't signed up yet (offline family).
+  const createFamily = async ({ name, email }) => {
+    const existing = families.find((family) => (family.guardian_email || '').toLowerCase() === email)
+    if (existing) return existing.id
+    const { data, error } = await supabase.from('parent_families').insert({ id: crypto.randomUUID(), guardian_name: name, guardian_email: email, membership_status: 'pending' }).select('*').single()
+    if (error) { setToast(`Family could not be created: ${error.message}`); return '' }
+    setFamilies((current) => [data, ...current])
+    return data.id
+  }
+  const addParentChildren = async (children) => {
+    const result = await authedPost('/api/parent/children', { children })
+    setStudents((current) => [...current, ...(result.students || []).map(normalizeStudent)])
+    return result.students || []
   }
   const saveInvoiceSettings = async (settings) => {
     setInvoiceSettingsSaving(true)
@@ -1484,13 +1700,20 @@ function App() {
   const mySchoolId = profile?.role === 'school' ? profile?.school_id : ''
   const unreadMessages = messages.filter((message) => !message.readAt && (can('messages') ? message.recipientKind === 'admin' : isInstructor ? message.recipientKind === 'instructor' && message.recipientInstructorId === myInstructorId : message.recipientKind === 'school' && message.recipientSchoolId === mySchoolId)).length
   const canIssueInvoices = isAdmin || can('sales') || Boolean(profile?.can_send_invoices)
+  // Job board: admins and 'jobs' staff manage it; instructors claim from it.
+  const canManageJobs = can('jobs')
+  const canSeeJobs = canManageJobs || isInstructor
+  // Workshop template: admins and 'template' staff edit it; instructors read it.
+  const canEditTemplate = can('template')
+  const canSeeTemplate = canEditTemplate || isInstructor
+  const canManageMessages = can('messages')
   useEffect(() => {
     if (!invoiceBooking || !session || !canIssueInvoices) {
       return undefined
     }
     let active = true
     let objectUrl = ''
-    const params = new URLSearchParams({ description: invoiceBooking.invoiceDescription ?? invoiceBooking.sessionType ?? '', rate: String(invoiceBooking.invoiceRate ?? invoiceBooking.price ?? 0), amount: String(invoiceBooking.invoiceAmount ?? invoiceBooking.price ?? 0), discountPercent: String(invoiceBooking.discountPercent ?? 0) })
+    const params = invoicePdfParams(invoiceBooking)
     fetch(`/api/invoices/pdf/${encodeURIComponent(invoiceBooking.id)}?${params}`, { headers: { Authorization: `Bearer ${session.access_token}` } }).then(async (response) => {
       if (!response.ok) throw new Error('Invoice PDF could not be generated.')
       // The server numbers the invoice on first preview; keep local state in step so the
@@ -1526,8 +1749,8 @@ function App() {
         ...(can('attendance') ? [{ key: 'attendance', label: 'Attendance' }] : []),
         ...(can('homework') ? [{ key: 'homework', label: 'Homework' }] : []),
         ...(can('formations') ? [{ key: 'formations', label: 'Formations' }] : []),
-        ...(isAdmin || isInstructor ? [{ key: 'jobs', label: 'Job board' }] : []),
-        ...(isAdmin || isInstructor ? [{ key: 'template', label: 'Workshop template' }] : []),
+        ...(canSeeJobs ? [{ key: 'jobs', label: 'Job board' }] : []),
+        ...(canSeeTemplate ? [{ key: 'template', label: 'Workshop template' }] : []),
       ],
     },
     ...(can('events') ? [{
@@ -1584,7 +1807,7 @@ function App() {
   if (payLinkSlug) return <Suspense fallback={routeFallback}><PaymentLinkPage slug={payLinkSlug} onBack={() => { window.history.pushState(null, '', '/'); setPayLinkSlug(null) }} /></Suspense>
   if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
   if (view === 'ops' && session && needsPasswordSetup) return <AuthScreen requirePasswordSetup onAuthenticated={() => { setNeedsPasswordSetup(false); setView('ops') }} />
-  if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard initialTab={tab} session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
+  if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard initialTab={tab} session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} invoices={parentInvoices} onAddChildren={addParentChildren} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
 
   return (
     <div className="app-shell">
@@ -1632,6 +1855,7 @@ function App() {
           quote={quote}
           quotePrice={formatCurrency(quotePrice)}
           quoteStaff={quoteStaff}
+          schoolQuotePence={Math.round(buildPrice(schoolRequest).price * 100)}
           valueItems={valueItems}
           Modal={Modal}
         />
@@ -1654,7 +1878,7 @@ function App() {
           {tab === 'dashboard' && (
             <>
               {isInstructor && <DbsUpload instructor={instructorRecord} onUpload={uploadDbs} uploading={dbsUploading} />}
-              <NeedsAttention jobs={jobs} bookings={bookings} instructors={instructors} schools={schools} messages={messages} isAdmin={isAdmin} dismissed={dismissedNotifications} onDismiss={(id) => setDismissedNotifications((current) => [...current, id])} onOpenJobs={() => setTab('jobs')} onOpenBookings={() => setTab('bookings')} onOpenInstructors={() => setTab('instructors')} onOpenMessages={() => setTab('messages')} />
+              <NeedsAttention jobs={jobs} bookings={bookings} instructors={instructors} schools={schools} messages={messages} signups={isAdmin ? signups : []} isAdmin={isAdmin} canManageMessages={canManageMessages} dismissed={dismissedNotifications} onDismiss={(id) => setDismissedNotifications((current) => [...current, id])} onOpenJobs={() => handleOpsSelect('jobs')} onOpenBookings={() => handleOpsSelect('bookings')} onOpenInstructors={() => handleOpsSelect('instructors')} onOpenMessages={() => handleOpsSelect('messages')} onOpenStudents={() => handleOpsSelect('students')} />
               <BirthdayNotice students={students} />
               {isAdmin && session && <SiteAnalytics session={session} />}
               {isAdmin && (
@@ -1692,14 +1916,17 @@ function App() {
           {tab === 'contacts' && can('contacts') && <ContactsPage />}
           {tab === 'team' && isAdmin && session && <TeamPage session={session} />}
           {tab === 'campaigns' && isAdmin && session && <CampaignsPage session={session} />}
-          {tab === 'settings' && isAdmin && <SettingsPage content={siteContent} onSaveContent={saveSiteContent} />}
-          {tab === 'jobs' && (isAdmin || isInstructor) && <JobBoardView jobs={isInstructor ? jobs.filter((job) => job.status === 'open' || job.claimedBy === profile.instructor_id) : jobs} bookings={bookings} schools={schools} instructors={instructors} isAdmin={isAdmin} onClaim={claimJob} onDecision={decideJob} onGoToBookings={() => setTab('bookings')} />}
+          {tab === 'settings' && isAdmin && <SettingsPage content={siteContent} onSaveContent={saveSiteContent} session={session} />}
+          {tab === 'jobs' && canSeeJobs && <JobBoardView jobs={isInstructor ? jobs.filter((job) => job.status === 'open' || job.claimedBy === profile.instructor_id) : jobs} bookings={bookings} schools={schools} instructors={instructors} canManage={canManageJobs} onClaim={claimJob} onDecision={decideJob} onPublish={publishJob} onGoToBookings={() => handleOpsSelect('bookings')} />}
 
           {tab === 'calendar' && (isAdmin || isInstructor || can('bookings')) && <CalendarPage bookings={isInstructor ? bookings.filter((booking) => booking.instructorId === profile?.instructor_id) : bookings} events={events} instructors={instructors} onOpenBooking={(booking) => setBookingModal(booking)} onAddEvent={(date) => setEventModal({ ...emptyEvent(), eventDate: date })} />}
           {tab === 'bookings' && <div className="panel">
             <div className="panel-head">
               <h3>Bookings</h3>
-              <span className={`pill ${conflicts.size ? 'warn' : 'ok'}`}>{conflicts.size ? `${conflicts.size} conflict(s)` : 'Clear schedule'}</span>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <span className={`pill ${conflicts.size ? 'warn' : 'ok'}`}>{conflicts.size ? `${conflicts.size} conflict(s)` : 'Clear schedule'}</span>
+                {isAdmin && <Button small onClick={() => setBookingModal(emptyBooking())}>+ New booking</Button>}
+              </div>
             </div>
             <input style={{ ...inputStyle, marginBottom: 12 }} placeholder="Search bookings" value={bookingSearch} onChange={(event) => setBookingSearch(event.target.value)} />
             <BookingsTable
@@ -1717,9 +1944,10 @@ function App() {
               onSaveBooking={saveBooking}
               onOpenSchool={(booking) => setSchoolRecord(schools.find((school) => school.id === booking.schoolId) || null)}
               onEditBooking={(booking) => setBookingModal(booking || emptyBooking())}
-              onPublishJob={(booking) => publishJob(booking, { pay: booking.instructorPay, location: 'Location shared after claim' })}
+              canManageJobs={canManageJobs}
+              onPublishJob={(booking) => publishJob({ bookingId: booking.id, pay: booking.instructorPay, location: '' })}
               onMarkDone={markBookingDone}
-              onInvoice={setInvoiceBooking}
+              onInvoice={(booking) => setInvoiceBooking(withSavedInvoiceEdits(booking))}
             />
           </div>}
 
@@ -1735,15 +1963,15 @@ function App() {
           {can('sales') && tab === 'arrears' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><ArrearsPage session={session} /></Suspense>}
           {(isAdmin || can('sales')) && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
           {(isAdmin || can('students')) && tab === 'class-schedule' && <ClassSchedulePage sessions={classSessions} onSave={saveClassSession} onAdd={addClassSession} onDelete={deleteClassSession} />}
-          {tab === 'template' && <TemplateView template={template} onSave={saveTemplate} />}
-          {tab === 'messages' && profile && <MessagesView messages={messages} myKind={myKind} myInstructorId={myInstructorId} mySchoolId={mySchoolId} schools={schools} instructors={instructors} isAdmin={isAdmin} onSend={sendMessage} onMarkRead={markMessageRead} />}
+          {tab === 'template' && canSeeTemplate && <TemplateView template={template} onSave={saveTemplate} readOnly={!canEditTemplate} />}
+          {tab === 'messages' && profile && <MessagesView messages={messages} myKind={myKind} myInstructorId={myInstructorId} mySchoolId={mySchoolId} schools={schools} instructors={instructors} canManage={canManageMessages} onSend={sendMessage} onMarkRead={markMessageRead} />}
 
           {schoolRecord && <SchoolRecord school={schoolRecord} bookings={bookings} instructorLabel={assignedInstructorLabel} onEdit={setSchoolModal} onBooking={setBookingModal} onMessage={(school) => setMessageTarget({ kind: 'school', id: school.id, name: school.name })} onClose={() => setSchoolRecord(null)} />}
-          {bookingModal && <Modal title="Booking" onClose={() => setBookingModal(null)} wide><BookingForm booking={bookingModal} schools={schools} instructors={instructors} onSave={saveBooking} onDelete={() => deleteBooking(bookingModal)} /></Modal>}
+          {bookingModal && <Modal title="Booking" onClose={() => setBookingModal(null)} wide><BookingForm booking={bookingModal} schools={schools} instructors={instructors} families={families} onCreateFamily={createFamily} onSave={saveBooking} onDelete={() => deleteBooking(bookingModal)} /></Modal>}
           {schoolModal && <Modal title="School" onClose={() => setSchoolModal(null)}><SchoolForm school={schoolModal} onSave={saveSchool} /></Modal>}
           {instructorModal && <Modal title="Instructor" onClose={() => setInstructorModal(null)}><InstructorForm instructor={instructorModal} onSave={saveInstructor} /></Modal>}
           {eventModal && <Modal title={eventModal.title ? 'Edit event' : 'New event'} onClose={() => setEventModal(null)}><EventForm event={eventModal} onSave={saveEvent} onUploadFlyer={uploadEventFlyer} /></Modal>}
-          {invoiceBooking && <InvoicePreview booking={invoiceBooking} onUpdate={(changes) => setInvoiceBooking((current) => ({ ...current, ...changes }))} onSave={(booking) => { saveBooking(booking); setInvoiceBooking(null) }} onSend={sendInvoice} onDownload={downloadInvoice} onRemind={remindInvoice} sending={invoiceSending} pdfUrl={invoicePdfUrl} onClose={() => { setInvoiceBooking(null); setInvoicePdfUrl('') }} />}
+          {invoiceBooking && <InvoicePreview booking={invoiceBooking} onUpdate={(changes) => setInvoiceBooking((current) => ({ ...current, ...changes }))} onSave={(booking) => { saveBooking(booking); setInvoiceBooking(null) }} onSaveEdits={saveInvoiceEdits} onSend={sendInvoice} onDownload={downloadInvoice} onRemind={remindInvoice} sending={invoiceSending} pdfUrl={invoicePdfUrl} onClose={() => { setInvoiceBooking(null); setInvoicePdfUrl('') }} />}
           {resetPreview && <Modal title="Reset test data: review before deleting" onClose={() => setResetPreview(null)} wide><ResetPreview preview={resetPreview.preview} counts={resetPreview.counts} confirmText={resetConfirmText} onConfirmTextChange={setResetConfirmText} onConfirm={runResetTestData} busy={resetBusy} /></Modal>}
           {messageTarget && <Modal title={`Message ${messageTarget.name}`} onClose={() => { setMessageTarget(null); setMessageDraft('') }}><Field label="Message"><textarea style={{ ...inputStyle, minHeight: 90 }} value={messageDraft} onChange={(event) => setMessageDraft(event.target.value)} /></Field><Button disabled={!messageDraft.trim()} onClick={() => { sendMessage({ senderKind: 'admin', recipientKind: messageTarget.kind, recipientInstructorId: messageTarget.kind === 'instructor' ? messageTarget.id : null, recipientSchoolId: messageTarget.kind === 'school' ? messageTarget.id : null, body: messageDraft.trim() }); setMessageTarget(null); setMessageDraft(''); setTab('messages') }}>Send message</Button></Modal>}
           </div>
