@@ -204,8 +204,17 @@ async function run() {
 
     /* ---------------- B. Subscription request ---------------- */
     await admin.goto(`${serverBase}/?r=5#ops/subscriptions`)
+    // Not subscribed yet: not in the Subscriptions table, but listed (collapsed)
+    // under accounts without a subscription as confirmed with no plan.
+    await admin.getByRole('heading', { name: 'Subscriptions', exact: true }).waitFor({ timeout: 30000 })
+    await admin.getByText('No subscriptions yet').or(admin.locator('tr').nth(1)).first().waitFor()
+    check('Unsubscribed family is not in the Subscriptions table', await admin.locator('tr', { hasText: familyName }).count() === 0)
+    await admin.getByRole('button', { name: /Parent accounts without a subscription/ }).click()
     const familyRow = admin.locator('tr', { hasText: familyName })
     await familyRow.waitFor({ timeout: 30000 })
+    await familyRow.getByText('Confirmed · no plan yet').waitFor({ timeout: 15000 })
+    check('Listed under accounts without a subscription as "Confirmed · no plan yet"', true)
+    await shot(admin, 'subscriptions-accounts-without')
     await familyRow.getByRole('button', { name: 'Subscription request…' }).click()
     const requestForm = admin.getByRole('dialog', { name: 'Send subscription request' })
     await requestForm.getByText('2 children = £50.00/month').first().waitFor({ timeout: 15000 })
@@ -216,7 +225,7 @@ async function run() {
     const sent = await (await sentResponse).json()
     check('Subscription request sent for 2 children, £50.00/month', Boolean(sent.id && sent.emailId) && sent.children === 2 && sent.totalPence === 5000, sent.error || `${sent.children} children, ${sent.totalPence}`)
     if (!sent.id) throw new Error(sent.error || 'Subscription request was not sent')
-    await familyRow.getByText(/Request sent .* not completed yet/).waitFor({ timeout: 15000 })
+    await admin.locator('tr', { hasText: familyName }).getByText(/Request sent .* not completed yet/).waitFor({ timeout: 15000 })
     await shot(admin, 'subscription-request-sent')
     const { data: requestRow } = await service.from('subscription_requests').select('*').eq('id', sent.id).single()
     check('Request logged as sent for the Monthly plan', requestRow.status === 'sent' && requestRow.plan_type === 'monthly_membership' && requestRow.family_id === cleanup.familyId && requestRow.recipient === parentEmail)
@@ -257,9 +266,10 @@ async function run() {
 
     // Admin record.
     await admin.goto(`${serverBase}/?r=6#ops/subscriptions`)
-    await familyRow.getByText(/Subscription request completed/).waitFor({ timeout: 30000 })
-    const familyText = await familyRow.innerText()
-    check('Admin Subscriptions: £25 / month, active, Stripe subscription, request completed', familyText.includes('£25 / month') && /active/i.test(familyText) && familyText.includes(family.stripe_subscription_id.slice(0, 14)) && await familyRow.getByRole('button', { name: 'Subscription request…' }).count() === 0, familyText.replace(/\s+/g, ' '))
+    const subscribedRow = admin.locator('tr', { hasText: familyName })
+    await subscribedRow.getByText(/Subscription request completed/).waitFor({ timeout: 30000 })
+    const familyText = await subscribedRow.innerText()
+    check('Admin Subscriptions table: Monthly Membership, Active, Stripe subscription, request completed', familyText.includes('Monthly Membership') && /active/i.test(familyText) && familyText.includes(family.stripe_subscription_id.slice(0, 14)) && await subscribedRow.getByRole('button', { name: 'Subscription request…' }).count() === 0, familyText.replace(/\s+/g, ' '))
     await shot(admin, 'subscription-admin-active')
 
     // Parent dashboard.

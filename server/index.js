@@ -3562,6 +3562,29 @@ const childrenLabel = (count) => `${count} ${count === 1 ? 'child' : 'children'}
 const planTotalLabel = (plan, children) => `${money(plan.pricePence * children)}/${plan.interval}`
 const hasLiveSubscription = (family) => Boolean(family?.stripe_subscription_id) && family.membership_status === 'active'
 
+// Login state of each family's parent account, for Sales > Subscriptions:
+// awaiting email confirmation, confirmed, or no login yet (added by staff).
+app.get('/api/admin/family-accounts', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  let users
+  try {
+    users = await listAllAuthUsers()
+  } catch (error) {
+    return response.status(500).json({ error: `Accounts could not be loaded: ${error.message}` })
+  }
+  const { data: families, error } = await supabase.from('parent_families').select('id,owner_user_id,guardian_email')
+  if (error) return response.status(500).json({ error: `Families could not be loaded: ${error.message}` })
+  const byId = new Map(users.map((user) => [user.id, user]))
+  const byEmail = new Map(users.map((user) => [String(user.email || '').toLowerCase(), user]))
+  const accounts = Object.fromEntries((families || []).map((family) => {
+    const user = (family.owner_user_id && byId.get(family.owner_user_id)) || byEmail.get(String(family.guardian_email || '').toLowerCase())
+    const state = !user ? 'no_login' : user.email_confirmed_at ? 'confirmed' : 'awaiting_confirmation'
+    return [family.id, { state, signedUpAt: user?.created_at || null, confirmedAt: user?.email_confirmed_at || null, lastSignInAt: user?.last_sign_in_at || null }]
+  }))
+  response.json({ accounts })
+})
+
 app.get('/api/admin/subscription-requests', async (request, response) => {
   const access = await requireInvoiceAccess(request, response)
   if (!access) return

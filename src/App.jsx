@@ -769,7 +769,10 @@ function AuthScreen({ onAuthenticated, requirePasswordSetup = false }) {
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
-        options: { data: { role, full_name: fullName, school_name: schoolName, ...(childList.length ? { children: childList } : {}) } },
+        // The confirmation link returns to the site they signed up on, rather than
+        // whatever Supabase's Site URL is set to. An address missing from Supabase's
+        // Redirect URLs list falls back to the Site URL.
+        options: { emailRedirectTo: window.location.origin, data: { role, full_name: fullName, school_name: schoolName, ...(childList.length ? { children: childList } : {}) } },
       })
       if (error) {
         setMessage(error.message)
