@@ -276,7 +276,7 @@ async function run() {
     await parent.goto(`${serverBase}/?r=7#ops/dashboard`)
     await parent.getByText('Plan status').waitFor({ timeout: 30000 })
     const dashText = await parent.locator('main').innerText()
-    check('Parent dashboard: £25 / month, active, Cancel subscription available', dashText.includes('£25 / month') && /active/.test(dashText) && dashText.includes('Cancel subscription'))
+    check('Parent dashboard: £50.00 / month for 2 children × £25, active, Cancel subscription available', dashText.includes('£50.00 / month') && dashText.includes('2 children × £25') && /active/.test(dashText) && dashText.includes('Cancel subscription'))
     await shot(parent, 'subscription-parent-dashboard')
 
     // Guards.

@@ -223,7 +223,11 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   if (event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {
     const subscription = event.data.object
     const membershipStatus = event.type.endsWith('deleted') ? 'cancelled' : ['active', 'trialing'].includes(subscription.status) ? 'active' : 'inactive'
-    await supabase.from('parent_families').update({ membership_status: membershipStatus, updated_at: new Date().toISOString() }).eq('stripe_subscription_id', subscription.id)
+    const item = subscription.items?.data?.[0]
+    // Per-child subscriptions: mirror the quantity Stripe is charging for (also
+    // covers a quantity changed by hand in the Stripe dashboard).
+    const perChild = subscription.metadata?.kada_pricing === 'per_child' && item ? { membership_children: item.quantity, membership_monthly_pence: (item.price?.unit_amount ?? MEMBERSHIP_PENCE_PER_CHILD) * item.quantity } : {}
+    await supabase.from('parent_families').update({ membership_status: membershipStatus, ...perChild, updated_at: new Date().toISOString() }).eq('stripe_subscription_id', subscription.id)
     // Keep the children's roster status in step with the subscription ,  a cancelled
     // membership must not leave students showing as active in Operations.
     if (event.type === 'customer.subscription.deleted') {
@@ -422,6 +426,8 @@ async function recordClassBooking(session) {
     // wipes the Stripe customer/subscription an earlier membership checkout saved.
     ...(session.customer ? { stripe_customer_id: session.customer } : {}),
     ...(session.subscription ? { stripe_subscription_id: session.subscription } : {}),
+    // A membership checkout is priced per child (quantity = children on the account).
+    ...(session.subscription && Number(metadata.children) ? { membership_pricing: 'per_child', membership_children: Number(metadata.children), membership_monthly_pence: Number(metadata.children) * MEMBERSHIP_PENCE_PER_CHILD } : {}),
     updated_at: new Date().toISOString(),
   }, { onConflict: 'id' })
   if (familyError) console.error('Family creation failed:', familyError)
@@ -451,6 +457,8 @@ async function recordClassBooking(session) {
   if (!familyError && studentList.length) {
     const { error: studentError } = await supabase.from('students').update({ membership_status: 'active' }).eq('booking_id', metadata.booking_id)
     if (studentError) console.error('Student creation failed:', studentError)
+    // New children on a family with a per-child membership raise its monthly quantity.
+    if (!session.subscription) syncMembershipSoon(metadata.family_id, 'children added by a class booking')
   }
   if (!error) {
     const bookingLabel = Number(metadata.amount_pence || 0) === 0 ? 'New class booking (free with discount code)' : 'New paid class booking'
@@ -472,7 +480,10 @@ async function recordClassBooking(session) {
         supabase.from('students').select('name').eq('booking_id', metadata.booking_id),
       ])
       const studentNames = (bookingStudents || []).map((student) => student.name).filter(Boolean)
-      const planLabel = planType === 'monthly_membership' ? 'Monthly Membership (£25/month)' : 'Day Pass (£10)'
+      const childCount = Number(metadata.children) || studentList.length || 1
+      const planLabel = planType === 'monthly_membership'
+        ? `Monthly Membership (£25/month per child × ${childCount} = ${money(childCount * MEMBERSHIP_PENCE_PER_CHILD)}/month)`
+        : `Day Pass (£10 per child × ${childCount})`
       const classTime = classSession?.start_time ? ` · ${String(classSession.start_time).slice(0, 5)}${classSession.end_time ? ` to ${String(classSession.end_time).slice(0, 5)}` : ''}` : ''
       const classesUrl = `${PUBLIC_BASE_URL}#classes`
       const ics = metadata.class_date ? buildIcs({ title: `${metadata.class_name} at King's Ark Dance Academy`, date: metadata.class_date, startTime: classSession?.start_time || '10:00', endTime: classSession?.end_time || classSession?.start_time || '11:00', location: "King's Ark Dance Academy, 395 College Rd, Birmingham B44 0HF", description: classSession?.description || '', url: classesUrl }) : ''
@@ -1083,7 +1094,8 @@ async function resolveParentFamily(user) {
     }))
     const { error: childError } = rows.length ? await supabase.from('students').insert(rows) : { error: null }
     if (childError) console.error('Sign-up children could not be created:', childError.message)
-    else await supabase.auth.admin.updateUserById(user.id, { app_metadata: { ...(user.app_metadata || {}), children_created_at: new Date().toISOString() } })
+    else if (rows.length) syncMembershipSoon(family.id, 'children added at sign-up')
+    if (!childError) await supabase.auth.admin.updateUserById(user.id, { app_metadata: { ...(user.app_metadata || {}), children_created_at: new Date().toISOString() } })
   }
   return family
 }
@@ -1168,6 +1180,7 @@ app.post('/api/parent/children', async (request, response) => {
     membership_status: 'inactive',
   }))).select('*')
   if (error) return response.status(500).json({ error: `The child could not be added: ${error.message}` })
+  syncMembershipSoon(family.id, 'children added from the parent dashboard')
   response.json({ students: saved })
 })
 
@@ -3388,10 +3401,11 @@ app.post('/api/admin/discount-codes', async (request, response) => {
 const discountCheckLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 app.post('/api/discount-codes/check', discountCheckLimiter, async (request, response) => {
   if (!supabase) return response.status(503).json({ error: 'Discounts are not available right now.' })
-  const { code: rawCode, scope, planType, eventId, tierId, quantity, subtotalPence } = request.body || {}
+  const { code: rawCode, scope, planType, eventId, tierId, quantity, subtotalPence, children } = request.body || {}
   if (!DISCOUNT_SCOPES.includes(scope)) return response.status(400).json({ error: 'Unknown booking type.' })
   let subtotal = 0
-  if (scope === 'class') subtotal = CLASS_PRICES_PENCE[planType] || 0
+  // Class prices are per child; the code comes off the total for all of them.
+  if (scope === 'class') subtotal = (CLASS_PRICES_PENCE[planType] || 0) * Math.min(20, Math.max(1, Math.floor(Number(children) || 1)))
   if (scope === 'school') subtotal = Math.max(0, Math.round(Number(subtotalPence) || 0))
   if (scope === 'event') {
     const { data: event } = await supabase.from('events').select('ticket_tiers,status,ticketing_enabled').eq('id', String(eventId || '')).maybeSingle()
@@ -3553,10 +3567,21 @@ async function subscriptionPlanList() {
 }
 // The membership covers the whole family but is priced per child: one Stripe
 // line item for the plan's price with quantity = the family's children.
-async function familyChildCount(familyId) {
-  const { data } = await supabase.from('students').select('name,date_of_birth').eq('family_id', familyId)
-  // A child can have one record per booking; count each child once.
-  return new Set((data || []).map((child) => `${String(child.name || '').trim().toLowerCase()}|${child.date_of_birth}`)).size
+// Children a per-child membership charges for: every child on the family's
+// account, counted once (a child can have one record per booking), leaving out
+// children typed in on a class checkout that was never paid (checkout creates
+// them as student-parent-<uuid>-N, and an unpaid one can be moved on to the next
+// checkout). A child already on the account (signed up, added from the Children
+// tab, or from a paid booking) who was attached to such a checkout still counts. includeBookingId counts that checkout's new
+// children too (the one being paid for right now).
+async function familyChildCount(familyId, includeBookingId = '') {
+  const { data: rows, error } = await supabase.from('students').select('id,name,date_of_birth,booking_id').eq('family_id', familyId)
+  if (error) throw error
+  const bookingIds = [...new Set((rows || []).map((row) => row.booking_id).filter(Boolean))]
+  const { data: bookings } = bookingIds.length ? await supabase.from('bookings').select('id,payment_status').in('id', bookingIds) : { data: [] }
+  const abandoned = new Set((bookings || []).filter((booking) => booking.payment_status === 'pending' && booking.id !== includeBookingId).map((booking) => booking.id))
+  const createdByAbandoned = (row) => row.booking_id && abandoned.has(row.booking_id) && String(row.id).startsWith('student-parent-')
+  return new Set((rows || []).filter((row) => !createdByAbandoned(row)).map((child) => `${String(child.name || '').trim().toLowerCase()}|${child.date_of_birth}`)).size
 }
 const childrenLabel = (count) => `${count} ${count === 1 ? 'child' : 'children'}`
 const planTotalLabel = (plan, children) => `${money(plan.pricePence * children)}/${plan.interval}`
@@ -3663,6 +3688,8 @@ async function recordSubscriptionRequest(session) {
     plan_type: subscriptionRequest.plan_type,
     membership_status: 'active',
     paused_at: null,
+    membership_pricing: 'per_child',
+    ...(Number(metadata.children) ? { membership_children: Number(metadata.children), membership_monthly_pence: Number(metadata.children) * MEMBERSHIP_PENCE_PER_CHILD } : {}),
     ...(customerId ? { stripe_customer_id: customerId } : {}),
     ...(subscriptionId ? { stripe_subscription_id: subscriptionId } : {}),
     updated_at: new Date().toISOString(),
@@ -3744,7 +3771,7 @@ app.get('/api/subscribe/:token', async (request, response) => {
     line_items: [{ price: priceId, quantity: children }],
     client_reference_id: family.id,
     metadata,
-    subscription_data: { metadata, description: `KADA ${plan.label} · ${family.guardian_name || family.guardian_email} · ${childrenLabel(children)}`.slice(0, 500) },
+    subscription_data: { metadata: { ...metadata, kada_pricing: 'per_child', kada_family_id: family.id }, description: `KADA ${plan.label} · ${family.guardian_name || family.guardian_email} · ${childrenLabel(children)}`.slice(0, 500) },
     success_url: `${base}/done?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${base}/cancelled`,
   }
@@ -3790,6 +3817,88 @@ app.get('/api/subscribe/:token/cancelled', (request, response) => {
   invoicePayPage(response, { title: 'Not set up yet', body: `<p>No payment was taken and nothing has changed. You can <a href="/api/subscribe/${/^[a-f0-9]{32}$/.test(token) ? token : ''}" style="color:#0b3d2e;font-weight:700">try again</a> whenever you're ready.</p>` })
 })
 
+/* ------------------------------------------------------------------ */
+/* Per-child Monthly Membership. One Stripe subscription per family,    */
+/* quantity = children on the account (£25 each), so a discount code    */
+/* applies to the family's total. The quantity follows the children: it */
+/* is updated when children are added, and an hourly sweep catches      */
+/* removals (deleting a booking deletes its children). Changes apply    */
+/* from the next monthly payment, with no part-month charge or refund.  */
+/* Families on the old flat £25 rate (membership_pricing 'flat') are    */
+/* never changed here; an admin switches them deliberately.            */
+/* ------------------------------------------------------------------ */
+const MEMBERSHIP_PENCE_PER_CHILD = CLASS_PRICES_PENCE.monthly_membership
+const PER_CHILD_MIGRATION = 'Apply supabase/migrations/20261002_per_child_membership.sql in the Supabase SQL Editor.'
+const membershipSyncing = new Set()
+
+async function syncFamilyMembership(familyId, { notify = true, reason = '' } = {}) {
+  if (!stripe || !supabase || !familyId || membershipSyncing.has(familyId)) return { changed: false }
+  membershipSyncing.add(familyId)
+  try {
+    const { data: family } = await supabase.from('parent_families').select('*').eq('id', familyId).maybeSingle()
+    if (!family?.stripe_subscription_id || family.membership_pricing !== 'per_child') return { changed: false, skipped: 'not a per-child subscription' }
+    const subscription = await stripe.subscriptions.retrieve(family.stripe_subscription_id)
+    if (['canceled', 'incomplete_expired'].includes(subscription.status)) return { changed: false, skipped: `subscription ${subscription.status}` }
+    const item = subscription.items.data[0]
+    // Never drop to zero: a family with no children left keeps one place until
+    // staff cancel the subscription.
+    const children = Math.max(1, await familyChildCount(family.id))
+    const unitPence = item.price?.unit_amount ?? MEMBERSHIP_PENCE_PER_CHILD
+    const monthlyPence = unitPence * children
+    const columns = { membership_children: children, membership_monthly_pence: monthlyPence }
+    if (item.quantity === children) {
+      if (family.membership_children !== children || family.membership_monthly_pence !== monthlyPence) await supabase.from('parent_families').update(columns).eq('id', family.id)
+      return { changed: false, children, monthlyPence }
+    }
+    await stripe.subscriptionItems.update(item.id, { quantity: children, proration_behavior: 'none' })
+    await supabase.from('parent_families').update({ ...columns, updated_at: new Date().toISOString() }).eq('id', family.id)
+    const nextPayment = item.current_period_end || subscription.current_period_end
+    const nextDate = nextPayment ? formatDateGB(new Date(nextPayment * 1000).toISOString().slice(0, 10)) : 'your next payment date'
+    if (notify) {
+      const emailResult = await sendEmail({
+        to: family.guardian_email,
+        subject: `Your Monthly Membership is now ${money(monthlyPence)} a month - King's Ark Dance Academy`,
+        html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml((family.guardian_name || '').split(' ')[0] || 'there')},</p><p>The Monthly Membership is ${money(unitPence)} a month for each child on your account. You now have <strong>${childrenLabel(children)}</strong> on your account (before: ${childrenLabel(item.quantity)}), so from your next payment on <strong>${escHtml(nextDate)}</strong> it will be <strong>${money(monthlyPence)} a month</strong>.</p><p>Nothing extra is charged for the rest of this month. If this doesn't look right, just reply to this email.</p><p>Thank you,<br>King's Ark Dance Academy</p></div>`,
+      })
+      if (!emailResult.sent) console.error('Membership change email failed:', emailResult.reason)
+      await notifyAdmin(`Membership updated: ${family.guardian_name || family.guardian_email}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Membership quantity updated</h2><p><strong>Parent:</strong> ${escHtml(family.guardian_name || '')} (${escHtml(family.guardian_email || '')})<br><strong>Children:</strong> ${item.quantity} → ${children}<br><strong>Monthly:</strong> ${money(unitPence * item.quantity)} → ${money(monthlyPence)} from ${escHtml(nextDate)}${reason ? `<br><strong>Why:</strong> ${escHtml(reason)}` : ''}</p>${dashboardButton('subscriptions', 'Open subscriptions')}</div>`, 'subscription-request')
+    }
+    return { changed: true, from: item.quantity, children, monthlyPence, nextDate }
+  } catch (error) {
+    console.error(`Membership sync for family ${familyId} failed:`, error.message)
+    return { changed: false, error: error.message }
+  } finally {
+    membershipSyncing.delete(familyId)
+  }
+}
+
+// Fire-and-forget after a child is added; failures are logged and the sweep retries.
+const syncMembershipSoon = (familyId, reason) => { if (familyId) syncFamilyMembership(familyId, { reason }).catch(() => {}) }
+
+async function runMembershipSync() {
+  if (!stripe || !supabase) return { checked: 0, changed: [] }
+  const { data: families, error } = await supabase.from('parent_families').select('id').eq('membership_pricing', 'per_child').eq('membership_status', 'active').not('stripe_subscription_id', 'is', null)
+  if (error) {
+    if (!/membership_pricing/.test(error.message)) console.error('Membership sync query failed:', error.message)
+    return { checked: 0, changed: [], error: error.message }
+  }
+  const changed = []
+  for (const family of families || []) {
+    const result = await syncFamilyMembership(family.id, { reason: 'children on the account changed' }) // eslint-disable-line no-await-in-loop
+    if (result.changed) changed.push({ familyId: family.id, from: result.from, children: result.children })
+  }
+  return { checked: (families || []).length, changed }
+}
+setInterval(() => { runMembershipSync().catch((error) => console.error('Membership sync error:', error)) }, INVOICE_REMINDER_INTERVAL_MS)
+setTimeout(() => { runMembershipSync().catch((error) => console.error('Membership sync error:', error)) }, 45000)
+
+app.post('/api/admin/memberships/sync', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  const familyId = String(request.body?.familyId || '')
+  response.json(familyId ? await syncFamilyMembership(familyId, { reason: 'synced from the dashboard' }) : await runMembershipSync())
+})
+
 app.post('/api/stripe/create-checkout-session', async (request, response) => {
   if (!stripe) return response.status(503).json({ error: 'Stripe is not configured on the server.' })
 
@@ -3831,13 +3940,8 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   }
   if (discount.error) return response.status(400).json({ error: discount.error })
   const code = discount.code
-  const totals = applyDiscount(code, CLASS_PRICES_PENCE[planType])
   const isMembership = planType === 'monthly_membership'
   const membershipDuration = code?.membershipDuration || 'once'
-  // £0 means no Stripe at all, except a membership that is free only for its first
-  // month: that still needs a Stripe subscription (and card) for the months after.
-  const free = totals.totalPence === 0 && (!isMembership || membershipDuration === 'forever')
-  if (!free && totals.totalPence > 0 && totals.totalPence < 30) return response.status(400).json({ error: 'With that discount the total is too small to pay by card. Please contact us to book.' })
 
   const user = await authenticatedUser(request)
 
@@ -3858,7 +3962,7 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
     const { error: familyError } = await supabase.from('parent_families').insert({ id: familyId, owner_user_id: user?.id || null, guardian_name: parentName, guardian_email: parentEmail, plan_type: planType, membership_status: 'pending' })
     if (familyError) return response.status(500).json({ error: 'Family record could not be created.' })
   }
-  const { error: bookingError } = await supabase.from('bookings').insert({ id: bookingId, family_id: familyId, contact_name: parentName, contact_email: parentEmail, date: classDate, session_type: className, price: totals.totalPence / 100, student_count: students.length, status: 'Enquiry', invoice_status: 'Not sent', payment_status: 'pending' })
+  const { error: bookingError } = await supabase.from('bookings').insert({ id: bookingId, family_id: familyId, contact_name: parentName, contact_email: parentEmail, date: classDate, session_type: className, price: 0, student_count: students.length, status: 'Enquiry', invoice_status: 'Not sent', payment_status: 'pending' })
   if (bookingError) return response.status(500).json({ error: 'Booking record could not be created.' })
   // A child already on the family's account and not yet booked into anything
   // (added at sign-up or from the Children tab) is attached to this booking
@@ -3883,11 +3987,27 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   }
   const { error: studentsError } = newStudents.length ? await supabase.from('students').insert(newStudents) : { error: null }
   if (studentsError) return response.status(500).json({ error: 'Student records could not be created.' })
+
+  // Priced per child, and any discount comes off the total: a Day Pass is £10 for
+  // each child on this booking; the Monthly Membership is £25 a month for each
+  // child on the family's account (including the ones on this booking).
+  let children = students.length
+  try {
+    if (isMembership) children = Math.max(1, await familyChildCount(familyId, bookingId))
+  } catch {
+    return response.status(500).json({ error: 'Your children could not be counted. Please try again.' })
+  }
+  const totals = applyDiscount(code, CLASS_PRICES_PENCE[planType] * children)
+  // £0 means no Stripe at all, except a membership that is free only for its first
+  // month: that still needs a Stripe subscription (and card) for the months after.
+  const free = totals.totalPence === 0 && (!isMembership || membershipDuration === 'forever')
+  if (!free && totals.totalPence > 0 && totals.totalPence < 30) return response.status(400).json({ error: 'With that discount the total is too small to pay by card. Please contact us to book.' })
+  await supabase.from('bookings').update({ price: totals.totalPence / 100 }).eq('id', bookingId)
   // Return to the host the parent actually used (same pattern as event checkout) , 
   // so dev/localhost sessions redirect back to dev, not to the live site.
   const requestOrigin = request.headers.origin || request.headers.referer?.replace(/\/[^/]*$/, '') || ''
   const clientUrl = requestOrigin.startsWith('http') ? requestOrigin : (process.env.CLIENT_URL || 'http://localhost:5173')
-  const metadata = { booking_id: bookingId, family_id: familyId, plan_type: planType, class_name: className, class_date: classDate, amount_pence: String(totals.totalPence), parent_name: parentName, parent_email: parentEmail, ...discountMetadata(code, totals), ...(code && isMembership ? { discount_duration: membershipDuration } : {}) }
+  const metadata = { booking_id: bookingId, family_id: familyId, plan_type: planType, class_name: className, class_date: classDate, amount_pence: String(totals.totalPence), children: String(children), parent_name: parentName, parent_email: parentEmail, ...discountMetadata(code, totals), ...(code && isMembership ? { discount_duration: membershipDuration } : {}) }
 
   if (free) {
     const freeSession = freeCheckoutSession({ metadata, email: parentEmail, name: parentName })
@@ -3906,9 +4026,10 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
     const session = await stripe.checkout.sessions.create({
       mode: isMembership ? 'subscription' : 'payment',
       customer_email: parentEmail,
-      line_items: [{ price: priceId, quantity: 1 }],
+      line_items: [{ price: priceId, quantity: children }],
       ...(discounts.length ? { discounts } : {}),
       metadata,
+      ...(isMembership ? { subscription_data: { metadata: { kada_pricing: 'per_child', kada_family_id: familyId }, description: `KADA Monthly Membership · ${parentName} · ${childrenLabel(children)}`.slice(0, 500) } } : {}),
       success_url: `${clientUrl}?payment=success&session_id={CHECKOUT_SESSION_ID}#classes`,
       cancel_url: `${clientUrl}#classes`,
     })
@@ -4303,7 +4424,7 @@ app.post('/api/parent/cancel-subscription', async (request, response) => {
 app.post('/api/admin/subscriptions/:familyId/:action', async (request, response) => {
   if (!stripe || !supabase) return response.status(503).json({ error: 'Billing is not configured on the server.' })
   const { action, familyId } = request.params
-  if (!['pause', 'resume', 'cancel'].includes(action)) return response.status(400).json({ error: 'Unknown subscription action.' })
+  if (!['pause', 'resume', 'cancel', 'per-child'].includes(action)) return response.status(400).json({ error: 'Unknown subscription action.' })
   const user = await authenticatedUser(request)
   if (!user) return response.status(401).json({ error: 'Authentication is required.' })
   const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).maybeSingle()
@@ -4311,6 +4432,21 @@ app.post('/api/admin/subscriptions/:familyId/:action', async (request, response)
   const { data: family } = await supabase.from('parent_families').select('*').eq('id', familyId).maybeSingle()
   if (!family) return response.status(404).json({ error: 'Family not found.' })
   if (!family.stripe_subscription_id) return response.status(400).json({ error: 'This family has no Stripe subscription. Use the status menu to update it manually.' })
+
+  // Deliberately move a family from the old flat £25 rate to £25 per child.
+  if (action === 'per-child') {
+    try {
+      await stripe.subscriptions.update(family.stripe_subscription_id, { metadata: { kada_pricing: 'per_child', kada_family_id: family.id } })
+      const { error: markError } = await supabase.from('parent_families').update({ membership_pricing: 'per_child', updated_at: new Date().toISOString() }).eq('id', familyId)
+      if (markError) return response.status(500).json({ error: /membership_pricing/.test(markError.message) ? `Per-child pricing is not set up yet. ${PER_CHILD_MIGRATION}` : markError.message })
+      const result = await syncFamilyMembership(familyId, { reason: 'switched from the flat rate to per-child pricing by an admin' })
+      if (result.error) return response.status(502).json({ error: `Stripe could not update the subscription: ${result.error}` })
+      const { data } = await supabase.from('parent_families').select('*').eq('id', familyId).single()
+      return response.json({ family: data, result })
+    } catch (error) {
+      return response.status(502).json({ error: error.message || 'Stripe could not update the subscription.' })
+    }
+  }
 
   try {
     const update = { updated_at: new Date().toISOString() }

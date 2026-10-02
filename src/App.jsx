@@ -2062,7 +2062,7 @@ function App() {
                 <strong>Class:</strong> {classBookingSuccess.className}<br />
                 <strong>Date:</strong> {classBookingSuccess.classDate ? new Date(`${classBookingSuccess.classDate}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : 'To be confirmed'}{classBookingSuccess.startTime ? ` · ${classBookingSuccess.startTime}${classBookingSuccess.endTime ? ` to ${classBookingSuccess.endTime}` : ''}` : ''}<br />
                 <strong>Children:</strong> {classBookingSuccess.students.length ? classBookingSuccess.students.join(', ') : 'Not listed'}<br />
-                <strong>Plan:</strong> {classBookingSuccess.planType === 'monthly_membership' ? 'Monthly Membership (£25/month)' : 'Day Pass (£10)'}<br />
+                <strong>Plan:</strong> {classBookingSuccess.planType === 'monthly_membership' ? 'Monthly Membership (£25/month per child)' : 'Day Pass (£10 per child)'}<br />
                 <strong>Total paid:</strong> £{(classBookingSuccess.pricePence / 100).toFixed(2)}
               </p>
               <p style={{ margin: '0 0 16px', fontSize: 13.5, color: muted }}>A confirmation email with a calendar file is on its way to <strong>{classBookingSuccess.parentEmail}</strong>.</p>

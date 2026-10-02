@@ -82,7 +82,19 @@ export default function SubscriptionsPage({ session, families, busyId, onAction,
 
   const subscriptionColumns = [
     { key: 'guardian', label: 'Guardian', render: guardianCell },
-    { key: 'plan', label: 'Plan', render: () => <span style={{ color: OPS_COLORS.ink }}>Monthly Membership</span> },
+    {
+      key: 'plan', label: 'Plan', render: (family) => family.membership_pricing === 'per_child' ? (
+        <div>
+          <div style={{ color: OPS_COLORS.ink }}>Monthly Membership · {money(family.membership_monthly_pence || 0)}/month</div>
+          <div style={{ fontSize: 11.5, color: OPS_COLORS.muted }}>{family.membership_children ? `${family.membership_children} ${family.membership_children === 1 ? 'child' : 'children'} × £25 (per child)` : 'Per child'}</div>
+        </div>
+      ) : (
+        <div>
+          <div style={{ color: OPS_COLORS.ink }}>Monthly Membership · {money(family.membership_monthly_pence || 2500)}/month</div>
+          <div style={{ fontSize: 11.5, color: OPS_COLORS.muted }}>Old flat rate per family, kept until you switch it</div>
+        </div>
+      ),
+    },
     {
       key: 'status', label: 'Subscription', render: (family) => {
         const { label, tone } = subscriptionStatus(family)
@@ -91,6 +103,7 @@ export default function SubscriptionsPage({ session, families, busyId, onAction,
         const options = []
         if (hasStripeSub && isActiveLike && !family.paused_at) options.push({ value: 'pause', label: 'Pause subscription' })
         if (hasStripeSub && isActiveLike && family.paused_at) options.push({ value: 'resume', label: 'Resume subscription' })
+        if (hasStripeSub && isActiveLike && family.membership_pricing !== 'per_child') options.push({ value: 'per-child', label: 'Switch to per-child pricing' })
         if (hasStripeSub && isActiveLike) options.push({ value: 'cancel', label: 'Cancel subscription', danger: true })
         if (!hasStripeSub) {
           if (family.membership_status !== 'active') options.push({ value: 'set:active', label: 'Mark active' })
@@ -105,7 +118,9 @@ export default function SubscriptionsPage({ session, families, busyId, onAction,
             options={options}
             onChange={(action) => {
               if (action.startsWith('set:')) onSaveFamily(family, { membership_status: action.slice(4) })
-              else onAction(family, action)
+              else if (action === 'per-child') {
+                if (window.confirm(`Switch ${family.guardian_name || 'this family'} from the flat £25/month to £25 per child? The new amount starts from their next payment, and they'll be emailed about it.`)) onAction(family, action)
+              } else onAction(family, action)
             }}
           />
         )

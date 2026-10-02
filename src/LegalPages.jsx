@@ -83,8 +83,8 @@ const LEGAL_CONTENT = {
       {
         heading: 'Classes and memberships',
         paragraphs: [
-          'Monthly membership (£25/month) is a rolling subscription paid through Stripe. You can cancel at any time from your parent dashboard or the Stripe billing portal. Cancellation stops future payments and your child\u2019s place remains active until the end of the paid period.',
-          'A Day Pass (£10) covers one scheduled class date for the children named at checkout.',
+          'Monthly membership is £25/month for each child on your account, as a rolling subscription paid through Stripe. If you add or remove a child, the monthly amount changes from your next payment. Any discount code applies to the total. You can cancel at any time from your parent dashboard or the Stripe billing portal. Cancellation stops future payments and your child\u2019s place remains active until the end of the paid period.',
+          'A Day Pass is £10 per child and covers one scheduled class date for the children named at checkout.',
           'Class places are confirmed only after payment completes. If a class is full or cancelled by us, we will offer an alternative date or a full refund.',
         ],
       },

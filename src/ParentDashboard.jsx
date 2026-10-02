@@ -104,7 +104,7 @@ function ParentDashboard({ initialTab = '', session, family, bookings, students,
 
         {parentTab === 'dashboard' && <>
           <div className="ops-grid">
-            <div className="panel stat-panel"><div className="panel-label">Plan</div><strong>{family?.plan_type === 'monthly_membership' ? '£25 / month' : family?.plan_type === 'day_pass' ? 'Day pass' : 'No plan yet'}</strong></div>
+            <div className="panel stat-panel"><div className="panel-label">Plan</div><strong>{family?.plan_type === 'monthly_membership' ? `${poundsFromPence(family.membership_monthly_pence || 2500)} / month` : family?.plan_type === 'day_pass' ? 'Day pass' : 'No plan yet'}</strong>{family?.plan_type === 'monthly_membership' && <div style={{ fontSize: 12, color: muted, marginTop: 4 }}>{family.membership_pricing === 'per_child' && family.membership_children ? `${family.membership_children} ${family.membership_children === 1 ? 'child' : 'children'} × £25` : 'Monthly Membership'}</div>}</div>
             <div className="panel stat-panel"><div className="panel-label">Plan status</div><strong>{family?.membership_status || 'Pending'}</strong></div>
             <div className="panel stat-panel"><div className="panel-label">Children</div><strong>{activeStudents.length}</strong></div>
           </div>
@@ -220,6 +220,13 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
   const knownChildren = students.filter((student) => student.name)
   const selectedSession = classSessions.find((session) => session.name === form.className) || classSessions[0] || null
   const free = discount?.totalPence === 0 && (form.planType !== 'monthly_membership' || discount.membershipDuration === 'forever')
+  // Priced per child, discount on the total: a Day Pass is £10 for each child on
+  // this booking; the membership is £25 a month for each child on the account.
+  const isMembership = form.planType === 'monthly_membership'
+  const childKey = (child) => `${String(child.name || '').trim().toLowerCase()}|${child.dateOfBirth || ''}`
+  const bookingRows = form.students.filter((row) => row.name.trim())
+  const chargedChildren = Math.max(1, isMembership ? new Set([...knownChildren, ...bookingRows].map(childKey)).size : form.students.length)
+  const basePence = (isMembership ? 2500 : 1000) * chargedChildren
 
   // Keep the chosen date on a real class day ,  switching class jumps to the
   // nearest date that class actually runs; only scheduled days are selectable.
@@ -265,8 +272,8 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
         <div>
           <span style={label}>Plan</span>
           <select style={input} value={form.planType} onChange={(event) => setForm({ ...form, planType: event.target.value })}>
-            <option value="monthly_membership">Monthly Membership (£25/month)</option>
-            <option value="day_pass">Day Pass (£10)</option>
+            <option value="monthly_membership">Monthly Membership (£25/month per child)</option>
+            <option value="day_pass">Day Pass (£10 per child)</option>
           </select>
         </div>
         <div>
@@ -306,8 +313,12 @@ function ParentBookingForm({ family, students, classSessions, session, onBookCla
         <div style={{ display: 'flex', gap: 8 }}>
           <OpsButton small variant="ghost" onClick={() => setForm({ ...form, students: [...form.students, { childId: '', name: '', dateOfBirth: '' }] })}>+ Add another child</OpsButton>
         </div>
-        <DiscountCodeField scope="class" request={{ planType: form.planType }} value={form.discountCode} onChange={(code) => setForm({ ...form, discountCode: code })} onApplied={setDiscount} inputStyle={input} labelStyle={label} buttonStyle={{ border: '1px solid #e4ddc9', borderRadius: 6, background: emerald, color: '#fffdf8', padding: '0 14px', fontWeight: 700, cursor: 'pointer' }} />
-        {discount && <p style={{ margin: 0, fontSize: 13.5 }}>Total: <strong>{poundsFromPence(discount.totalPence)}</strong>{form.planType === 'monthly_membership' ? (discount.membershipDuration === 'forever' ? ' a month' : ' for the first month, then £25 a month') : ''}</p>}
+        <DiscountCodeField scope="class" request={{ planType: form.planType, children: chargedChildren }} value={form.discountCode} onChange={(code) => setForm({ ...form, discountCode: code })} onApplied={setDiscount} inputStyle={input} labelStyle={label} buttonStyle={{ border: '1px solid #e4ddc9', borderRadius: 6, background: emerald, color: '#fffdf8', padding: '0 14px', fontWeight: 700, cursor: 'pointer' }} />
+        <p style={{ margin: 0, fontSize: 13.5 }}>
+          {isMembership ? `${chargedChildren} ${chargedChildren === 1 ? 'child' : 'children'} on your account × £25 = ${poundsFromPence(basePence)} a month. ` : `${chargedChildren} ${chargedChildren === 1 ? 'child' : 'children'} × £10 = ${poundsFromPence(basePence)}. `}
+          {discount && <>Total: <strong>{poundsFromPence(discount.totalPence)}</strong>{isMembership ? (discount.membershipDuration === 'forever' ? ' a month' : ` for the first month, then ${poundsFromPence(basePence)} a month`) : ''}</>}
+        </p>
+        {isMembership && <p style={{ margin: 0, fontSize: 12, color: muted }}>The membership covers every child on your account. If you add or remove a child later, the monthly amount changes from your next payment.</p>}
         <OpsButton type="submit" disabled={checkoutBusy || !form.classDate}>{checkoutBusy ? 'Opening checkout…' : free ? 'Confirm free booking' : 'Continue to payment'}</OpsButton>
       </form>
     </div>
