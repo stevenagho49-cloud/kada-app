@@ -14,6 +14,7 @@ import { TeamPage } from './ops/TeamPage'
 import { SettingsPage } from './ops/SettingsPage'
 import { CampaignsPage } from './ops/CampaignsPage'
 import { SiteAnalytics } from './ops/SiteAnalytics'
+import { PaymentsPanel } from './ops/PaymentsPanel'
 import { useAttendanceRows, AttendanceDots } from './ops/attendanceShared'
 import { childStats, formatRate } from './ops/attendanceStats'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
@@ -27,6 +28,7 @@ const PaymentLinksPage = lazy(() => import('./ops/PaymentLinksPage').then((modul
 const AttendancePage = lazy(() => import('./ops/AttendancePage').then((module) => ({ default: module.AttendancePage })))
 const HomeworkPage = lazy(() => import('./ops/HomeworkPage').then((module) => ({ default: module.HomeworkPage })))
 const FormationsPage = lazy(() => import('./ops/FormationsPage').then((module) => ({ default: module.FormationsPage })))
+const SessionTypesPage = lazy(() => import('./ops/SessionTypesPage').then((module) => ({ default: module.SessionTypesPage })))
 const ArrearsPage = lazy(() => import('./ops/ArrearsPage').then((module) => ({ default: module.ArrearsPage })))
 const ParentDashboard = lazy(() => import('./ParentDashboard').then((module) => ({ default: module.ParentDashboard })))
 
@@ -246,7 +248,7 @@ function normalizeStudent(row = {}) {
 }
 
 function normalizeJob(row = {}) {
-  return { id: row.id, bookingId: row.booking_id ?? '', date: row.date ?? '', sessionType: row.session_type ?? '', studentCount: Number(row.student_count ?? 0), locationArea: row.location_area ?? '', instructorPay: Number(row.instructor_pay ?? 0), status: row.status ?? 'open', claimedBy: row.claimed_by ?? '', rejectionReason: row.rejection_reason ?? '', claimedAt: row.claimed_at ?? row.claimedAt ?? '', decidedAt: row.decided_at ?? row.decidedAt ?? '' }
+  return { id: row.id, bookingId: row.booking_id ?? '', scheduledSessionId: row.scheduled_session_id ?? '', sessionDates: Array.isArray(row.session_dates) ? row.session_dates : [], date: row.date ?? '', sessionType: row.session_type ?? '', studentCount: Number(row.student_count ?? 0), locationArea: row.location_area ?? '', instructorPay: Number(row.instructor_pay ?? 0), status: row.status ?? 'open', claimedBy: row.claimed_by ?? '', rejectionReason: row.rejection_reason ?? '', claimedAt: row.claimed_at ?? row.claimedAt ?? '', decidedAt: row.decided_at ?? row.decidedAt ?? '' }
 }
 
 function normalizeMessage(row = {}) {
@@ -309,7 +311,7 @@ function toDbStudent(row) {
 }
 
 function toDbJob(row) {
-  return { id: row.id, booking_id: row.bookingId, date: row.date, session_type: row.sessionType, student_count: Number(row.studentCount || 0), location_area: row.locationArea, instructor_pay: Number(row.instructorPay || 0), status: row.status, claimed_by: row.claimedBy || null, rejection_reason: row.rejectionReason || null, published_at: row.publishedAt, claimed_at: row.claimedAt || null, decided_at: row.decidedAt || null }
+  return { id: row.id, booking_id: row.bookingId || null, date: row.date, session_type: row.sessionType, student_count: Number(row.studentCount || 0), location_area: row.locationArea, instructor_pay: Number(row.instructorPay || 0), status: row.status, claimed_by: row.claimedBy || null, rejection_reason: row.rejectionReason || null, published_at: row.publishedAt, claimed_at: row.claimedAt || null, decided_at: row.decidedAt || null }
 }
 
 async function loadTable(tableName, fallback) {
@@ -366,7 +368,14 @@ async function saveTable(tableName, rows) {
   }
 }
 
-function buildPrice({ studentCount, sessionType }) {
+// Built-in workshop types plus every active staff-made session type (and the
+// booking's current value, so an old or switched-off type still shows).
+const PRESET_SESSION_TYPES = ['Full day (£490)', 'Half day', 'Single workshop', 'Custom']
+function sessionTypeNames(sessionTypes = [], current = '') {
+  return [...new Set([...PRESET_SESSION_TYPES.slice(0, 3), ...sessionTypes.map((type) => type.name), 'Custom', ...(current ? [current] : [])])]
+}
+
+function buildPrice({ studentCount, sessionType }, sessionTypes = []) {
   const baseMap = {
     'Full day (£490)': 490,
     'Half day': 260,
@@ -375,8 +384,10 @@ function buildPrice({ studentCount, sessionType }) {
   }
 
   const count = Number(studentCount || 0)
-  const base = baseMap[sessionType] ?? 0
+  const custom = sessionTypes.find((type) => type.name === sessionType)
+  const base = baseMap[sessionType] ?? Number(custom?.default_price || 0)
   const staffNeeded = Math.max(1, Math.ceil(count / 30))
+  if (custom && !custom.default_price) return { price: 0, staffNeeded, recommended: 'Custom quote' }
 
   if (sessionType === 'Custom') {
     return { price: 0, staffNeeded, recommended: 'Custom quote' }
@@ -468,7 +479,7 @@ function statusTone(status) { return status === 'Confirmed' ? 'green' : status =
 function invoiceTone(status) { return status === 'Paid' ? 'green' : status === 'Sent' ? 'gold' : 'red' }
 function Badge({ text, tone = 'default' }) { const colors = { default: ['#f1eee2', muted], green: ['#e6f0e9', okGreen], gold: ['#faf1d9', '#8a6d10'], red: ['#f7e9e4', warn] }; return <span style={{ background: colors[tone][0], color: colors[tone][1], borderRadius: 20, padding: '3px 9px', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{text}</span> }
 
-function BookingForm({ booking, schools, instructors, families = [], onSave, onDelete, onCreateFamily }) {
+function BookingForm({ booking, schools, instructors, families = [], sessionTypes = [], onSave, onDelete, onCreateFamily }) {
   const [form, setForm] = useState(booking)
   // Bill a school, or a parent/family (e.g. an offline family who owes for classes).
   const [billTo, setBillTo] = useState(booking.familyId && !booking.schoolId ? 'family' : 'school')
@@ -512,7 +523,7 @@ function BookingForm({ booking, schools, instructors, families = [], onSave, onD
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
       {billTo === 'school' && <Field label="School"><select style={inputStyle} value={form.schoolId} onChange={set('schoolId')} required><option value="">Select school</option>{schools.map((school) => <option key={school.id} value={school.id}>{school.name}</option>)}</select></Field>}
       <Field label="Date"><input type="date" style={inputStyle} value={form.date} onChange={set('date')} required /></Field>
-      <Field label="Session type"><select style={inputStyle} value={form.sessionType} onChange={set('sessionType')}><option>Full day (£490)</option><option>Half day</option><option>Single workshop</option><option>Custom</option></select></Field>
+      <Field label="Session type"><select style={inputStyle} value={form.sessionType} onChange={set('sessionType')}>{sessionTypeNames(sessionTypes, form.sessionType).map((name) => <option key={name}>{name}</option>)}</select></Field>
       <Field label="Price (£)"><input type="number" style={inputStyle} value={form.price} onChange={set('price')} /></Field>
       <Field label="Instructor pay (£)"><input type="number" style={inputStyle} value={form.instructorPay || ''} onChange={set('instructorPay')} placeholder="Set before publishing" /></Field>
       <Field label="Students"><input type="number" style={inputStyle} value={form.studentCount} onChange={set('studentCount')} /></Field>
@@ -684,6 +695,19 @@ function MessagesView({ messages, myKind, myInstructorId, mySchoolId, schools, i
   return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Messages</h2><p style={{ color: muted }}>{isAdmin ? 'Conversations with instructors and schools, as KADA admin.' : 'Your conversation with KADA admin.'}</p>{isAdmin && <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}><select aria-label="Start a conversation" style={{ ...inputStyle, maxWidth: 360 }} value={starting} onChange={(event) => setStarting(event.target.value)}><option value="">New conversation with…</option>{startOptions.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}</select><Button small disabled={!starting} onClick={() => { setTarget(starting); setStarting('') }}>Open</Button></div>}<div className="messages-grid" style={{ display: 'grid', gridTemplateColumns: isAdmin ? 'minmax(160px, 220px) 1fr' : '1fr', gap: 14 }}>{isAdmin && <Card style={{ padding: 10 }}>{threadList.length ? threadList.map((key) => <button key={key} type="button" onClick={() => setTarget(key)} style={{ display: 'flex', justifyContent: 'space-between', width: '100%', padding: '9px 8px', border: 0, borderTop: `1px solid ${rule}`, background: active === key ? '#f1eee2' : 'transparent', cursor: 'pointer', color: ink, fontWeight: active === key ? 700 : 400, textAlign: 'left' }}><span>{threadLabel(key)}</span>{threads[key] && unreadInThread(key) > 0 && <span style={{ background: warn, color: '#fff', borderRadius: 10, padding: '1px 7px', fontSize: 11, fontWeight: 700 }}>{unreadInThread(key)}</span>}</button>) : <p style={{ color: muted, padding: 8, fontSize: 13 }}>No conversations yet.</p>}</Card>}<Card style={{ padding: 16 }}>{isAdmin && active && <p style={{ margin: '0 0 10px', fontWeight: 700, color: emerald }}>{threadLabel(active)}</p>}{activeMessages.length ? activeMessages.map((message) => { const mine = message.senderKind === myKind && (myKind === 'admin' || message.senderInstructorId === myInstructorId || message.senderSchoolId === mySchoolId); return <div key={message.id} style={{ marginBottom: 10, textAlign: mine ? 'right' : 'left' }}><div style={{ display: 'inline-block', maxWidth: '75%', background: mine ? emerald : '#f1eee2', color: mine ? '#fff' : ink, borderRadius: 10, padding: '8px 12px', fontSize: 13, lineHeight: 1.5, textAlign: 'left' }}>{message.body}</div><div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{mine ? (myKind === 'admin' ? 'KADA admin' : 'You') : threadLabel(`${message.senderKind}:${message.senderInstructorId || message.senderSchoolId || ''}`)} · {new Date(message.createdAt).toLocaleString()}{!mine && !message.readAt ? ' · new' : ''}</div></div> }) : <p style={{ color: muted }}>No messages yet. {isAdmin ? (active ? 'Write the first message below.' : 'Choose who to message above.') : 'Send a message below to reach KADA admin.'}</p>}<div style={{ display: 'flex', gap: 8, marginTop: 12 }}><input style={inputStyle} placeholder="Write a message…" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') send() }} /><Button small onClick={send} disabled={!draft.trim() || (isAdmin && !active)}>Send</Button></div></Card></div></div>
 }
 
+const formatJobDay = (item) => `${new Date(`${item.date}T00:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}${item.start ? ` · ${item.start}${item.end ? `–${item.end}` : ''}` : ''}`
+
+// The date(s) a session-type job covers. A combined job lists every date and is
+// claimed as one; a separate job is one day of a longer session.
+function JobDates({ job }) {
+  const dates = job.sessionDates
+  const combined = dates.length > 1
+  return <div style={{ margin: '6px 0 0', fontSize: 13 }}>
+    <span style={{ display: 'inline-block', background: combined ? '#e8eef9' : '#f1eee2', color: combined ? '#2d4a7a' : muted, borderRadius: 12, padding: '2px 9px', fontSize: 11, fontWeight: 700, marginBottom: 4 }}>{combined ? `🔗 ${dates.length} dates, one job: claimed together` : dates[0]?.of > 1 ? `Day ${dates[0].position} of ${dates[0].of} · separate job` : 'Single date'}</span>
+    {dates.map((item) => <div key={item.id} style={{ color: ink }}>{combined ? `Day ${item.position}: ` : ''}{formatJobDay(item)}</div>)}
+  </div>
+}
+
 // canManage: admins and staff with the 'jobs' permission post jobs and decide
 // claims. Instructors see open jobs and their own claims.
 function JobBoardView({ jobs, bookings, schools, instructors, canManage, onClaim, onDecision, onPublish, onGoToBookings }) {
@@ -700,7 +724,7 @@ function JobBoardView({ jobs, bookings, schools, instructors, canManage, onClaim
     setBusy(false)
     if (ok) setPosting(null)
   }
-  return <div><div style={{ marginBottom: 18, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}><div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400, margin: 0 }}>Job board</h2><p style={{ color: muted, margin: '6px 0 0' }}>Available work is anonymized until a claim is accepted.</p></div>{isAdmin && <Button onClick={() => setPosting({ bookingId: '', pay: '', location: '' })}>Post a job</Button>}</div><Card style={{ padding: 18 }}>{jobs.length ? jobs.map((job) => <div key={job.id} style={{ borderTop: `1px solid ${rule}`, padding: '14px 0', display: 'flex', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap' }}><div>{isAdmin && job.claimedBy && <p style={{ margin: '0 0 5px', color: emerald, fontWeight: 700 }}>Claimed by {instructors.find((instructor) => instructor.id === job.claimedBy)?.name || 'Instructor'}</p>}{isAdmin && job.claimedBy && <p style={{ margin: '0 0 5px', color: muted, fontSize: 12 }}>{(() => { const instructor = instructors.find((item) => item.id === job.claimedBy); return instructor ? `${instructor.email || 'No email'} · ${instructor.phone || 'No phone'} · ${instructor.locationAreas || 'No locations'} · ${instructor.gender || 'Gender not provided'}` : 'Instructor profile unavailable' })()}</p>}<strong>{job.status === 'accepted' && job.bookingId ? schools.find((school) => school.id === bookings.find((booking) => booking.id === job.bookingId)?.schoolId)?.name || 'School workshop' : 'School workshop'}</strong><p style={{ margin: '4px 0 0', color: muted }}>{job.date} · {job.sessionType} · {job.locationArea || 'Location shared after acceptance'} · {job.studentCount} students · {formatCurrency(job.instructorPay)}</p>{job.status === 'rejected' && <p style={{ color: warn, margin: '4px 0 0' }}>Rejected: {job.rejectionReason}</p>}</div><div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Badge text={job.status} tone={job.status === 'accepted' ? 'green' : job.status === 'rejected' ? 'red' : 'gold'} />{isAdmin && job.status === 'pending' && <><Button small onClick={() => onDecision(job, 'accepted')}>Accept</Button><Button small variant="danger" onClick={() => { setReasonJob(job); setReason('') }}>Reject</Button></>}{isAdmin && (job.status === 'accepted' || job.status === 'rejected') && <Button small variant="ghost" onClick={() => onDecision(job, 'undo')}>Undo</Button>}{!isAdmin && job.status === 'open' && <Button small onClick={() => onClaim(job)}>Claim job</Button>}{!isAdmin && job.status === 'pending' && <span style={{ color: muted, fontSize: 12 }}>Pending approval</span>}</div></div>) : <EmptyState icon="🧰" title="No jobs on the board yet" body={isAdmin ? 'Post a booking to the job board so approved instructors can claim it.' : 'New jobs appear here once KADA publishes them. Check back soon.'} ctaLabel={isAdmin ? 'Post a job' : undefined} onCta={isAdmin ? () => setPosting({ bookingId: '', pay: '', location: '' }) : undefined} />}</Card>
+  return <div><div style={{ marginBottom: 18, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}><div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400, margin: 0 }}>Job board</h2><p style={{ color: muted, margin: '6px 0 0' }}>Available work is anonymized until a claim is accepted.</p></div>{isAdmin && <Button onClick={() => setPosting({ bookingId: '', pay: '', location: '' })}>Post a job</Button>}</div><Card style={{ padding: 18 }}>{jobs.length ? jobs.map((job) => <div key={job.id} style={{ borderTop: `1px solid ${rule}`, padding: '14px 0', display: 'flex', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap' }}><div>{isAdmin && job.claimedBy && <p style={{ margin: '0 0 5px', color: emerald, fontWeight: 700 }}>Claimed by {instructors.find((instructor) => instructor.id === job.claimedBy)?.name || 'Instructor'}</p>}{isAdmin && job.claimedBy && <p style={{ margin: '0 0 5px', color: muted, fontSize: 12 }}>{(() => { const instructor = instructors.find((item) => item.id === job.claimedBy); return instructor ? `${instructor.email || 'No email'} · ${instructor.phone || 'No phone'} · ${instructor.locationAreas || 'No locations'} · ${instructor.gender || 'Gender not provided'}` : 'Instructor profile unavailable' })()}</p>}<strong>{job.status === 'accepted' && job.bookingId ? schools.find((school) => school.id === bookings.find((booking) => booking.id === job.bookingId)?.schoolId)?.name || 'School workshop' : job.scheduledSessionId ? job.sessionType : 'School workshop'}</strong><p style={{ margin: '4px 0 0', color: muted }}>{job.sessionDates.length ? job.sessionType : `${job.date} · ${job.sessionType}`} · {job.locationArea || 'Location shared after acceptance'} · {job.studentCount} students · {formatCurrency(job.instructorPay)}{job.sessionDates.length > 1 ? ' for all dates' : ''}</p>{job.sessionDates.length > 0 && <JobDates job={job} />}{job.status === 'rejected' && <p style={{ color: warn, margin: '4px 0 0' }}>Rejected: {job.rejectionReason}</p>}</div><div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Badge text={job.status} tone={job.status === 'accepted' ? 'green' : job.status === 'rejected' ? 'red' : 'gold'} />{isAdmin && job.status === 'pending' && <><Button small onClick={() => onDecision(job, 'accepted')}>Accept</Button><Button small variant="danger" onClick={() => { setReasonJob(job); setReason('') }}>Reject</Button></>}{isAdmin && (job.status === 'accepted' || job.status === 'rejected') && <Button small variant="ghost" onClick={() => onDecision(job, 'undo')}>Undo</Button>}{!isAdmin && job.status === 'open' && <Button small onClick={() => onClaim(job)}>Claim job</Button>}{!isAdmin && job.status === 'pending' && <span style={{ color: muted, fontSize: 12 }}>Pending approval</span>}</div></div>) : <EmptyState icon="🧰" title="No jobs on the board yet" body={isAdmin ? 'Post a booking to the job board so approved instructors can claim it.' : 'New jobs appear here once KADA publishes them. Check back soon.'} ctaLabel={isAdmin ? 'Post a job' : undefined} onCta={isAdmin ? () => setPosting({ bookingId: '', pay: '', location: '' }) : undefined} />}</Card>
     {reasonJob && <Modal title="Reject claim" onClose={() => setReasonJob(null)}><Field label="Reason"><textarea style={{ ...inputStyle, minHeight: 80 }} value={reason} onChange={(event) => setReason(event.target.value)} required /></Field><Button disabled={!reason.trim()} onClick={() => { onDecision(reasonJob, 'rejected', reason); setReasonJob(null) }}>Reject claim</Button></Modal>}
     {posting && <Modal title="Post a job" onClose={() => setPosting(null)}>{postable.length ? <>
       <Field label="Booking"><select style={inputStyle} value={posting.bookingId} onChange={(event) => { const booking = postable.find((item) => item.id === event.target.value); setPosting({ ...posting, bookingId: event.target.value, pay: posting.pay || (booking?.instructorPay ? String(booking.instructorPay) : '') }) }}><option value="">Choose a booking</option>{postable.map((booking) => <option key={booking.id} value={booking.id}>{bookingLabel(booking)}</option>)}</select></Field>
@@ -851,6 +875,9 @@ function App() {
   const [families, setFamilies] = useState([])
   const [parentInvoices, setParentInvoices] = useState([])
   const [signups, setSignups] = useState([])
+  const [sessionEntries, setSessionEntries] = useState([]) // scheduled session-type dates for the Calendar
+  const [sessionTypes, setSessionTypes] = useState([]) // active session types for the booking forms
+  const [sessionsVersion, setSessionsVersion] = useState(0)
   const [jobs, setJobs] = useState([])
   const [messages, setMessages] = useState([])
   const [events, setEvents] = useState([])
@@ -1181,6 +1208,27 @@ function App() {
     return () => { mounted = false }
   }, [tab, profile?.role])
 
+  // Active session types (Operations > Session types) for every session-type dropdown,
+  // including the public school enquiry form.
+  useEffect(() => {
+    if (!supabaseReady) return undefined
+    let mounted = true
+    supabase.from('session_types').select('id,name,default_price').eq('active', true).order('name').then(({ data, error }) => { if (mounted && !error) setSessionTypes(data || []) })
+    return () => { mounted = false }
+  }, [sessionsVersion])
+
+  // Scheduled session dates for the Calendar, and fresh jobs after scheduling.
+  useEffect(() => {
+    if (!session || !profile) return undefined
+    let mounted = true
+    fetch('/api/sessions/calendar', { headers: { Authorization: `Bearer ${session.access_token}` } })
+      .then((response) => (response.ok ? response.json() : { entries: [] }))
+      .then((result) => { if (mounted) setSessionEntries(result.entries || []) })
+      .catch(() => {})
+    if (sessionsVersion) loadTable('job_board_jobs', []).then((rows) => { if (mounted) setJobs(rows) })
+    return () => { mounted = false }
+  }, [session, profile, sessionsVersion, tab])
+
   // New self-service sign-ups (parents, instructors, schools) for Needs attention.
   useEffect(() => {
     if (!session || profile?.role !== 'admin' || tab !== 'dashboard') return undefined
@@ -1316,7 +1364,7 @@ function App() {
       setToast('Instructor accounts cannot request school bookings.')
       return
     }
-    const priceData = buildPrice(schoolRequest)
+    const priceData = buildPrice(schoolRequest, sessionTypes)
     const needed = priceData.staffNeeded
     // RLS hides the instructors table from school accounts, so only staff roles
     // can see real availability ,  schools always see 0 available here.
@@ -1396,8 +1444,8 @@ function App() {
     })()
   }
 
-  const quotePrice = quote ? quote.price : buildPrice(schoolRequest).price
-  const quoteStaff = quote ? quote.staffNeeded : buildPrice(schoolRequest).staffNeeded
+  const quotePrice = quote ? quote.price : buildPrice(schoolRequest, sessionTypes).price
+  const quoteStaff = quote ? quote.staffNeeded : buildPrice(schoolRequest, sessionTypes).staffNeeded
   const isAdmin = profile?.role === 'admin'
   const isInstructor = profile?.role === 'instructor'
   const isStaff = profile?.role === 'staff'
@@ -1473,7 +1521,16 @@ function App() {
       return false
     }
   }
-  const claimJob = (job) => { const next = jobs.map((item) => item.id === job.id ? { ...item, status: 'pending', claimedBy: profile.instructor_id, claimedAt: new Date().toISOString(), decidedAt: '' } : item); persistRows('job_board_jobs', next, setJobs); if (session) void fetch('/api/notify-admin', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'job-claim', detail: { sessionType: job.sessionType, date: job.date, claimedBy: instructors.find((instructor) => instructor.id === profile.instructor_id)?.name || profile.instructor_id } }) }) }
+  // Claims only this job. (Upserting the whole board failed whenever an instructor
+  // could see more than one job: RLS only lets them move an open job to pending.)
+  const claimJob = async (job) => {
+    const claimedAt = new Date().toISOString()
+    const { data, error } = await supabase.from('job_board_jobs').update({ status: 'pending', claimed_by: profile.instructor_id, claimed_at: claimedAt, decided_at: null }).eq('id', job.id).eq('status', 'open').select('*')
+    if (error || !data?.length) { setToast(error?.message || 'Someone else has just claimed this job.'); return }
+    setJobs((current) => current.map((item) => item.id === job.id ? normalizeJob(data[0]) : item))
+    setToast(job.sessionDates.length > 1 ? `Claimed all ${job.sessionDates.length} dates. Waiting for KADA to confirm.` : 'Job claimed. Waiting for KADA to confirm.')
+    void fetch('/api/notify-admin', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'job-claim', detail: { sessionType: job.sessionType, date: job.sessionDates.length > 1 ? job.sessionDates.map((item) => item.date).join(' + ') : job.date, claimedBy: instructors.find((instructor) => instructor.id === profile.instructor_id)?.name || profile.instructor_id } }) })
+  }
   const decideJob = async (job, decision, rejectionReason = '') => {
     try {
       const { job: saved } = await authedPost(`/api/jobs/${encodeURIComponent(job.id)}/decision`, { decision, reason: rejectionReason })
@@ -1749,6 +1806,7 @@ function App() {
         ...(can('attendance') ? [{ key: 'attendance', label: 'Attendance' }] : []),
         ...(can('homework') ? [{ key: 'homework', label: 'Homework' }] : []),
         ...(can('formations') ? [{ key: 'formations', label: 'Formations' }] : []),
+        ...(can('sessions') ? [{ key: 'session-types', label: 'Session types' }] : []),
         ...(canSeeJobs ? [{ key: 'jobs', label: 'Job board' }] : []),
         ...(canSeeTemplate ? [{ key: 'template', label: 'Workshop template' }] : []),
       ],
@@ -1852,10 +1910,11 @@ function App() {
           handleQuoteSubmit={handleQuoteSubmit}
           schoolRequest={schoolRequest}
           handleQuoteChange={handleQuoteChange}
+          sessionTypeOptions={sessionTypeNames(sessionTypes).filter((name) => name !== 'Custom').concat('Custom')}
           quote={quote}
           quotePrice={formatCurrency(quotePrice)}
           quoteStaff={quoteStaff}
-          schoolQuotePence={Math.round(buildPrice(schoolRequest).price * 100)}
+          schoolQuotePence={Math.round(buildPrice(schoolRequest, sessionTypes).price * 100)}
           valueItems={valueItems}
           Modal={Modal}
         />
@@ -1879,6 +1938,7 @@ function App() {
             <>
               {isInstructor && <DbsUpload instructor={instructorRecord} onUpload={uploadDbs} uploading={dbsUploading} />}
               <NeedsAttention jobs={jobs} bookings={bookings} instructors={instructors} schools={schools} messages={messages} signups={isAdmin ? signups : []} isAdmin={isAdmin} canManageMessages={canManageMessages} dismissed={dismissedNotifications} onDismiss={(id) => setDismissedNotifications((current) => [...current, id])} onOpenJobs={() => handleOpsSelect('jobs')} onOpenBookings={() => handleOpsSelect('bookings')} onOpenInstructors={() => handleOpsSelect('instructors')} onOpenMessages={() => handleOpsSelect('messages')} onOpenStudents={() => handleOpsSelect('students')} />
+              {(isAdmin || can('sales')) && session && <PaymentsPanel session={session} onChanged={() => loadTable('bookings', []).then(setBookings)} />}
               <BirthdayNotice students={students} />
               {isAdmin && session && <SiteAnalytics session={session} />}
               {isAdmin && (
@@ -1919,7 +1979,7 @@ function App() {
           {tab === 'settings' && isAdmin && <SettingsPage content={siteContent} onSaveContent={saveSiteContent} session={session} />}
           {tab === 'jobs' && canSeeJobs && <JobBoardView jobs={isInstructor ? jobs.filter((job) => job.status === 'open' || job.claimedBy === profile.instructor_id) : jobs} bookings={bookings} schools={schools} instructors={instructors} canManage={canManageJobs} onClaim={claimJob} onDecision={decideJob} onPublish={publishJob} onGoToBookings={() => handleOpsSelect('bookings')} />}
 
-          {tab === 'calendar' && (isAdmin || isInstructor || can('bookings')) && <CalendarPage bookings={isInstructor ? bookings.filter((booking) => booking.instructorId === profile?.instructor_id) : bookings} events={events} instructors={instructors} onOpenBooking={(booking) => setBookingModal(booking)} onAddEvent={(date) => setEventModal({ ...emptyEvent(), eventDate: date })} />}
+          {tab === 'calendar' && (isAdmin || isInstructor || can('bookings') || can('sessions') || can('jobs')) && <CalendarPage bookings={isInstructor ? bookings.filter((booking) => booking.instructorId === profile?.instructor_id) : bookings} events={events} sessions={sessionEntries} instructors={instructors} onOpenBooking={(booking) => setBookingModal(booking)} onAddEvent={(date) => setEventModal({ ...emptyEvent(), eventDate: date })} />}
           {tab === 'bookings' && <div className="panel">
             <div className="panel-head">
               <h3>Bookings</h3>
@@ -1945,6 +2005,7 @@ function App() {
               onOpenSchool={(booking) => setSchoolRecord(schools.find((school) => school.id === booking.schoolId) || null)}
               onEditBooking={(booking) => setBookingModal(booking || emptyBooking())}
               canManageJobs={canManageJobs}
+              sessionTypeOptions={sessionTypeNames(sessionTypes)}
               onPublishJob={(booking) => publishJob({ bookingId: booking.id, pay: booking.instructorPay, location: '' })}
               onMarkDone={markBookingDone}
               onInvoice={(booking) => setInvoiceBooking(withSavedInvoiceEdits(booking))}
@@ -1959,6 +2020,7 @@ function App() {
           {can('sales') && tab === 'payment-links' && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><PaymentLinksPage focusLinkId={paymentLinkFocus} onFocusHandled={() => setPaymentLinkFocus('')} /></Suspense>}
           {can('attendance') && tab === 'attendance' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><AttendancePage session={session} isAdmin={isAdmin} /></Suspense>}
           {can('homework') && tab === 'homework' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><HomeworkPage session={session} /></Suspense>}
+          {can('sessions') && tab === 'session-types' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><SessionTypesPage session={session} onChanged={() => setSessionsVersion((version) => version + 1)} /></Suspense>}
           {can('formations') && tab === 'formations' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><FormationsPage session={session} /></Suspense>}
           {can('sales') && tab === 'arrears' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><ArrearsPage session={session} /></Suspense>}
           {(isAdmin || can('sales')) && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
@@ -1967,7 +2029,7 @@ function App() {
           {tab === 'messages' && profile && <MessagesView messages={messages} myKind={myKind} myInstructorId={myInstructorId} mySchoolId={mySchoolId} schools={schools} instructors={instructors} canManage={canManageMessages} onSend={sendMessage} onMarkRead={markMessageRead} />}
 
           {schoolRecord && <SchoolRecord school={schoolRecord} bookings={bookings} instructorLabel={assignedInstructorLabel} onEdit={setSchoolModal} onBooking={setBookingModal} onMessage={(school) => setMessageTarget({ kind: 'school', id: school.id, name: school.name })} onClose={() => setSchoolRecord(null)} />}
-          {bookingModal && <Modal title="Booking" onClose={() => setBookingModal(null)} wide><BookingForm booking={bookingModal} schools={schools} instructors={instructors} families={families} onCreateFamily={createFamily} onSave={saveBooking} onDelete={() => deleteBooking(bookingModal)} /></Modal>}
+          {bookingModal && <Modal title="Booking" onClose={() => setBookingModal(null)} wide><BookingForm booking={bookingModal} schools={schools} instructors={instructors} families={families} sessionTypes={sessionTypes} onCreateFamily={createFamily} onSave={saveBooking} onDelete={() => deleteBooking(bookingModal)} /></Modal>}
           {schoolModal && <Modal title="School" onClose={() => setSchoolModal(null)}><SchoolForm school={schoolModal} onSave={saveSchool} /></Modal>}
           {instructorModal && <Modal title="Instructor" onClose={() => setInstructorModal(null)}><InstructorForm instructor={instructorModal} onSave={saveInstructor} /></Modal>}
           {eventModal && <Modal title={eventModal.title ? 'Edit event' : 'New event'} onClose={() => setEventModal(null)}><EventForm event={eventModal} onSave={saveEvent} onUploadFlyer={uploadEventFlyer} /></Modal>}

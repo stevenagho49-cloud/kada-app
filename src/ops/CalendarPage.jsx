@@ -28,7 +28,7 @@ function addDays(date, days) {
   return copy
 }
 
-export function CalendarPage({ bookings, events, instructors, onOpenBooking, onAddEvent }) {
+export function CalendarPage({ bookings, events, sessions = [], instructors, onOpenBooking, onAddEvent }) {
   const [mode, setMode] = useState('week') // 'week' | 'month'
   const [cursor, setCursor] = useState(() => new Date())
   const todayIso = toIso(new Date())
@@ -51,7 +51,17 @@ export function CalendarPage({ bookings, events, instructors, onOpenBooking, onA
     return map
   }, [events])
 
-  const itemsFor = (iso) => [...(bookingsByDate[iso] || []), ...(eventsByDate[iso] || [])]
+  // Scheduled session-type dates (Operations > Session types), one entry per date.
+  const sessionsByDate = useMemo(() => {
+    const map = {}
+    sessions.forEach((entry) => {
+      map[entry.date] = [...(map[entry.date] || []), { kind: 'session', item: entry }]
+    })
+    Object.values(map).forEach((list) => list.sort((a, b) => (a.item.startTime || '').localeCompare(b.item.startTime || '')))
+    return map
+  }, [sessions])
+
+  const itemsFor = (iso) => [...(sessionsByDate[iso] || []), ...(bookingsByDate[iso] || []), ...(eventsByDate[iso] || [])]
 
   const instructorName = (id) => instructors.find((instructor) => instructor.id === id)?.name || ''
 
@@ -60,6 +70,19 @@ export function CalendarPage({ bookings, events, instructors, onOpenBooking, onA
   }
 
   const renderItem = ({ kind, item }) => {
+    if (kind === 'session') {
+      // A combined job is one linked entry across its days; separate jobs stand alone.
+      const combined = item.postingMode === 'combined' && item.dayCount > 1
+      const who = item.instructorName || (item.jobStatus === 'pending' ? `${item.claimedByName} (awaiting OK)` : 'On job board')
+      return (
+        <div key={`session-${item.id}`} data-calendar-session={item.sessionId} data-calendar-date={item.date} title={combined ? `One job covering all ${item.dayCount} days` : item.dayCount > 1 ? 'Separate job for this day' : ''} style={{ background: combined ? '#e8eef9' : '#eef6f1', border: `1px solid ${combined ? '#b9c9e6' : '#cfe2d6'}`, borderLeft: `3px solid ${combined ? '#2d4a7a' : OPS_COLORS.emerald}`, borderRadius: 6, padding: '4px 7px', fontSize: 11.5, marginBottom: 4 }}>
+          <strong style={{ color: combined ? '#2d4a7a' : OPS_COLORS.emerald }}>{combined ? '🔗 ' : ''}{item.title}</strong>
+          {item.dayCount > 1 && <span style={{ color: OPS_COLORS.muted }}> · Day {item.position}/{item.dayCount}{combined ? ' (one job)' : ' (own job)'}</span>}
+          <br />
+          <span style={{ color: OPS_COLORS.muted }}>{item.startTime ? `${item.startTime}${item.endTime ? `–${item.endTime}` : ''} · ` : ''}{item.schoolName ? `${item.schoolName} · ` : ''}{who}</span>
+        </div>
+      )
+    }
     if (kind === 'event') {
       return (
         <div key={`event-${item.id}`} style={{ background: '#faf1d9', border: '1px solid #e8d9a8', borderRadius: 6, padding: '4px 7px', fontSize: 11.5, marginBottom: 4 }}>
@@ -129,6 +152,7 @@ export function CalendarPage({ bookings, events, instructors, onOpenBooking, onA
         <h3>Calendar</h3>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <Pill text={`${bookedCount} bookings`} tone="green" />
+          {sessions.length > 0 && <Pill text={`${sessions.length} session days`} tone="default" />}
           <Pill text={`${eventsCount} events`} tone="gold" />
           <div style={{ display: 'flex', border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 6, overflow: 'hidden' }}>
             {['week', 'month'].map((option) => (
@@ -153,7 +177,7 @@ export function CalendarPage({ bookings, events, instructors, onOpenBooking, onA
           : monthWeeks.flatMap((week) => week.map((date) => dayCell(date, date.getMonth() === cursor.getMonth())))}
       </div>
       <p style={{ color: OPS_COLORS.muted, fontSize: 12, marginTop: 12 }}>
-        Bookings show the assigned instructor (click to open the booking). Event days are highlighted in gold. Press + on an empty day to draft an event for that date.
+        Bookings show the assigned instructor (click to open the booking). Session-type days show who is booked to teach; 🔗 marks a combined job that one instructor takes for all its days. Event days are highlighted in gold. Press + on an empty day to draft an event for that date.
       </p>
     </div>
   )

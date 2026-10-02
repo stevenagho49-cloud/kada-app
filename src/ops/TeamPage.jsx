@@ -18,6 +18,7 @@ export const PERMISSION_AREAS = [
   { key: 'homework', label: 'Homework (emails families)' },
   { key: 'formations', label: 'Formation planner (internal child photos)' },
   { key: 'jobs', label: 'Job board (post jobs, accept claims)' },
+  { key: 'sessions', label: 'Session types & scheduling (posts to job board)' },
   { key: 'template', label: 'Workshop template (edit)' },
   { key: 'events', label: 'Events & ticketing' },
   { key: 'messages', label: 'Messages' },

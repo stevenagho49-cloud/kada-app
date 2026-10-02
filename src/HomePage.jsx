@@ -90,7 +90,7 @@ function ContactForm() {
   )
 }
 
-export default function HomePage({ SectionError, siteEvents, siteContent = {}, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, schoolQuotePence = 0, valueItems, Modal }) {
+export default function HomePage({ SectionError, siteEvents, siteContent = {}, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, schoolQuotePence = 0, sessionTypeOptions = ['Full day (£490)', 'Half day', 'Single workshop', 'Custom'], valueItems, Modal }) {
   const [classDiscount, setClassDiscount] = useState(null)
   const [schoolDiscount, setSchoolDiscount] = useState(null)
   // A £0 total skips Stripe, except a membership free only for its first month.
@@ -291,10 +291,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
                     <label>
                       <span>Session type</span>
                       <select value={schoolRequest.sessionType} onChange={(event) => handleQuoteChange('sessionType', event.target.value)}>
-                        <option>Full day (£490)</option>
-                        <option>Half day</option>
-                        <option>Single workshop</option>
-                        <option>Custom</option>
+                        {sessionTypeOptions.map((name) => <option key={name}>{name}</option>)}
                       </select>
                     </label>
                     <label>

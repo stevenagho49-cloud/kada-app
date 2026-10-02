@@ -574,6 +574,237 @@ app.post('/api/notify-admin', async (request, response) => {
 })
 
 /* ------------------------------------------------------------------ */
+/* Session types (Operations > Session types, 'sessions' permission).   */
+/* Staff keep an open list of session types and schedule them on one or */
+/* more dates. Scheduling posts to the job board straight away, either  */
+/* as ONE combined job covering every date (claimed together) or as one */
+/* job PER date (claimed independently); the Calendar reads the same    */
+/* dates, so nothing has to be entered twice.                           */
+/* ------------------------------------------------------------------ */
+async function requireSessionsAccess(request, response) {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
+  const { data: profile } = await supabase.from('profiles').select('role,permissions,full_name').eq('id', user.id).maybeSingle()
+  const allowed = profile?.role === 'admin' || (profile?.role === 'staff' && (profile.permissions || []).includes('sessions'))
+  if (!allowed) { response.status(403).json({ error: 'You need the session types permission for this.' }); return null }
+  return { user, profile }
+}
+
+const sessionsMissing = (error) => /session_types|scheduled_session|session_dates|booking_id/.test(error?.message || '') && /does not exist|schema cache|null value/.test(error?.message || '')
+const SESSIONS_MIGRATION = 'Apply supabase/migrations/20261002_session_types_and_payments.sql first.'
+const cleanMoney = (value) => (value === '' || value === null || value === undefined ? null : Math.round(Number(value) * 100) / 100)
+const formatTime = (value) => (value ? String(value).slice(0, 5) : '')
+
+function cleanSessionType(input = {}) {
+  const name = String(input.name || '').trim().replace(/\s+/g, ' ').slice(0, 80)
+  if (!name) return { error: 'Give the session type a name.' }
+  const defaultPrice = cleanMoney(input.defaultPrice)
+  const defaultInstructorPay = cleanMoney(input.defaultInstructorPay)
+  if ([defaultPrice, defaultInstructorPay].some((value) => value !== null && (!Number.isFinite(value) || value < 0))) return { error: 'Prices must be £0 or more.' }
+  return { row: { name, description: String(input.description || '').trim().slice(0, 500) || null, default_price: defaultPrice, default_instructor_pay: defaultInstructorPay, active: input.active === undefined ? true : Boolean(input.active) } }
+}
+
+// Validates a schedule: one or more future dates, optional times, how to post it.
+function cleanSchedule(input = {}) {
+  const dates = (Array.isArray(input.dates) ? input.dates : []).map((item) => ({
+    date: String(item?.date || '').slice(0, 10),
+    startTime: String(item?.startTime || '').slice(0, 5),
+    endTime: String(item?.endTime || '').slice(0, 5),
+  }))
+  if (!dates.length) return { error: 'Add at least one date.' }
+  if (dates.length > 31) return { error: 'A session can have at most 31 dates.' }
+  const today = londonNow().date
+  for (const item of dates) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(item.date) || Number.isNaN(Date.parse(item.date))) return { error: 'Every date needs a valid day.' }
+    if (item.date < today) return { error: `${item.date} is in the past.` }
+    if ((item.startTime && !/^\d{2}:\d{2}$/.test(item.startTime)) || (item.endTime && !/^\d{2}:\d{2}$/.test(item.endTime))) return { error: 'Times must be like 09:30.' }
+    if (item.startTime && item.endTime && item.endTime <= item.startTime) return { error: `On ${item.date} the end time must be after the start time.` }
+  }
+  dates.sort((a, b) => (a.date + a.startTime).localeCompare(b.date + b.startTime))
+  const postingMode = input.postingMode === 'separate' ? 'separate' : input.postingMode === 'combined' ? 'combined' : ''
+  if (!postingMode) return { error: 'Choose whether to post one combined job or a separate job per date.' }
+  const payPerDay = cleanMoney(input.instructorPayPerDay)
+  if (!Number.isFinite(payPerDay) || payPerDay <= 0) return { error: "Set the instructor's pay per day." }
+  const studentCount = Math.max(0, Math.floor(Number(input.studentCount) || 0))
+  return { schedule: { dates, postingMode, payPerDay, studentCount, title: String(input.title || '').trim().slice(0, 120), locationArea: String(input.locationArea || '').trim().slice(0, 120), schoolId: input.schoolId ? String(input.schoolId) : null, notes: String(input.notes || '').trim().slice(0, 1000) } }
+}
+
+// Creates the scheduled run, its dates, and its job board job(s).
+async function scheduleSession(type, schedule, userId) {
+  const { data: session, error } = await supabase.from('scheduled_sessions').insert({
+    session_type_id: type.id,
+    title: schedule.title || type.name,
+    school_id: schedule.schoolId,
+    location_area: schedule.locationArea || null,
+    student_count: schedule.studentCount,
+    instructor_pay_per_day: schedule.payPerDay,
+    posting_mode: schedule.postingMode,
+    notes: schedule.notes || null,
+    created_by: userId,
+  }).select('*').single()
+  if (error) throw error
+  const { data: dates, error: datesError } = await supabase.from('scheduled_session_dates').insert(schedule.dates.map((item, index) => ({
+    scheduled_session_id: session.id,
+    position: index + 1,
+    session_date: item.date,
+    start_time: item.startTime || null,
+    end_time: item.endTime || null,
+  }))).select('*')
+  if (datesError) {
+    await supabase.from('scheduled_sessions').delete().eq('id', session.id)
+    throw datesError
+  }
+  dates.sort((a, b) => a.position - b.position)
+  const dateEntry = (row) => ({ id: row.id, date: row.session_date, start: formatTime(row.start_time), end: formatTime(row.end_time), position: row.position, of: dates.length })
+  const base = { scheduled_session_id: session.id, booking_id: null, session_type: session.title, student_count: session.student_count, location_area: session.location_area || 'Location shared after acceptance', status: 'open', published_at: new Date().toISOString() }
+  const jobs = session.posting_mode === 'combined'
+    ? [{ ...base, id: `job-session-${session.id}`, date: dates[0].session_date, instructor_pay: schedule.payPerDay * dates.length, session_dates: dates.map(dateEntry) }]
+    : dates.map((row) => ({ ...base, id: `job-session-date-${row.id}`, date: row.session_date, instructor_pay: schedule.payPerDay, session_dates: [dateEntry(row)] }))
+  const { data: savedJobs, error: jobsError } = await supabase.from('job_board_jobs').insert(jobs).select('*')
+  if (jobsError) {
+    await supabase.from('scheduled_sessions').delete().eq('id', session.id)
+    throw jobsError
+  }
+  return { session, dates, jobs: savedJobs }
+}
+
+app.get('/api/session-types', async (request, response) => {
+  const access = await requireSessionsAccess(request, response)
+  if (!access) return
+  const [{ data: types, error }, { data: sessions }, { data: dates }, { data: jobs }, { data: instructors }, { data: schools }] = await Promise.all([
+    supabase.from('session_types').select('*').order('name'),
+    supabase.from('scheduled_sessions').select('*').order('created_at', { ascending: false }),
+    supabase.from('scheduled_session_dates').select('*').order('session_date'),
+    supabase.from('job_board_jobs').select('id,scheduled_session_id,status,claimed_by,session_dates,instructor_pay').not('scheduled_session_id', 'is', null),
+    supabase.from('instructors').select('id,name'),
+    supabase.from('schools').select('id,name').order('name'),
+  ])
+  if (error) return response.status(500).json({ error: sessionsMissing(error) || /session_types/.test(error.message) ? SESSIONS_MIGRATION : error.message })
+  const instructorName = new Map((instructors || []).map((row) => [row.id, row.name]))
+  response.json({
+    types: (types || []).map((type) => ({
+      ...type,
+      sessions: (sessions || []).filter((session) => session.session_type_id === type.id).map((session) => ({
+        ...session,
+        schoolName: (schools || []).find((school) => school.id === session.school_id)?.name || '',
+        dates: (dates || []).filter((row) => row.scheduled_session_id === session.id).sort((a, b) => a.position - b.position).map((row) => ({ ...row, instructorName: instructorName.get(row.instructor_id) || '' })),
+        jobs: (jobs || []).filter((job) => job.scheduled_session_id === session.id).map((job) => ({ ...job, claimedByName: instructorName.get(job.claimed_by) || '' })),
+      })),
+    })),
+    schools: schools || [],
+  })
+})
+
+// Create (no id) or edit (with id) a session type. Creating can also schedule
+// its first dates and post them to the job board in the same step.
+app.post('/api/session-types', async (request, response) => {
+  const access = await requireSessionsAccess(request, response)
+  if (!access) return
+  const { id, schedule: rawSchedule } = request.body || {}
+  const { row, error } = cleanSessionType(request.body)
+  if (error) return response.status(400).json({ error })
+  const cleanedSchedule = rawSchedule ? cleanSchedule(rawSchedule) : null
+  if (cleanedSchedule?.error) return response.status(400).json({ error: cleanedSchedule.error })
+  const query = id
+    ? supabase.from('session_types').update({ ...row, updated_at: new Date().toISOString() }).eq('id', id)
+    : supabase.from('session_types').insert({ ...row, created_by: access.user.id })
+  const { data: type, error: saveError } = await query.select('*').single()
+  if (saveError) {
+    if (saveError.code === '23505') return response.status(409).json({ error: `There is already a session type called "${row.name}".` })
+    return response.status(500).json({ error: /session_types/.test(saveError.message) ? SESSIONS_MIGRATION : `The session type could not be saved: ${saveError.message}` })
+  }
+  if (!cleanedSchedule) return response.json({ type })
+  try {
+    const result = await scheduleSession(type, cleanedSchedule.schedule, access.user.id)
+    response.json({ type, ...result })
+  } catch (scheduleError) {
+    response.status(500).json({ error: sessionsMissing(scheduleError) ? SESSIONS_MIGRATION : `The type was saved, but its dates could not be scheduled: ${scheduleError.message}`, type })
+  }
+})
+
+app.post('/api/session-types/:id/schedule', async (request, response) => {
+  const access = await requireSessionsAccess(request, response)
+  if (!access) return
+  const { data: type } = await supabase.from('session_types').select('*').eq('id', request.params.id).maybeSingle()
+  if (!type) return response.status(404).json({ error: 'Session type not found.' })
+  if (!type.active) return response.status(400).json({ error: 'Switch this session type back on before scheduling it.' })
+  const { schedule, error } = cleanSchedule(request.body)
+  if (error) return response.status(400).json({ error })
+  try {
+    response.json(await scheduleSession(type, schedule, access.user.id))
+  } catch (scheduleError) {
+    response.status(500).json({ error: sessionsMissing(scheduleError) ? SESSIONS_MIGRATION : `The dates could not be scheduled: ${scheduleError.message}` })
+  }
+})
+
+// Cancel a scheduled run: its jobs come off the board and its dates off the calendar.
+// A run with a claimed or accepted job needs { force: true }, so nobody is dropped by accident.
+app.post('/api/scheduled-sessions/:id/cancel', async (request, response) => {
+  const access = await requireSessionsAccess(request, response)
+  if (!access) return
+  const { data: session } = await supabase.from('scheduled_sessions').select('*').eq('id', request.params.id).maybeSingle()
+  if (!session) return response.status(404).json({ error: 'Session not found.' })
+  const { data: jobs } = await supabase.from('job_board_jobs').select('id,status').eq('scheduled_session_id', session.id)
+  const taken = (jobs || []).filter((job) => ['pending', 'accepted'].includes(job.status))
+  if (taken.length && !request.body?.force) return response.status(409).json({ error: `${taken.length} job${taken.length === 1 ? ' has' : 's have'} already been claimed or accepted. Cancel anyway?`, needsForce: true })
+  await supabase.from('job_board_jobs').delete().eq('scheduled_session_id', session.id)
+  await supabase.from('scheduled_session_dates').update({ instructor_id: null }).eq('scheduled_session_id', session.id)
+  const { error } = await supabase.from('scheduled_sessions').update({ status: 'cancelled' }).eq('id', session.id)
+  if (error) return response.status(500).json({ error: error.message })
+  response.json({ cancelled: true, removedJobs: (jobs || []).length })
+})
+
+// Scheduled session dates for the Calendar. Admins and staff who handle bookings,
+// sessions or jobs see all of them; an instructor sees the dates they're assigned.
+app.get('/api/sessions/calendar', async (request, response) => {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
+  const { data: profile } = await supabase.from('profiles').select('role,permissions,instructor_id').eq('id', user.id).maybeSingle()
+  const staffAccess = profile?.role === 'admin' || (profile?.role === 'staff' && ['bookings', 'sessions', 'jobs'].some((area) => (profile.permissions || []).includes(area)))
+  if (!staffAccess && profile?.role !== 'instructor') return response.json({ entries: [] })
+  let datesQuery = supabase.from('scheduled_session_dates').select('*, scheduled_sessions!inner(*)').eq('scheduled_sessions.status', 'scheduled').order('session_date')
+  if (!staffAccess) {
+    if (!profile.instructor_id) return response.json({ entries: [] })
+    datesQuery = datesQuery.eq('instructor_id', profile.instructor_id)
+  }
+  const { data: dates, error } = await datesQuery
+  if (error) return response.json({ entries: [], error: sessionsMissing(error) ? SESSIONS_MIGRATION : error.message })
+  const sessionIds = [...new Set((dates || []).map((row) => row.scheduled_session_id))]
+  const [{ data: jobs }, { data: instructors }, { data: schools }, { data: counts }] = await Promise.all([
+    sessionIds.length ? supabase.from('job_board_jobs').select('id,status,claimed_by,session_dates,scheduled_session_id').in('scheduled_session_id', sessionIds) : { data: [] },
+    supabase.from('instructors').select('id,name'),
+    supabase.from('schools').select('id,name'),
+    sessionIds.length ? supabase.from('scheduled_session_dates').select('scheduled_session_id').in('scheduled_session_id', sessionIds) : { data: [] },
+  ])
+  const total = (counts || []).reduce((map, row) => map.set(row.scheduled_session_id, (map.get(row.scheduled_session_id) || 0) + 1), new Map())
+  const jobFor = (dateId) => (jobs || []).find((job) => (job.session_dates || []).some((item) => item.id === dateId))
+  response.json({
+    entries: (dates || []).map((row) => {
+      const session = row.scheduled_sessions
+      const job = jobFor(row.id)
+      return {
+        id: row.id,
+        sessionId: session.id,
+        title: session.title,
+        date: row.session_date,
+        startTime: formatTime(row.start_time),
+        endTime: formatTime(row.end_time),
+        position: row.position,
+        dayCount: total.get(session.id) || 1,
+        postingMode: session.posting_mode,
+        schoolName: (schools || []).find((school) => school.id === session.school_id)?.name || '',
+        locationArea: session.location_area || '',
+        instructorId: row.instructor_id || '',
+        instructorName: (instructors || []).find((instructor) => instructor.id === row.instructor_id)?.name || '',
+        jobId: job?.id || '',
+        jobStatus: job?.status || '',
+        claimedByName: (instructors || []).find((instructor) => instructor.id === job?.claimed_by)?.name || '',
+      }
+    }),
+  })
+})
+
+/* ------------------------------------------------------------------ */
 /* New account alerts. People sign up in the browser straight against  */
 /* Supabase Auth, so nothing on the server sees it happen. Instead the  */
 /* server sweeps for accounts created in the last two days and emails   */
@@ -750,17 +981,28 @@ app.post('/api/jobs/:id/decision', async (request, response) => {
   const { data: saved, error } = await supabase.from('job_board_jobs').update(update).eq('id', job.id).eq('status', job.status).select('*')
   if (error) return response.status(500).json({ error: `The decision could not be saved: ${error.message}` })
   if (!saved?.length) return response.status(409).json({ error: 'Someone else has just changed this job. Refresh and try again.' })
-  if (decision === 'accepted') await supabase.from('bookings').update({ instructor_id: job.claimed_by }).eq('id', job.booking_id)
-  if (decision === 'undo' && job.status === 'accepted') await supabase.from('bookings').update({ instructor_id: null }).eq('id', job.booking_id).eq('instructor_id', job.claimed_by)
+  // A booking job assigns the booking; a session job assigns each date it covers.
+  const sessionDateIds = (job.session_dates || []).map((item) => item.id).filter(Boolean)
+  if (decision === 'accepted') {
+    if (job.booking_id) await supabase.from('bookings').update({ instructor_id: job.claimed_by }).eq('id', job.booking_id)
+    if (sessionDateIds.length) await supabase.from('scheduled_session_dates').update({ instructor_id: job.claimed_by }).in('id', sessionDateIds)
+  }
+  if (decision === 'undo' && job.status === 'accepted') {
+    if (job.booking_id) await supabase.from('bookings').update({ instructor_id: null }).eq('id', job.booking_id).eq('instructor_id', job.claimed_by)
+    if (sessionDateIds.length) await supabase.from('scheduled_session_dates').update({ instructor_id: null }).in('id', sessionDateIds).eq('instructor_id', job.claimed_by)
+  }
   let notification = null
   if (decision === 'accepted') {
     const [{ data: instructor }, { data: booking }] = await Promise.all([
       supabase.from('instructors').select('name,email').eq('id', job.claimed_by).maybeSingle(),
-      supabase.from('bookings').select('school_id,schools(name)').eq('id', job.booking_id).maybeSingle(),
+      job.booking_id
+        ? supabase.from('bookings').select('school_id,schools(name)').eq('id', job.booking_id).maybeSingle()
+        : supabase.from('scheduled_sessions').select('school_id,schools(name)').eq('id', job.scheduled_session_id).maybeSingle(),
     ])
+    const dateList = (job.session_dates || []).length > 1 ? `${job.session_dates.length} dates: ${job.session_dates.map((item) => `${item.date}${item.start ? ` ${item.start}` : ''}`).join(', ')}` : job.date
     notification = await notifyAdmin(
       `Job accepted: ${instructor?.name || 'Instructor'} on ${job.date}`,
-      `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Job claim accepted</h2><p><strong>Instructor:</strong> ${escHtml(instructor?.name || job.claimed_by)}${instructor?.email ? ` (${escHtml(instructor.email)})` : ''}<br><strong>Job:</strong> ${escHtml(job.session_type || '')} on ${escHtml(job.date)}<br><strong>School:</strong> ${escHtml(booking?.schools?.name || 'Not set')}<br><strong>Pay:</strong> £${Number(job.instructor_pay || 0).toFixed(2)}<br><strong>Accepted by:</strong> ${escHtml(access.profile?.full_name || access.user.email)}</p><p>The instructor is now assigned to the booking.</p>${dashboardButton('bookings', 'View booking', job.booking_id)}</div>`,
+      `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Job claim accepted</h2><p><strong>Instructor:</strong> ${escHtml(instructor?.name || job.claimed_by)}${instructor?.email ? ` (${escHtml(instructor.email)})` : ''}<br><strong>Job:</strong> ${escHtml(job.session_type || '')} on ${escHtml(dateList)}<br><strong>School:</strong> ${escHtml(booking?.schools?.name || 'Not set')}<br><strong>Pay:</strong> £${Number(job.instructor_pay || 0).toFixed(2)}<br><strong>Accepted by:</strong> ${escHtml(access.profile?.full_name || access.user.email)}</p><p>The instructor is now assigned${job.booking_id ? ' to the booking' : ' to every date in this job'}.</p>${job.booking_id ? dashboardButton('bookings', 'View booking', job.booking_id) : dashboardButton('calendar', 'Open calendar')}</div>`,
       'jobs',
     )
   }
@@ -995,7 +1237,7 @@ app.post('/api/admin/invoice-permissions', async (request, response) => {
 /* accounts. Roles/permissions/job titles live on profiles; emails     */
 /* come from auth.users (service role only).                           */
 /* ------------------------------------------------------------------ */
-const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'attendance', 'homework', 'formations', 'jobs', 'template', 'events', 'messages', 'site', 'sales']
+const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'attendance', 'homework', 'formations', 'jobs', 'sessions', 'template', 'events', 'messages', 'site', 'sales']
 const cleanPermissions = (value) => (Array.isArray(value) ? value.filter((item) => TEAM_PERMISSIONS.includes(item)) : [])
 
 async function requireAdmin(request, response) {
@@ -2861,6 +3103,128 @@ app.post('/api/invoices/reminders/run', async (request, response) => {
   const access = await requireInvoiceAccess(request, response)
   if (!access) return
   response.json(await runInvoiceReminders())
+})
+
+/* ------------------------------------------------------------------ */
+/* Payments (Operations dashboard). PENDING = invoices that have been   */
+/* sent and are not yet confirmed paid: the money may already be in the */
+/* bank (transfer) but nobody has checked it off. PAID = confirmed:     */
+/* invoices paid online or marked paid here, plus (admins only, like    */
+/* the revenue figure) class bookings, event tickets and payment links */
+/* paid through Stripe.                                                 */
+/* ------------------------------------------------------------------ */
+const PAYMENT_METHODS = { bank_transfer: 'Bank transfer', cash: 'Cash', card_in_person: 'Card (in person)', cheque: 'Cheque', other: 'Other' }
+
+app.get('/api/payments', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  const isAdmin = access.profile?.role === 'admin'
+  const days = Math.max(0, Math.floor(Number(request.query.days) || 0)) // 0 = all time
+  const since = days ? new Date(Date.now() - days * 86400000).toISOString() : null
+  const today = londonNow().date
+  try {
+    const invoiceRows = await selectAll(() => supabase.from('bookings').select('*').not('invoice_sent_at', 'is', null).in('invoice_status', ['Sent', 'Paid']).order('id'))
+    const schoolIds = [...new Set(invoiceRows.map((row) => row.school_id).filter(Boolean))]
+    const familyIds = [...new Set(invoiceRows.map((row) => row.family_id).filter(Boolean))]
+    const [{ data: schools }, { data: families }] = await Promise.all([
+      schoolIds.length ? supabase.from('schools').select('*').in('id', schoolIds) : { data: [] },
+      familyIds.length ? supabase.from('parent_families').select('id,guardian_name').in('id', familyIds) : { data: [] },
+    ])
+    const schoolById = new Map((schools || []).map((row) => [row.id, row]))
+    const familyById = new Map((families || []).map((row) => [row.id, row]))
+    const markerIds = [...new Set(invoiceRows.map((row) => row.invoice_paid_by).filter(Boolean))]
+    const { data: markers } = markerIds.length ? await supabase.from('profiles').select('id,full_name').in('id', markerIds) : { data: [] }
+    const markerName = new Map((markers || []).map((row) => [row.id, row.full_name]))
+
+    const pending = []
+    const paid = []
+    for (const row of invoiceRows) {
+      if (row.status === 'Cancelled') continue
+      const invoice = buildInvoice(row, schoolById.get(row.school_id))
+      const base = {
+        id: row.id,
+        source: 'invoice',
+        reference: row.invoice_number || 'Invoice',
+        description: invoice.invoiceBooking.invoiceDescription || row.session_type || '',
+        payer: row.school_id ? invoice.payerName : familyById.get(row.family_id)?.guardian_name || invoice.payerName,
+        payerKind: row.school_id ? 'school' : row.family_id ? 'family' : 'contact',
+      }
+      if (isInvoiceOutstanding(row)) {
+        if (invoice.amountPence === 0) continue // fully discounted: nothing to collect
+        pending.push({ ...base, amountPence: invoice.amountPence, sentAt: row.invoice_sent_at, dueDate: row.invoice_due_date, daysOverdue: daysOverdue(row.invoice_due_date, today), payUrl: invoicePayUrl(row) })
+      } else {
+        const paidAt = row.invoice_paid_at || row.invoice_sent_at
+        if (since && paidAt < since) continue
+        const online = Boolean(row.invoice_payment_session_id)
+        paid.push({ ...base, amountPence: Number(row.invoice_paid_amount_pence ?? invoice.amountPence), paidAt, method: online ? 'Card (Pay now)' : PAYMENT_METHODS[row.invoice_paid_method] || (row.invoice_paid_at ? 'Marked paid' : 'Marked paid (no date recorded)'), markedBy: markerName.get(row.invoice_paid_by) || '', note: row.invoice_paid_note || '', canUndo: !online && Boolean(row.invoice_paid_at) })
+      }
+    }
+
+    if (isAdmin) {
+      const recent = (query) => (since ? query.gte('created_at', since) : query)
+      const [classRows, ticketRows, linkRows] = await Promise.all([
+        selectAll(() => recent(supabase.from('bookings').select('id,contact_name,session_type,price,created_at,stripe_checkout_session_id').eq('payment_status', 'paid').not('stripe_checkout_session_id', 'is', null).is('invoice_sent_at', null).order('id'))),
+        selectAll(() => recent(supabase.from('event_ticket_orders').select('id,buyer_name,tier_name,tickets,total_pence,created_at,events(title)').eq('payment_status', 'paid').order('id'))),
+        selectAll(() => (since ? supabase.from('payment_link_orders').select('id,buyer_name,link_name,amount_pence,paid_at').eq('payment_status', 'paid').gte('paid_at', since) : supabase.from('payment_link_orders').select('id,buyer_name,link_name,amount_pence,paid_at').eq('payment_status', 'paid')).order('id')).catch(() => []),
+      ])
+      for (const row of classRows) {
+        const amountPence = Math.round(Number(row.price || 0) * 100)
+        if (amountPence > 0 && !String(row.stripe_checkout_session_id).startsWith('free-')) paid.push({ id: row.id, source: 'class', reference: 'Class booking', description: row.session_type, payer: row.contact_name, payerKind: 'family', amountPence, paidAt: row.created_at, method: 'Card (Stripe)' })
+      }
+      for (const row of ticketRows) {
+        if (row.total_pence > 0) paid.push({ id: row.id, source: 'event', reference: 'Event tickets', description: `${row.events?.title || 'Event'} · ${row.tier_name} × ${row.tickets}`, payer: row.buyer_name, payerKind: 'buyer', amountPence: row.total_pence, paidAt: row.created_at, method: 'Card (Stripe)' })
+      }
+      for (const row of linkRows) {
+        if (row.amount_pence > 0) paid.push({ id: row.id, source: 'payment-link', reference: 'Payment link', description: row.link_name, payer: row.buyer_name, payerKind: 'buyer', amountPence: row.amount_pence, paidAt: row.paid_at, method: 'Card (Stripe)' })
+      }
+    }
+
+    pending.sort((a, b) => (b.daysOverdue ?? -1e9) - (a.daysOverdue ?? -1e9))
+    paid.sort((a, b) => String(b.paidAt || '').localeCompare(String(a.paidAt || '')))
+    const summary = (list) => ({ count: list.length, totalPence: list.reduce((sum, item) => sum + item.amountPence, 0), items: list })
+    response.json({ pending: summary(pending), paid: { ...summary(paid), scope: isAdmin ? 'all' : 'invoices' }, days, methods: PAYMENT_METHODS })
+  } catch (error) {
+    const missing = /invoice_paid_method/.test(error.message || '')
+    response.status(500).json({ error: missing ? 'Apply supabase/migrations/20261002_session_types_and_payments.sql first.' : `Payments could not be loaded: ${error.message}` })
+  }
+})
+
+// Confirm a pending invoice as paid (e.g. the bank transfer has arrived).
+app.post('/api/payments/invoices/:bookingId/mark-paid', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  const invoice = await loadInvoice({ bookingId: request.params.bookingId })
+  if (!invoice) return response.status(404).json({ error: 'Invoice not found.' })
+  if (!isInvoiceOutstanding(invoice.row)) return response.status(409).json({ error: 'This invoice is already paid or cancelled.' })
+  const { amountPence = invoice.amountPence, paidOn = londonNow().date, method = 'bank_transfer', note = '' } = request.body || {}
+  const amount = Math.round(Number(amountPence))
+  if (!Number.isInteger(amount) || amount < 0) return response.status(400).json({ error: 'Enter the amount received.' })
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(paidOn)) || String(paidOn) > londonNow().date) return response.status(400).json({ error: 'Enter the date the payment arrived (not in the future).' })
+  if (!PAYMENT_METHODS[method]) return response.status(400).json({ error: 'Choose how it was paid.' })
+  const { data: saved, error } = await supabase.from('bookings').update({
+    invoice_status: 'Paid',
+    payment_status: 'paid',
+    invoice_paid_at: new Date(`${paidOn}T12:00:00Z`).toISOString(),
+    invoice_paid_amount_pence: amount,
+    invoice_paid_method: method,
+    invoice_paid_by: access.user.id,
+    invoice_paid_note: String(note || '').trim().slice(0, 300) || null,
+  }).eq('id', invoice.row.id).is('invoice_paid_at', null).select('id')
+  if (error) return response.status(500).json({ error: /invoice_paid_method/.test(error.message) ? 'Apply supabase/migrations/20261002_session_types_and_payments.sql first.' : `The payment could not be saved: ${error.message}` })
+  if (!saved?.length) return response.status(409).json({ error: 'This invoice has just been paid. Refresh to see it.' })
+  response.json({ paid: true, amountPence: amount, shortBy: Math.max(0, invoice.amountPence - amount) })
+})
+
+// Undo a manual confirmation (a mistake). Online Stripe payments can't be undone here.
+app.post('/api/payments/invoices/:bookingId/mark-unpaid', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  const { data: row } = await supabase.from('bookings').select('id,invoice_paid_at,invoice_payment_session_id').eq('id', request.params.bookingId).maybeSingle()
+  if (!row) return response.status(404).json({ error: 'Invoice not found.' })
+  if (row.invoice_payment_session_id) return response.status(409).json({ error: 'This invoice was paid online by card. Refunds are made in Stripe.' })
+  const { error } = await supabase.from('bookings').update({ invoice_status: 'Sent', payment_status: 'unpaid', invoice_paid_at: null, invoice_paid_amount_pence: null, invoice_paid_method: null, invoice_paid_by: null, invoice_paid_note: null }).eq('id', row.id)
+  if (error) return response.status(500).json({ error: `The invoice could not be reopened: ${error.message}` })
+  response.json({ reopened: true })
 })
 
 // Current date and wall-clock minutes in Europe/London ,  class times are UK local.

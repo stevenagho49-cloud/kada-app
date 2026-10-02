@@ -17,7 +17,7 @@ export function invoiceStatusTone(status) {
 /* ------------------------------------------------------------------ */
 export function BookingsTable({
   bookings, schools, instructors, jobs, conflicts, instructorLabel,
-  isAdmin, isInstructor, canIssueInvoices, canManageJobs,
+  isAdmin, isInstructor, canIssueInvoices, canManageJobs, sessionTypeOptions,
   expanded, onToggleExpand,
   onSaveBooking, onOpenSchool, onEditBooking, onPublishJob, onMarkDone, onInvoice,
 }) {
@@ -45,7 +45,7 @@ export function BookingsTable({
     {
       key: 'session', label: 'Session', render: (booking) => (
         <div>
-          <EditableSelect disabled={!isAdmin} value={booking.sessionType} options={SESSION_TYPE_OPTIONS} onSave={(value) => onSaveBooking({ ...booking, sessionType: value })} />
+          <EditableSelect disabled={!isAdmin} value={booking.sessionType} options={sessionTypeOptions ? [...new Set([...sessionTypeOptions, booking.sessionType].filter(Boolean))].map((value) => ({ value, label: value })) : SESSION_TYPE_OPTIONS} onSave={(value) => onSaveBooking({ ...booking, sessionType: value })} />
           <div style={{ marginTop: 3, color: OPS_COLORS.muted, fontSize: 12 }}>
             £<EditableText small type="number" disabled={!isAdmin} value={booking.price} onSave={(value) => onSaveBooking({ ...booking, price: value })} />
           </div>
