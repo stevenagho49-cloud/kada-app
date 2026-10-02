@@ -61,7 +61,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // idempotencyKey: Resend returns the original email instead of sending again
 // when the same key is reused within 24h (used by campaign sends, which can be
 // resumed after a restart). Rate-limited calls (429) are retried with backoff.
-async function sendEmail({ to, subject, html, attachments = [], idempotencyKey = '' }) {
+async function sendEmail({ to, subject, html, attachments = [], idempotencyKey = '', bcc = '' }) {
   if (!process.env.RESEND_API_KEY || !to) return { sent: false, reason: 'email not configured' }
   for (let attempt = 1; ; attempt += 1) {
     try {
@@ -71,6 +71,7 @@ async function sendEmail({ to, subject, html, attachments = [], idempotencyKey =
         body: JSON.stringify({
           from: EMAIL_FROM,
           to: Array.isArray(to) ? to : [to],
+          ...(bcc ? { bcc: Array.isArray(bcc) ? bcc : [bcc] } : {}),
           subject,
           html,
           ...(attachments.length ? { attachments } : {}),
@@ -203,6 +204,14 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     if (metadata.kind === 'invoice_payment') {
       const result = await recordInvoicePayment(session)
       if (!result.ok) return response.status(500).json({ error: 'Invoice payment write failed' })
+      return response.json({ received: true })
+    }
+
+    // Admin-sent subscription request (/api/subscribe/<token>): starts the
+    // family's recurring membership.
+    if (metadata.kind === 'subscription_request') {
+      const result = await recordSubscriptionRequest(session)
+      if (!result.ok) return response.status(500).json({ error: 'Subscription request write failed' })
       return response.json({ received: true })
     }
 
@@ -492,7 +501,7 @@ const tooMany = { error: 'Too many attempts. Please wait a few minutes, then try
 const checkoutLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 const lookupLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 const contactLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
-app.use(['/api/stripe/create-checkout-session', '/api/stripe/create-event-checkout', '/api/stripe/create-payment-link-checkout', '/api/invoices/pay'], checkoutLimiter)
+app.use(['/api/stripe/create-checkout-session', '/api/stripe/create-event-checkout', '/api/stripe/create-payment-link-checkout', '/api/invoices/pay', '/api/subscribe'], checkoutLimiter)
 app.use(['/api/stripe/event-order', '/api/stripe/class-booking', '/api/stripe/payment-link-order'], lookupLimiter)
 app.use('/api/public/contact', contactLimiter)
 
@@ -1092,6 +1101,7 @@ function parentInvoices(bookings) {
         id: row.id,
         invoiceNumber: row.invoice_number || '',
         description: invoice.invoiceBooking.invoiceDescription || row.session_type || 'Invoice',
+        ...arrearsFields(row),
         date: row.date || '',
         amountPence: outstanding ? invoice.amountPence : Number(row.invoice_paid_amount_pence ?? invoice.amountPence),
         status: outstanding ? 'outstanding' : 'paid',
@@ -2457,6 +2467,17 @@ function storableOverrides(overrides = {}) {
 // fresh Checkout for whatever is outstanding at the time it is clicked.
 const invoicePayUrl = (row) => (row?.invoice_pay_token ? `${APP_URL}/api/invoices/pay/${row.invoice_pay_token}` : '')
 
+// Manual arrears cover one or more months, stored as 'YYYY-MM'. Shown as
+// "September, October 2026" (or "December 2026, January 2027" across years).
+const ARREARS_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/
+function monthsLabel(months) {
+  const sorted = [...new Set((Array.isArray(months) ? months : []).filter((month) => ARREARS_MONTH.test(month)))].sort()
+  const name = (month) => new Date(`${month}-01T00:00:00Z`).toLocaleDateString('en-GB', { month: 'long', timeZone: 'UTC' })
+  if (new Set(sorted.map((month) => month.slice(0, 4))).size <= 1) return sorted.length ? `${sorted.map(name).join(', ')} ${sorted[0].slice(0, 4)}` : ''
+  return sorted.map((month) => `${name(month)} ${month.slice(0, 4)}`).join(', ')
+}
+const arrearsFields = (row) => (row.arrears_reason || row.arrears_months?.length ? { arrearsReason: row.arrears_reason || '', arrearsMonths: row.arrears_months || [], monthsLabel: monthsLabel(row.arrears_months) } : {})
+
 // Rebuild an invoice as it was sent, from the stored booking row (+ its school row).
 function buildInvoice(row, school) {
   const invoiceBooking = invoiceOverrides({ ...row, studentCount: row.student_count, sessionType: row.session_type, contactName: row.contact_name, contactEmail: row.contact_email, invoiceNumber: row.invoice_number, price: row.price }, row.invoice_overrides || {})
@@ -2597,16 +2618,19 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy, payUr
   document.font('Helvetica-Bold').fontSize(8.5).fillColor(muted).text('BILL TO', margin, y)
   document.text('INVOICE DETAILS', pageWidth / 2 + 14.17, y)
   y += 17.01
-  document.font('Times-Bold').fontSize(12).fillColor(ink).text(school?.name || 'School contact', margin, y)
+  const isArrears = Boolean(booking.arrears_months?.length)
+  // A family (parent) invoice is billed to the parent by name, not "School contact".
+  const billToName = school?.name || (booking.family_id && booking.contactName) || 'School contact'
+  document.font('Times-Bold').fontSize(12).fillColor(ink).text(billToName, margin, y)
   let detailY = y
-  for (const [label, value] of [['Invoice date', formatDate(invoiceDate.toISOString().slice(0, 10))], ['Due date', formatDate(dueDate)], ['Workshop date', formatDate(booking.date)]]) {
+  for (const [label, value] of [['Invoice date', formatDate(invoiceDate.toISOString().slice(0, 10))], ['Due date', formatDate(dueDate)], isArrears ? ['Months covered', monthsLabel(booking.arrears_months)] : ['Workshop date', formatDate(booking.date)]]) {
     document.font('Helvetica').fontSize(8.5).fillColor(muted).text(label, pageWidth / 2 + 14.17, detailY)
     document.font('Helvetica-Bold').fillColor(ink).text(value, pageWidth - margin - 120, detailY, { width: 120, align: 'right' })
     detailY += 15.59
   }
   y += 17.01
   document.font('Helvetica').fontSize(9).fillColor(muted)
-  if (school?.contactName || booking.contactName) { document.text(school?.contactName || booking.contactName, margin, y); y += 14.17 }
+  if ((school?.contactName || booking.contactName) && billToName !== booking.contactName) { document.text(school?.contactName || booking.contactName, margin, y); y += 14.17 }
   if (school?.email || booking.contactEmail) { document.text(school?.email || booking.contactEmail, margin, y); y += 14.17 }
   y = Math.max(y, detailY) + 28.35
 
@@ -2618,9 +2642,9 @@ async function generateInvoicePdf({ booking, school, settings, preparedBy, payUr
   document.text('AMOUNT', pageWidth - margin - 55, tableTop + 8, { width: 50, align: 'right' })
   const rowY = tableTop + 25.51
   if (Number(booking.studentCount) % 2 === 0) document.rect(margin, rowY, pageWidth - margin * 2, 39.69).fill(ivory)
-  document.font('Helvetica-Bold').fontSize(9.5).fillColor(ink).text(booking.invoiceDescription || booking.sessionType || 'Dance workshop', margin + 11.34, rowY + 8)
-  document.font('Helvetica').fontSize(8).fillColor(muted).text('Workshop session', margin + 11.34, rowY + 22)
-  document.font('Helvetica').fontSize(9).fillColor(ink).text(String(booking.studentCount || 0), pageWidth - margin - 180, rowY + 16, { width: 70, align: 'right' })
+  document.font('Helvetica-Bold').fontSize(9.5).fillColor(ink).text(booking.invoiceDescription || booking.sessionType || 'Dance workshop', margin + 11.34, rowY + 8, { width: pageWidth - margin * 2 - 200, height: 12, ellipsis: true })
+  document.font('Helvetica').fontSize(8).fillColor(muted).text(isArrears ? `Arrears · ${monthsLabel(booking.arrears_months)}` : 'Workshop session', margin + 11.34, rowY + 22)
+  document.font('Helvetica').fontSize(9).fillColor(ink).text(isArrears ? '' : String(booking.studentCount || 0), pageWidth - margin - 180, rowY + 16, { width: 70, align: 'right' })
   document.text(money(booking.invoiceRate ?? booking.price), pageWidth - margin - 120, rowY + 16, { width: 55, align: 'right' })
   document.font('Helvetica-Bold').fontSize(9.5).text(money(subtotal), pageWidth - margin - 55, rowY + 16, { width: 50, align: 'right' })
   document.moveTo(margin, rowY + 39.69).lineTo(pageWidth - margin, rowY + 39.69).strokeColor(rule).lineWidth(0.6).stroke()
@@ -2901,6 +2925,7 @@ app.get('/api/invoices/pay/:token', async (request, response) => {
     ['Billed to', invoice.payerName],
     ['For', invoiceBooking.invoiceDescription || row.session_type || 'Dance workshop'],
     ...(row.date ? [['Workshop date', formatDateGB(row.date)]] : []),
+    ...(row.arrears_months?.length ? [['Months covered', monthsLabel(row.arrears_months)]] : []),
     ...(row.invoice_due_date ? [['Due', formatDateGB(row.invoice_due_date)]] : []),
   ].map(([label, value]) => `<tr><td style="padding:5px 16px 5px 0;color:#767066;vertical-align:top">${escHtml(label)}</td><td style="padding:5px 0;font-weight:700">${escHtml(value)}</td></tr>`).join('')
   invoicePayPage(response, {
@@ -3026,6 +3051,7 @@ app.get('/api/invoices/arrears', async (request, response) => {
       id: row.id,
       invoiceNumber: row.invoice_number || '',
       description: invoice.invoiceBooking.invoiceDescription || row.session_type || '',
+      ...arrearsFields(row),
       workshopDate: row.date || '',
       bookingStatus: row.status || '',
       amountPence: invoice.amountPence,
@@ -3415,6 +3441,331 @@ app.post('/api/discount-codes/apply-booking', async (request, response) => {
 // recorded exactly as a paid one would be (same functions the webhook uses), so
 // it gets a real booking/order row, confirmation email and admin alert.
 const freeCheckoutSession = ({ metadata, email, name }) => ({ id: `free-${crypto.randomUUID()}`, metadata, customer_details: { email, name }, amount_total: 0, customer: null, subscription: null, payment_intent: null })
+
+/* ------------------------------------------------------------------ */
+/* Manual arrears: staff bill a family directly for an amount, a reason */
+/* and the month(s) it covers. Stored as an ordinary sent invoice row,  */
+/* so the arrears view, the parent's Invoices tab, Pay now, reminders   */
+/* and the Stripe webhook treat it like any other invoice.              */
+/* ------------------------------------------------------------------ */
+const MANUAL_ARREARS_MIGRATION = 'Apply supabase/migrations/20261002_manual_arrears_subscription_requests.sql in the Supabase SQL Editor.'
+
+function arrearsEmailHtml({ firstName, amountPence, reason, months, invoiceNumber, dueDate, payUrl }) {
+  const rows = [['Amount due', money(amountPence)], ['Reason', reason], ['Months covered', months], ['Invoice', invoiceNumber], ['Please pay by', formatDateGB(dueDate)]]
+    .map(([label, value]) => `<tr><td style="padding:5px 16px 5px 0;color:#767066;vertical-align:top;white-space:nowrap">${escHtml(label)}</td><td style="padding:5px 0;font-weight:700">${escHtml(value)}</td></tr>`).join('')
+  return `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml(firstName)},</p><p>There is an outstanding balance on your family account. Here are the details:</p><table style="border-collapse:collapse;font-size:15px;margin:4px 0 6px">${rows}</table>${payNowButton(payUrl, amountPence)}<p>You can also see this, and pay it, from the Invoices tab when you <a href="${APP_URL}#ops/invoices" style="color:#0b3d2e">sign in to your KADA account</a>.</p><p>If you think this is a mistake, or you'd like to talk about arranging payment, just reply to this email.</p><p>Thank you,<br>King's Ark Dance Academy</p></div>`
+}
+
+app.post('/api/invoices/arrears/manual', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  if (!process.env.RESEND_API_KEY) return response.status(503).json({ error: 'Resend is not configured on the server, so the parent could not be emailed.' })
+  const { familyId, amount, reason, months, dueDate } = request.body || {}
+  const amountPence = Math.round(Number(amount) * 100)
+  if (!Number.isFinite(amountPence) || amountPence < 30 || amountPence > 1000000) return response.status(400).json({ error: 'Enter an amount between £0.30 and £10,000.' })
+  const cleanReason = String(reason || '').trim().slice(0, 300)
+  if (!cleanReason) return response.status(400).json({ error: 'Enter the reason for the arrears.' })
+  const cleanMonths = [...new Set((Array.isArray(months) ? months : []).map(String))].filter((month) => ARREARS_MONTH.test(month)).sort()
+  if (!cleanMonths.length || cleanMonths.length > 24) return response.status(400).json({ error: 'Choose at least one month (up to 24) that this covers.' })
+  const today = londonNow().date
+  if (dueDate && (!/^\d{4}-\d{2}-\d{2}$/.test(String(dueDate)) || String(dueDate) < today)) return response.status(400).json({ error: 'The due date must be today or later.' })
+
+  const { data: family } = familyId ? await supabase.from('parent_families').select('id,guardian_name,guardian_email').eq('id', String(familyId)).maybeSingle() : { data: null }
+  if (!family) return response.status(404).json({ error: 'Choose the parent / family this is for.' })
+  if (!family.guardian_email) return response.status(400).json({ error: 'This family has no email address. Add one under Subscriptions first.' })
+
+  const id = `arrears-${crypto.randomUUID()}`
+  const { error: insertError } = await supabase.from('bookings').insert({
+    id,
+    family_id: family.id,
+    contact_name: family.guardian_name,
+    contact_email: family.guardian_email,
+    date: null,
+    session_type: 'Arrears',
+    price: amountPence / 100,
+    student_count: 0,
+    status: 'Confirmed',
+    invoice_status: 'Not sent',
+    payment_status: 'unpaid',
+    notes: `Manual arrears added by ${access.profile?.role === 'admin' ? 'admin' : 'staff'} ${access.user.email}`,
+    arrears_reason: cleanReason,
+    arrears_months: cleanMonths,
+    invoice_overrides: { description: cleanReason },
+    ...(dueDate ? { invoice_due_date: String(dueDate) } : {}),
+  })
+  if (insertError) {
+    const missing = /arrears_reason|arrears_months/.test(insertError.message)
+    return response.status(500).json({ error: missing ? `Manual arrears are not set up yet. ${MANUAL_ARREARS_MIGRATION}` : `The arrears could not be saved: ${insertError.message}` })
+  }
+
+  const invoiceNumber = await ensureInvoiceNumber(id)
+  const invoice = await loadInvoice({ bookingId: id })
+  const due = invoice.row.invoice_due_date || new Date(Date.parse(`${today}T00:00:00Z`) + 14 * 86400000).toISOString().slice(0, 10)
+  const payUrl = invoicePayUrl(invoice.row)
+  const { data: bankDetails } = await supabase.from('invoice_settings').select('account_name,sort_code,account_number').eq('id', 'default').maybeSingle()
+  const pdf = await generateInvoicePdf({ booking: { ...invoice.invoiceBooking, invoiceNumber, invoice_due_date: due }, school: null, settings: bankDetails || {}, preparedBy: "King's Ark Dance Academy", payUrl })
+  const label = monthsLabel(cleanMonths)
+  const result = await sendEmail({
+    to: family.guardian_email,
+    bcc: ADMIN_EMAIL,
+    subject: `Payment due: ${money(amountPence)} for ${label} - King's Ark Dance Academy`,
+    html: arrearsEmailHtml({ firstName: (family.guardian_name || '').split(' ')[0] || 'there', amountPence, reason: cleanReason, months: label, invoiceNumber, dueDate: due, payUrl }),
+    attachments: [{ filename: `${invoiceNumber || id}.pdf`, content: pdf.toString('base64') }],
+  })
+  if (!result.sent) {
+    // Nothing reached the parent, so don't leave an arrears entry they were never told about.
+    await supabase.from('bookings').delete().eq('id', id)
+    return response.status(502).json({ error: `The email could not be sent, so the arrears were not saved: ${result.reason}` })
+  }
+  // The bookings_invoice_guard trigger stamps the sent date (and 14-day due date unless one was chosen).
+  const { error: sentError } = await supabase.from('bookings').update({ invoice_status: 'Sent', invoice_due_date: due }).eq('id', id)
+  if (sentError) return response.status(500).json({ error: 'The email was sent, but the arrears could not be marked as sent. Refresh and check the Bookings list.' })
+  response.json({ id, invoiceNumber, amountPence, monthsLabel: label, dueDate: due, recipient: family.guardian_email, payUrl, emailId: result.id })
+})
+
+/* ------------------------------------------------------------------ */
+/* Subscription requests: email an existing parent a link that opens    */
+/* Stripe Checkout in subscription mode for a plan, the same price the  */
+/* class checkout uses. Completing it activates the family's membership */
+/* exactly like a membership sign-up (webhook, or the return page).     */
+/* ------------------------------------------------------------------ */
+const SUBSCRIPTION_PLANS = {
+  monthly_membership: { label: 'Monthly Membership', priceEnv: 'STRIPE_MONTHLY_PRICE_ID', fallbackPence: CLASS_PRICES_PENCE.monthly_membership },
+}
+
+// The real price from Stripe, so the email and dashboard always match what Checkout charges.
+async function subscriptionPlanList() {
+  return Promise.all(Object.entries(SUBSCRIPTION_PLANS).map(async ([planType, plan]) => {
+    const priceId = process.env[plan.priceEnv]
+    let pricePence = plan.fallbackPence
+    let interval = 'month'
+    if (stripe && priceId) {
+      try {
+        const price = await stripe.prices.retrieve(priceId)
+        pricePence = price.unit_amount ?? pricePence
+        interval = price.recurring?.interval || interval
+      } catch (error) {
+        console.error(`Subscription price ${priceId} could not be loaded:`, error.message)
+      }
+    }
+    return { planType, label: plan.label, pricePence, interval, available: Boolean(stripe && priceId) }
+  }))
+}
+// The membership covers the whole family but is priced per child: one Stripe
+// line item for the plan's price with quantity = the family's children.
+async function familyChildCount(familyId) {
+  const { data } = await supabase.from('students').select('name,date_of_birth').eq('family_id', familyId)
+  // A child can have one record per booking; count each child once.
+  return new Set((data || []).map((child) => `${String(child.name || '').trim().toLowerCase()}|${child.date_of_birth}`)).size
+}
+const childrenLabel = (count) => `${count} ${count === 1 ? 'child' : 'children'}`
+const planTotalLabel = (plan, children) => `${money(plan.pricePence * children)}/${plan.interval}`
+const hasLiveSubscription = (family) => Boolean(family?.stripe_subscription_id) && family.membership_status === 'active'
+
+app.get('/api/admin/subscription-requests', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  const [{ data, error }, plans] = await Promise.all([
+    supabase.from('subscription_requests').select('id,family_id,plan_type,recipient,status,error,created_at,completed_at').order('created_at', { ascending: false }).limit(1000),
+    subscriptionPlanList(),
+  ])
+  if (error) return response.status(500).json({ error: /subscription_requests/.test(error.message) ? `Subscription requests are not set up yet. ${MANUAL_ARREARS_MIGRATION}` : error.message, plans })
+  response.json({ plans, requests: (data || []).map((row) => ({ id: row.id, familyId: row.family_id, planType: row.plan_type, recipient: row.recipient, status: row.status, error: row.error || '', createdAt: row.created_at, completedAt: row.completed_at })) })
+})
+
+// What a request for this family would charge, for the Send subscription request form.
+app.get('/api/admin/subscription-requests/quote', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  const familyId = String(request.query.familyId || '')
+  if (!familyId) return response.status(400).json({ error: 'Choose a family.' })
+  const [children, plans] = await Promise.all([familyChildCount(familyId), subscriptionPlanList()])
+  response.json({ children, plans: plans.map((plan) => ({ ...plan, totalPence: plan.pricePence * children })) })
+})
+
+app.post('/api/admin/subscription-requests', async (request, response) => {
+  const access = await requireInvoiceAccess(request, response)
+  if (!access) return
+  if (!process.env.RESEND_API_KEY) return response.status(503).json({ error: 'Resend is not configured on the server.' })
+  const { familyId, planType } = request.body || {}
+  const plan = (await subscriptionPlanList()).find((item) => item.planType === planType)
+  if (!plan) return response.status(400).json({ error: 'Choose a subscription plan.' })
+  if (!plan.available) return response.status(503).json({ error: 'Stripe is not configured for this plan on the server.' })
+  const { data: family } = familyId ? await supabase.from('parent_families').select('*').eq('id', String(familyId)).maybeSingle() : { data: null }
+  if (!family) return response.status(404).json({ error: 'Choose the parent / family to send this to.' })
+  if (!family.guardian_email) return response.status(400).json({ error: 'This family has no email address. Add one under Subscriptions first.' })
+  if (hasLiveSubscription(family)) return response.status(409).json({ error: `${family.guardian_name || 'This family'} already has an active subscription.` })
+  const children = await familyChildCount(family.id)
+  if (!children) return response.status(400).json({ error: `${family.guardian_name || 'This family'} has no children on their account yet. The membership is priced per child, so add their children first.` })
+  const totalPence = plan.pricePence * children
+
+  const { data: claim, error: claimError } = await supabase.from('subscription_requests')
+    .insert({ family_id: family.id, plan_type: plan.planType, recipient: family.guardian_email, sent_by: access.user.id })
+    .select('id,token').single()
+  if (claimError) {
+    return response.status(500).json({ error: /subscription_requests/.test(claimError.message) ? `Subscription requests are not set up yet. ${MANUAL_ARREARS_MIGRATION}` : `The request could not be saved: ${claimError.message}` })
+  }
+  const link = `${APP_URL}/api/subscribe/${claim.token}`
+  const firstName = (family.guardian_name || '').split(' ')[0] || 'there'
+  const result = await sendEmail({
+    to: family.guardian_email,
+    bcc: ADMIN_EMAIL,
+    subject: `Set up your ${plan.label} (${planTotalLabel(plan, children)}) - King's Ark Dance Academy`,
+    html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml(firstName)},</p><p>We'd like to move your family onto our <strong>${escHtml(plan.label)}</strong>, paid automatically by card, so you don't need to pay for classes one at a time. It's ${money(plan.pricePence)} a ${escHtml(plan.interval)} per child: with <strong>${childrenLabel(children)}</strong> on your account that's <strong>${money(totalPence)} a ${escHtml(plan.interval)}</strong>.</p><p>The button below takes you to Stripe's secure checkout to set it up. Your first payment of ${money(totalPence)} is taken today, then on the same date each ${escHtml(plan.interval)}. You can cancel at any time from your KADA account.</p><p style="margin:20px 0 6px"><a href="${link}" style="background:#c9a227;color:#0b3d2e;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Set up my ${escHtml(plan.label)} →</a></p><p style="color:#767066;font-size:12px;margin:0 0 14px">Secure card payment by Stripe. If the button doesn't work, copy this link into your browser:<br><span style="word-break:break-all">${link}</span></p><p>Any questions, just reply to this email.</p><p>Thank you,<br>King's Ark Dance Academy</p></div>`,
+  })
+  await supabase.from('subscription_requests').update(result.sent ? { status: 'sent', resend_id: result.id } : { status: 'failed', error: result.reason }).eq('id', claim.id)
+  if (!result.sent) return response.status(502).json({ error: `The email could not be sent: ${result.reason}` })
+  response.json({ id: claim.id, recipient: family.guardian_email, plan, children, totalPence, emailId: result.id })
+})
+
+// Webhook (and return page) handler for kind=subscription_request. Safe to run
+// more than once for the same session: the family update is the same each time
+// and only the first run claims the request and sends the emails.
+async function recordSubscriptionRequest(session) {
+  const metadata = session.metadata || {}
+  const { data: subscriptionRequest, error: loadError } = metadata.subscription_request_id
+    ? await supabase.from('subscription_requests').select('*').eq('id', metadata.subscription_request_id).maybeSingle()
+    : { data: null, error: null }
+  if (loadError) {
+    console.error('Subscription request lookup failed:', loadError)
+    return { ok: false }
+  }
+  if (!subscriptionRequest) {
+    console.error('Subscription checkout for an unknown request:', session.id)
+    return { ok: true } // nothing we could ever write; don't make Stripe retry forever
+  }
+  const subscriptionId = typeof session.subscription === 'string' ? session.subscription : session.subscription?.id || null
+  const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id || null
+  const { data: family, error: familyError } = await supabase.from('parent_families').update({
+    plan_type: subscriptionRequest.plan_type,
+    membership_status: 'active',
+    paused_at: null,
+    ...(customerId ? { stripe_customer_id: customerId } : {}),
+    ...(subscriptionId ? { stripe_subscription_id: subscriptionId } : {}),
+    updated_at: new Date().toISOString(),
+  }).eq('id', subscriptionRequest.family_id).select('id,guardian_name,guardian_email').maybeSingle()
+  if (familyError) {
+    console.error('Subscription request family update failed:', familyError)
+    return { ok: false }
+  }
+  // The membership covers the family, so its children show as active members.
+  if (family) {
+    const { error: studentError } = await supabase.from('students').update({ membership_status: 'active' }).eq('family_id', family.id)
+    if (studentError) console.error('Subscription request student update failed:', studentError)
+  }
+  const { data: claimed, error: claimError } = await supabase.from('subscription_requests')
+    .update({ status: 'completed', completed_at: new Date().toISOString(), stripe_checkout_session_id: session.id, stripe_subscription_id: subscriptionId })
+    .eq('id', subscriptionRequest.id).is('completed_at', null).select('id')
+  if (claimError) {
+    console.error('Subscription request completion write failed:', claimError)
+    return { ok: false }
+  }
+  if (!claimed?.length) return { ok: true } // already recorded
+
+  const plan = (await subscriptionPlanList()).find((item) => item.planType === subscriptionRequest.plan_type) || { label: 'Membership', pricePence: 0, interval: 'month' }
+  const email = session.customer_details?.email || family?.guardian_email || subscriptionRequest.recipient
+  const children = plan.pricePence ? Math.round(Number(session.amount_total ?? plan.pricePence) / plan.pricePence) || 1 : 1
+  const amountLabel = `${money(session.amount_total ?? plan.pricePence)} a ${plan.interval} for ${childrenLabel(children)}`
+  const emailResult = await sendEmail({
+    to: email,
+    subject: `Your ${plan.label} is set up - King's Ark Dance Academy`,
+    html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml((family?.guardian_name || '').split(' ')[0] || 'there')},</p><p>Thank you. Your <strong>${escHtml(plan.label)}</strong> (${escHtml(amountLabel)}) is now active, and payments will be taken automatically each ${escHtml(plan.interval)}.</p><p>Stripe will email you a receipt for each payment. You can manage or cancel the subscription any time from your <a href="${APP_URL}#ops/dashboard" style="color:#0b3d2e">KADA account</a>.</p><p>Thank you,<br>King's Ark Dance Academy</p></div>`,
+  })
+  if (!emailResult.sent) console.error('Subscription confirmation email failed:', emailResult.reason)
+  await notifyAdmin(`Subscription set up: ${family?.guardian_name || email}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Subscription request completed</h2><p><strong>Parent:</strong> ${escHtml(family?.guardian_name || '')} (${escHtml(email || '')})<br><strong>Plan:</strong> ${escHtml(plan.label)} (${escHtml(amountLabel)})<br><strong>Stripe subscription:</strong> ${escHtml(subscriptionId || 'n/a')}</p>${dashboardButton('subscriptions', 'Open subscriptions')}</div>`, 'subscription-request')
+  return { ok: true }
+}
+
+// Checks shared by the subscribe link and its return page. Returns
+// { subscriptionRequest, family } or renders the right explanation page.
+async function subscriptionRequestFor(request, response) {
+  const token = String(request.params.token || '')
+  const { data: subscriptionRequest } = supabase && /^[a-f0-9]{32}$/.test(token)
+    ? await supabase.from('subscription_requests').select('*').eq('token', token).maybeSingle()
+    : { data: null }
+  if (!subscriptionRequest) {
+    invoicePayPage(response, { status: 404, title: 'Link not found', body: '<p>This subscription link is not valid. Please check the link in your email, or contact us.</p>' })
+    return null
+  }
+  const { data: family } = await supabase.from('parent_families').select('*').eq('id', subscriptionRequest.family_id).maybeSingle()
+  return { subscriptionRequest, family }
+}
+
+// The link in the email goes straight to Stripe Checkout (a fresh session each
+// click, since Checkout sessions expire after 24 hours).
+app.get('/api/subscribe/:token', async (request, response) => {
+  const found = await subscriptionRequestFor(request, response)
+  if (!found) return
+  const { subscriptionRequest, family } = found
+  if (!family) return invoicePayPage(response, { status: 404, title: 'Account not found', body: '<p>We could not find the family account for this link. Please contact us.</p>' })
+  if (subscriptionRequest.completed_at || hasLiveSubscription(family)) {
+    return invoicePayPage(response, { title: 'Already set up', body: '<p>Your subscription is already active. Thank you, there is nothing more to do.</p>' })
+  }
+  const plan = SUBSCRIPTION_PLANS[subscriptionRequest.plan_type]
+  const priceId = plan && process.env[plan.priceEnv]
+  if (!stripe || !priceId) return invoicePayPage(response, { status: 503, title: 'Online sign-up unavailable', body: "<p>Subscriptions can't be set up online right now. Please contact us and we'll help.</p>" })
+  const base = `${request.protocol}://${request.get('host')}/api/subscribe/${subscriptionRequest.token}`
+  // Priced on the children on the account when they click, so a child added since the email counts.
+  const children = Math.max(1, await familyChildCount(family.id))
+  const metadata = {
+    kind: 'subscription_request',
+    subscription_request_id: subscriptionRequest.id,
+    // Not "family_id": a server without the subscription_request branch would treat
+    // that as a class booking. Unknown keys fail harmlessly there.
+    request_family_id: family.id,
+    plan_type: subscriptionRequest.plan_type,
+    children: String(children),
+  }
+  const params = {
+    mode: 'subscription',
+    line_items: [{ price: priceId, quantity: children }],
+    client_reference_id: family.id,
+    metadata,
+    subscription_data: { metadata, description: `KADA ${plan.label} · ${family.guardian_name || family.guardian_email} · ${childrenLabel(children)}`.slice(0, 500) },
+    success_url: `${base}/done?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${base}/cancelled`,
+  }
+  try {
+    let session
+    try {
+      // Reuse the family's Stripe customer (saved card, one billing history) when there is one.
+      session = await stripe.checkout.sessions.create(family.stripe_customer_id ? { ...params, customer: family.stripe_customer_id } : { ...params, customer_email: family.guardian_email })
+    } catch (error) {
+      if (!family.stripe_customer_id || error.code !== 'resource_missing') throw error
+      session = await stripe.checkout.sessions.create({ ...params, customer_email: family.guardian_email })
+    }
+    response.redirect(303, session.url)
+  } catch (error) {
+    console.error('Subscription request checkout creation failed:', error)
+    invoicePayPage(response, { status: 502, title: 'Sign-up could not start', body: '<p>Something went wrong starting the secure checkout. Please try the link again in a moment.</p>' })
+  }
+})
+
+app.get('/api/subscribe/:token/done', async (request, response) => {
+  const found = await subscriptionRequestFor(request, response)
+  if (!found) return
+  const { subscriptionRequest } = found
+  let done = Boolean(subscriptionRequest.completed_at)
+  if (!done && stripe && request.query.session_id) {
+    try {
+      const session = await stripe.checkout.sessions.retrieve(String(request.query.session_id))
+      if (session.metadata?.subscription_request_id === subscriptionRequest.id && session.status === 'complete') {
+        // Record it now rather than waiting for the webhook; the webhook then finds it done.
+        done = (await recordSubscriptionRequest(session)).ok
+      }
+    } catch (error) {
+      console.error('Subscription return page check failed:', error.message)
+    }
+  }
+  invoicePayPage(response, done
+    ? { title: "You're all set", body: `<p>Thank you! Your membership is now active and a confirmation email is on its way. You can manage it any time from your <a href="${APP_URL}#ops/dashboard" style="color:#0b3d2e;font-weight:700">KADA account</a>.</p>` }
+    : { title: 'Finishing up', body: "<p>Thanks, we're confirming your subscription with Stripe. You'll get a confirmation email shortly. If you don't, please contact us before trying again.</p>" })
+})
+
+app.get('/api/subscribe/:token/cancelled', (request, response) => {
+  const token = String(request.params.token || '')
+  invoicePayPage(response, { title: 'Not set up yet', body: `<p>No payment was taken and nothing has changed. You can <a href="/api/subscribe/${/^[a-f0-9]{32}$/.test(token) ? token : ''}" style="color:#0b3d2e;font-weight:700">try again</a> whenever you're ready.</p>` })
+})
 
 app.post('/api/stripe/create-checkout-session', async (request, response) => {
   if (!stripe) return response.status(503).json({ error: 'Stripe is not configured on the server.' })

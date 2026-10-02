@@ -1,5 +1,9 @@
-import React from 'react'
-import { DataTable, EditableText, StatusMenu, EmptyState, OPS_COLORS } from './ui'
+import React, { useEffect, useState } from 'react'
+import { DataTable, EditableText, StatusMenu, EmptyState, OpsButton, OPS_COLORS } from './ui'
+import { CreateArrearsModal, SubscriptionRequestModal, useAuthedFetch } from './FamilyBilling'
+
+const shortDate = (value) => (value ? new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '')
+const money = (pence) => `£${(Number(pence || 0) / 100).toFixed(2)}`
 
 function planLabel(planType) {
   return planType === 'monthly_membership' ? '£25 / month' : planType === 'day_pass' ? 'Day pass' : 'No plan'
@@ -15,7 +19,17 @@ function statusTone(label) {
   return value === 'active' ? 'green' : value === 'cancelled' ? 'red' : 'gold'
 }
 
-export default function SubscriptionsPage({ families, busyId, onAction, onSaveFamily }) {
+export default function SubscriptionsPage({ session, families, busyId, onAction, onSaveFamily, onRefresh = () => {} }) {
+  const authedFetch = useAuthedFetch(session)
+  const [requests, setRequests] = useState([])
+  const [billing, setBilling] = useState(null)
+  const [notice, setNotice] = useState('')
+  const loadRequests = () => authedFetch('/api/admin/subscription-requests').then((result) => setRequests(result.requests || [])).catch((error) => setNotice(error.message))
+  // Fresh family statuses and requests each time the page opens, so a parent who
+  // has just finished a subscription checkout shows as active.
+  useEffect(() => { loadRequests(); onRefresh() }, [])
+  const latestRequest = (family) => requests.find((item) => item.familyId === family.id)
+
   const columns = [
     {
       key: 'guardian', label: 'Guardian', render: (family) => (
@@ -67,11 +81,34 @@ export default function SubscriptionsPage({ families, busyId, onAction, onSaveFa
         <span style={{ color: OPS_COLORS.muted, fontSize: 12 }}>{family.stripe_subscription_id ? family.stripe_subscription_id.slice(0, 14) + '…' : 'No subscription'}</span>
       ),
     },
+    {
+      key: 'billing', label: 'Billing', render: (family) => {
+        const latest = latestRequest(family)
+        const live = Boolean(family.stripe_subscription_id) && family.membership_status === 'active'
+        return (
+          <div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <OpsButton small variant="ghost" disabled={!family.guardian_email} onClick={() => setBilling({ kind: 'arrears', familyId: family.id })}>Arrears…</OpsButton>
+              {!live && <OpsButton small variant="ghost" disabled={!family.guardian_email} onClick={() => setBilling({ kind: 'subscription', familyId: family.id })}>Subscription request…</OpsButton>}
+            </div>
+            {latest && (
+              <div style={{ fontSize: 11.5, marginTop: 4, color: latest.status === 'completed' ? OPS_COLORS.emerald : latest.status === 'failed' ? OPS_COLORS.warn : OPS_COLORS.muted }}>
+                {latest.status === 'completed' ? `Subscription request completed ${shortDate(latest.completedAt)}` : latest.status === 'failed' ? `Request email failed ${shortDate(latest.createdAt)}` : `Request sent ${shortDate(latest.createdAt)} · not completed yet`}
+              </div>
+            )}
+          </div>
+        )
+      },
+    },
   ]
+  const afterBilling = (message) => { setBilling(null); setNotice(message); loadRequests(); onRefresh() }
 
   return (
     <div className="panel">
       <div className="panel-head"><h3>Subscriptions</h3></div>
+      {notice && <p style={{ background: '#faf1d9', color: '#6b5310', padding: '8px 12px', borderRadius: 6, fontSize: 13.5 }}>{notice} <button type="button" onClick={() => setNotice('')} style={{ border: 0, background: 'none', cursor: 'pointer', color: 'inherit', fontWeight: 700 }}>×</button></p>}
+      {billing?.kind === 'arrears' && <CreateArrearsModal session={session} families={families} initialFamilyId={billing.familyId} onClose={() => setBilling(null)} onCreated={(result) => afterBilling(`Arrears ${result.invoiceNumber} for ${money(result.amountPence)} (${result.monthsLabel}) created and emailed to ${result.recipient}. It now shows under Arrears.`)} />}
+      {billing?.kind === 'subscription' && <SubscriptionRequestModal session={session} families={families} initialFamilyId={billing.familyId} onClose={() => setBilling(null)} onSent={(result) => afterBilling(`Subscription request (${result.plan.label}, ${result.children} ${result.children === 1 ? "child" : "children"}, £${(result.totalPence / 100).toFixed(2)}/month) emailed to ${result.recipient}.`)} />}
       <DataTable
         columns={columns}
         rows={families}

@@ -72,7 +72,7 @@ function ParentDashboard({ initialTab = '', session, family, bookings, students,
     { key: 'actions', label: '', render: (booking) => booking.status !== 'Cancelled' ? <OpsButton small variant="danger" onClick={() => onCancelBooking(booking.id)}>Cancel booking</OpsButton> : null },
   ]
   const invoiceColumns = [
-    { key: 'invoice', label: 'Invoice', render: (invoice) => <div><strong style={{ color: emerald }}>{invoice.invoiceNumber || 'Invoice'}</strong><div style={{ fontSize: 12, color: muted }}>{invoice.description}</div></div> },
+    { key: 'invoice', label: 'Invoice', render: (invoice) => <div><strong style={{ color: emerald }}>{invoice.invoiceNumber || 'Invoice'}</strong><div style={{ fontSize: 12, color: muted }}>{invoice.description}</div>{invoice.monthsLabel && <div style={{ fontSize: 12, color: emerald }}>Covers {invoice.monthsLabel}</div>}</div> },
     { key: 'amount', label: 'Amount', render: (invoice) => <strong>{poundsFromPence(invoice.amountPence)}</strong> },
     { key: 'due', label: 'Due', render: (invoice) => invoice.status === 'paid' ? (invoice.paidAt ? `Paid ${new Date(invoice.paidAt).toLocaleDateString('en-GB')}` : 'Paid') : <span style={{ color: invoice.daysOverdue > 0 ? '#a3401f' : undefined }}>{invoice.dueDate ? new Date(`${invoice.dueDate}T00:00:00`).toLocaleDateString('en-GB') : 'On receipt'}{invoice.daysOverdue > 0 ? ` (${invoice.daysOverdue} day${invoice.daysOverdue === 1 ? '' : 's'} overdue)` : ''}</span> },
     { key: 'status', label: 'Status', render: (invoice) => <Pill text={invoice.status === 'paid' ? 'Paid' : invoice.daysOverdue > 0 ? 'Overdue' : 'To pay'} tone={invoice.status === 'paid' ? 'green' : invoice.daysOverdue > 0 ? 'red' : 'gold'} /> },

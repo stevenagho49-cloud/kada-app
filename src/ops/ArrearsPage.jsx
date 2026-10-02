@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { OpsButton, Pill, EmptyState, Toggle, OPS_COLORS, OPS_SERIF, opsInputStyle } from './ui'
+import { CreateArrearsModal, SubscriptionRequestModal } from './FamilyBilling'
 
 /* ------------------------------------------------------------------ */
 /* Arrears (Sales > Arrears). Everyone with an unpaid, sent invoice,    */
@@ -20,7 +21,7 @@ function OverdueLabel({ days }) {
   return <strong style={{ color: days > 10 ? OPS_COLORS.warn : days >= 3 ? '#8a6d10' : OPS_COLORS.ink }}>{days} day{days === 1 ? '' : 's'} overdue</strong>
 }
 
-export function ArrearsPage({ session }) {
+export function ArrearsPage({ session, families = [], onBillingChanged = () => {} }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -30,6 +31,7 @@ export function ArrearsPage({ session }) {
   const [busy, setBusy] = useState('')
   const [reminderChoice, setReminderChoice] = useState({})
   const [showTemplates, setShowTemplates] = useState(false)
+  const [billing, setBilling] = useState('')
 
   const authedFetch = async (path, options = {}) => {
     const response = await fetch(path, {
@@ -120,7 +122,9 @@ export function ArrearsPage({ session }) {
             Unpaid invoices by who owes them. Reminders go out automatically on day {schedule.friendlyFromDay} overdue (friendly) and day {schedule.firmDay} (firmer), then stop; anything later is flagged for a personal follow-up. Being overdue never pauses or cancels a booking.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <OpsButton small onClick={() => setBilling('arrears')}>Create arrears</OpsButton>
+          <OpsButton small variant="ghost" onClick={() => setBilling('subscription')}>Send subscription request</OpsButton>
           <OpsButton small variant="ghost" onClick={() => setShowTemplates((value) => !value)}>{showTemplates ? 'Hide reminder emails' : 'Reminder emails'}</OpsButton>
           <OpsButton small variant="ghost" disabled={busy === 'run'} onClick={runCheck}>{busy === 'run' ? 'Checking…' : 'Run reminder check now'}</OpsButton>
         </div>
@@ -130,6 +134,8 @@ export function ArrearsPage({ session }) {
       {notice && <p style={{ background: '#faf1d9', color: '#6b5310', padding: '8px 12px', borderRadius: 6, fontSize: 13.5 }}>{notice} <button type="button" onClick={() => setNotice('')} style={{ border: 0, background: 'none', cursor: 'pointer', color: 'inherit', fontWeight: 700 }}>×</button></p>}
 
       {showTemplates && <ReminderTemplates authedFetch={authedFetch} />}
+      {billing === 'arrears' && <CreateArrearsModal session={session} families={families} onClose={() => setBilling('')} onCreated={(result) => { setBilling(''); setNotice(`Arrears ${result.invoiceNumber} for ${money(result.amountPence)} (${result.monthsLabel}) created and emailed to ${result.recipient}.`); load(); onBillingChanged() }} />}
+      {billing === 'subscription' && <SubscriptionRequestModal session={session} families={families} onClose={() => setBilling('')} onSent={(result) => { setBilling(''); setNotice(`Subscription request (${result.plan.label}, ${result.children} ${result.children === 1 ? "child" : "children"}, £${(result.totalPence / 100).toFixed(2)}/month) emailed to ${result.recipient}.`); onBillingChanged() }} />}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, margin: '6px 0 16px' }}>
         {[
@@ -190,6 +196,7 @@ export function ArrearsPage({ session }) {
                               <div>
                                 <div style={{ fontWeight: 700 }}>{invoice.invoiceNumber || 'Not numbered'} · {money(invoice.amountPence)}</div>
                                 <div style={{ fontSize: 12, color: OPS_COLORS.muted }}>{invoice.description}{invoice.workshopDate ? ` · workshop ${formatDate(invoice.workshopDate)}` : ''}</div>
+                                {invoice.monthsLabel && <div style={{ fontSize: 12, marginTop: 2 }}><Pill text="Manual arrears" tone="gold" /> <span style={{ color: OPS_COLORS.ink }}>Covers {invoice.monthsLabel}</span></div>}
                                 <div style={{ fontSize: 12, marginTop: 2 }}>Sent {formatDate(invoice.sentAt) || 'date unknown'} · due {formatDate(invoice.dueDate) || 'not set'} · <OverdueLabel days={invoice.daysOverdue} /></div>
                                 {invoice.needsFollowUp && <div style={{ marginTop: 4 }}><Pill text="Needs personal follow-up" tone="red" /></div>}
                               </div>

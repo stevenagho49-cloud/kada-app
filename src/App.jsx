@@ -1624,6 +1624,14 @@ function App() {
       setStudents((current) => current.map((item) => byId.get(item.id) || item))
     }
   }
+  // After staff create arrears or a subscription request (or open Subscriptions),
+  // reload families and bookings so new invoices and finished sign-ups show.
+  const refreshBilling = async () => {
+    if (!supabaseReady) return
+    const [familyResult, bookingResult] = await Promise.all([supabase.from('parent_families').select('*'), supabase.from('bookings').select('*')])
+    if (!familyResult.error) setFamilies(familyResult.data || [])
+    if (!bookingResult.error) setBookings((bookingResult.data || []).map(normalizeBooking))
+  }
   const runSubscriptionAction = async (family, action) => {
     setSubscriptionBusyId(family.id)
     try {
@@ -2022,8 +2030,8 @@ function App() {
           {can('homework') && tab === 'homework' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><HomeworkPage session={session} /></Suspense>}
           {can('sessions') && tab === 'session-types' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><SessionTypesPage session={session} onChanged={() => setSessionsVersion((version) => version + 1)} /></Suspense>}
           {can('formations') && tab === 'formations' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><FormationsPage session={session} /></Suspense>}
-          {can('sales') && tab === 'arrears' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><ArrearsPage session={session} /></Suspense>}
-          {(isAdmin || can('sales')) && tab === 'subscriptions' && <SubscriptionsPage families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
+          {can('sales') && tab === 'arrears' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><ArrearsPage session={session} families={families} onBillingChanged={refreshBilling} /></Suspense>}
+          {(isAdmin || can('sales')) && tab === 'subscriptions' && session && <SubscriptionsPage session={session} onRefresh={refreshBilling} families={families} busyId={subscriptionBusyId} onAction={runSubscriptionAction} onSaveFamily={saveFamily} />}
           {(isAdmin || can('students')) && tab === 'class-schedule' && <ClassSchedulePage sessions={classSessions} onSave={saveClassSession} onAdd={addClassSession} onDelete={deleteClassSession} />}
           {tab === 'template' && canSeeTemplate && <TemplateView template={template} onSave={saveTemplate} readOnly={!canEditTemplate} />}
           {tab === 'messages' && profile && <MessagesView messages={messages} myKind={myKind} myInstructorId={myInstructorId} mySchoolId={mySchoolId} schools={schools} instructors={instructors} canManage={canManageMessages} onSend={sendMessage} onMarkRead={markMessageRead} />}
