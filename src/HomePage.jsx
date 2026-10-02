@@ -3,6 +3,7 @@ import { flyerPublicUrl, formatEventTimeRange } from './ops/EventsPage'
 import { ClassDatePicker, DAY_NAMES, classEndedOnDate, nextClassDate, startOfToday } from './lib/classDates'
 import { DiscountCodeField, poundsFromPence } from './lib/DiscountCodeField'
 import { useClassPrices, priceLabel } from './lib/classPrices'
+import { TemplateBlock } from './site/BlockTemplates'
 
 const discountLabelStyle = { display: 'block', fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#767066', marginBottom: 8 }
 const discountButtonStyle = { border: '1px solid #ddd3b3', borderRadius: 8, background: '#0b3d2e', color: '#fffdf8', padding: '0 16px', fontWeight: 700, cursor: 'pointer' }
@@ -91,7 +92,7 @@ function ContactForm() {
   )
 }
 
-export default function HomePage({ SectionError, siteEvents, siteContent = {}, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, schoolQuotePence = 0, sessionTypeOptions = ['Full day (£490)', 'Half day', 'Single workshop', 'Custom'], valueItems, Modal }) {
+export default function HomePage({ SectionError, siteEvents, siteBlocks = [], siteContent = {}, sectionLayout, navigatePublicSection, openPublicForm, publicForm, setPublicForm, startClassCheckout, parentBooking, setParentBooking, checkoutBusy, classSessions = [], handleQuoteSubmit, schoolRequest, handleQuoteChange, quote, quotePrice, quoteStaff, schoolQuotePence = 0, sessionTypeOptions = ['Full day (£490)', 'Half day', 'Single workshop', 'Custom'], valueItems, Modal }) {
   const [classDiscount, setClassDiscount] = useState(null)
   const [schoolDiscount, setSchoolDiscount] = useState(null)
   // A £0 total skips Stripe, except a membership free only for its first month.
@@ -147,7 +148,42 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publicForm, parentBooking.className, classSessions])
 
+  // A built-in section given a template style in Homepage layout renders through
+  // the shared templates; without one it keeps its original design.
+  const layoutFor = (key) => (sectionLayout || []).find((section) => section.sectionKey === key) || {}
+  const templated = (key, buildBlock, original) => {
+    const { template, mirror } = layoutFor(key)
+    return template ? <TemplateBlock key={key} anchorId={key} template={template} mirror={mirror} block={buildBlock()} /> : original
+  }
+  const formCta = (form, label, anchor) => ({ label, href: `#${anchor}`, onClick: (event) => openPublicForm(event, form) })
+  const eventMeta = (siteEvent) => [siteEvent.eventDate ? new Date(`${siteEvent.eventDate}T00:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '', formatEventTimeRange(siteEvent.eventTime, siteEvent.eventEndTime), siteEvent.location].filter(Boolean).join(' · ')
+  const eventCta = (siteEvent) => (siteEvent.ticketingEnabled ? { label: 'Get tickets', href: `/event/${siteEvent.id}`, onClick: (event) => { event.preventDefault(); navigateTo(`/event/${siteEvent.id}`) } } : null)
+
+  // A custom content block (Homepage layout > Add content block) in template shape.
+  const blockView = (row) => {
+    const linked = row.event || null
+    const action = row.cta_action
+    const cta = action === 'book_class' ? formCta('class', row.cta_label || 'Book a class', 'class-booking')
+      : action === 'school_quote' ? formCta('school', row.cta_label || 'Get a quote', 'school-quote')
+        : action === 'event' && linked ? { ...eventCta(linked), label: row.cta_label || (linked.ticketingEnabled ? 'Get tickets' : 'Find out more'), href: `/event/${linked.id}`, onClick: (event) => { event.preventDefault(); navigateTo(`/event/${linked.id}`) } }
+          : action === 'link' && row.cta_url ? { label: row.cta_label || 'Find out more', href: row.cta_url, external: /^https?:/.test(row.cta_url) }
+            : null
+    return {
+      eyebrow: row.eyebrow,
+      title: row.title,
+      body: row.body,
+      meta: linked ? eventMeta(linked) : '',
+      imageUrl: row.image_url || (linked?.flyerPath ? flyerPublicUrl(linked.flyerPath) : ''),
+      cta,
+      items: (Array.isArray(row.items) ? row.items : []).filter((item) => item?.title).map((item) => ({ title: item.title, body: item.body || '', meta: item.meta || '', imageUrl: item.imageUrl || '' })),
+    }
+  }
+
   const renderSection = (sectionKey) => {
+    if (sectionKey.startsWith('block:')) {
+      const row = siteBlocks.find((item) => `block:${item.id}` === sectionKey)
+      return row ? <TemplateBlock key={sectionKey} anchorId={`block-${row.id}`} template={row.template} mirror={row.mirror} block={blockView(row)} /> : null
+    }
     switch (sectionKey) {
       case 'hero':
         return (
@@ -180,7 +216,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
           </section>
         )
       case 'about':
-        return (
+        return templated('about', () => ({ eyebrow: 'About KADA', title: `${about.title || 'More than dance.'} ${about.titleEmphasis || "It's a movement."}`, body: [about.paragraph1, about.paragraph2].filter(Boolean).join('\n\n'), imageUrl: aboutImg, cta: { label: about.ctaLabel || 'Learn More About Us', href: '#contact', onClick: (event) => navigatePublicSection(event, '#contact') } }), (
           <section className="about" id="about" key="about">
             <div className="wrap about-grid">
               <div className="about-img reveal" style={{ backgroundImage: `url('${aboutImg}')` }}></div>
@@ -193,7 +229,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
               </div>
             </div>
           </section>
-        )
+        ))
       case 'values':
         return (
           <section className="values" key="values">
@@ -216,7 +252,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
           </section>
         )
       case 'workshops':
-        return (
+        return templated('workshops', () => ({ eyebrow: workshops.eyebrow || 'For Schools', title: workshops.title || 'Bring your school to life through Afrobeats.', body: workshops.body || '', imageUrl: workshopsImg, cta: formCta('school', workshops.ctaLabel || 'Get a Quote', 'school-quote') }), (
           <section className="service dark" id="workshops" key="workshops">
             <div className="service-bg" style={{ backgroundImage: `url('${workshopsImg}')` }}></div>
             <div className="wrap"><div className="service-card reveal">
@@ -226,9 +262,9 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
               <a href="#school-quote" className="btn btn-solid" onClick={(event) => openPublicForm(event, 'school')}>{workshops.ctaLabel || 'Get a Quote'}</a>
             </div></div>
           </section>
-        )
+        ))
       case 'classes':
-        return (
+        return templated('classes', () => ({ eyebrow: classes.eyebrow || 'For Families', title: classes.title || 'Saturday classes, ages 5 to 15.', body: classes.body || '', imageUrl: classesImg, cta: formCta('class', classes.ctaLabel || 'Book a Saturday class', 'class-booking') }), (
           <React.Fragment key="classes">
             <section className="service light" id="classes">
               <div className="service-bg" style={{ backgroundImage: `url('${classesImg}')` }}></div>
@@ -240,6 +276,125 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
               </div></div>
             </section>
 
+          </React.Fragment>
+        ))
+      case 'events':
+        // No published, homepage-flagged events → hide the section completely
+        // rather than showing an empty "Upcoming events" block.
+        if (!siteEvents.length) return null
+        return templated('events', () => ({ eyebrow: "What's On", title: 'Upcoming events.', items: siteEvents.map((siteEvent) => ({ title: siteEvent.title, body: siteEvent.description || '', meta: eventMeta(siteEvent), imageUrl: siteEvent.flyerPath ? flyerPublicUrl(siteEvent.flyerPath) : '', cta: eventCta(siteEvent) })) }), (
+          <section className="events" id="events" key="events">
+            <div className="wrap">
+              <div className="section-head">
+                <span className="eyebrow">What's On</span>
+                <h2 className="display">Upcoming <em>events.</em></h2>
+              </div>
+              <div className="event-row reveal">
+                {siteEvents.map((siteEvent) => (
+                  <div className="event-card" key={siteEvent.id}>
+                    {siteEvent.flyerPath && (
+                      <img src={flyerPublicUrl(siteEvent.flyerPath)} alt={`${siteEvent.title} flyer`} style={{ width: '100%', height: 170, objectFit: 'cover', borderRadius: 10, marginBottom: 14, display: 'block' }} />
+                    )}
+                    <span className="event-date">
+                      {siteEvent.eventDate ? new Date(`${siteEvent.eventDate}T00:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Date to be announced'}
+                      {formatEventTimeRange(siteEvent.eventTime, siteEvent.eventEndTime) ? ` · ${formatEventTimeRange(siteEvent.eventTime, siteEvent.eventEndTime)}` : ''}
+                    </span>
+                    <h3 className="display">{siteEvent.title}</h3>
+                    {siteEvent.description && <p>{siteEvent.description}</p>}
+                    {siteEvent.location && <div className="event-loc">📍 {siteEvent.location}</div>}
+                    {siteEvent.ticketingEnabled && <a href={`/event/${siteEvent.id}`} className="btn btn-gold" onClick={(event) => { event.preventDefault(); navigateTo(`/event/${siteEvent.id}`) }} style={{ display: 'inline-block', marginTop: 12 }}>Get tickets</a>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        ))
+      case 'team':
+        return (
+          <section className="team" id="team" key="team">
+            <div className="wrap">
+              <div className="section-head">
+                <span className="eyebrow">{team.eyebrow || 'The People Behind KADA'}</span>
+                <h2 className="display">{team.title || 'Meet the team.'}</h2>
+              </div>
+              <div className="team-row reveal">
+                {teamMembers.map((member) => (
+                  <div className="team-card" key={member.name}>
+                    {member.photo
+                      ? <div className="photo" style={{ backgroundImage: `url('${member.photo}')` }}></div>
+                      : <div className="photo placeholder-photo"><span>Photo coming soon</span></div>}
+                    <div className="info"><div className="name display">{member.name}</div><div className="role">{member.role}</div></div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        )
+      case 'videos':
+        return (
+          <section className="videos" id="videos" key="videos">
+            <div className="wrap">
+              <div className="section-head">
+                <span className="eyebrow">In Their Own Words</span>
+                <h2 className="display">Real stories, <em>real confidence.</em></h2>
+              </div>
+
+              <div className="video-row reveal">
+                {[['A Parent’s Story', 'parent-review.mp4', 'parent-review-poster.jpg', 'landscape'], ['A Student’s Story', 'student-review.mp4', 'student-review-poster.jpg', 'portrait']].map(([label, file, poster, orientation]) => <div className="video-card" key={label}><div className={`video-frame video-frame-${orientation}`}><video controls preload="none" poster={videoAsset(poster)}><source src={videoAsset(file)} type="video/mp4" />Your browser cannot play this video.</video><span className="video-play" aria-hidden="true">▶</span></div><div className="video-caption"><div className="who display">{label}</div><div className="what">Watch the review</div></div></div>)}
+              </div>
+            </div>
+          </section>
+        )
+      case 'sponsors':
+        return (
+          <section className="sponsors partners" key="sponsors">
+            <div className="wrap">
+              <span className="eyebrow">As seen on</span>
+              <div className="partner-row reveal">
+                {[
+                  ['BBC', '/images/partners/bbc.png'],
+                  ['ITV', '/images/partners/itv.jpeg'],
+                  ['Commonwealth Games Birmingham 2022', '/images/partners/commonwealth-games-birmingham-2022.jpeg'],
+                  ['NHS', '/images/partners/nhs.png'],
+                  ["Britain's Got Talent", '/images/partners/britains-got-talent.jpeg'],
+                ].map(([name, src]) => <img key={name} src={src} alt={name} title={name} loading="lazy" />)}
+              </div>
+            </div>
+          </section>
+        )
+      case 'contact':
+        return (
+          <section className="contact" id="contact" key="contact">
+            <div className="wrap">
+              <div className="eyebrow">Get In Touch</div>
+              <h2 className="display">{contact.heading || "Let's talk."}</h2>
+              <p>{contact.intro || "Whether you're a parent, a school, or an organisation looking to partner with us, we'd love to hear from you."}</p>
+              <ContactForm />
+              <div className="contact-details">
+                <div><span className="k">Email</span><a href={`mailto:${contact.email || 'bookings@kingsarkdance.com'}`} style={{ color: 'inherit' }}>{contact.email || 'bookings@kingsarkdance.com'}</a></div>
+                <div><span className="k">Phone</span><a href={`tel:${(contact.phone || '+44 7535 897732').replace(/\s/g, '')}`} style={{ color: 'inherit' }}>{contact.phone || '+44 7535 897732'}</a></div>
+                <div><span className="k">Address</span>{contact.address || '395 College Rd, Birmingham B44 0HF'}</div>
+              </div>
+            </div>
+          </section>
+        )
+      default:
+        return null
+    }
+  }
+
+  const orderedVisibleSections = (sectionLayout && sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER)
+    .filter((section) => section.visible)
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+
+  return (
+    <div className="site-public">
+      {orderedVisibleSections.map((section) => {
+        const rendered = renderSection(section.sectionKey)
+        if (!rendered) return null
+        return SectionError ? <SectionError key={section.sectionKey}>{rendered}</SectionError> : rendered
+      })}
+      {/* The booking and quote forms open from any section or content block. */}
             {publicForm === 'class' && <Modal title="Reserve a place" onClose={() => setPublicForm(null)} wide><section className="quote-section" id="class-booking">
               <div className="wrap quote-wrap">
                 <div className="section-head left-align"><span className="eyebrow">Saturday Classes</span><h2 className="display">Reserve a place.</h2><p>Secure your child's place through secure checkout. The booking is confirmed after payment is completed.</p></div>
@@ -330,124 +485,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
                 </form>
               </div>
             </section></Modal>}
-          </React.Fragment>
-        )
-      case 'events':
-        // No published, homepage-flagged events → hide the section completely
-        // rather than showing an empty "Upcoming events" block.
-        if (!siteEvents.length) return null
-        return (
-          <section className="events" id="events" key="events">
-            <div className="wrap">
-              <div className="section-head">
-                <span className="eyebrow">What's On</span>
-                <h2 className="display">Upcoming <em>events.</em></h2>
-              </div>
-              <div className="event-row reveal">
-                {siteEvents.map((siteEvent) => (
-                  <div className="event-card" key={siteEvent.id}>
-                    {siteEvent.flyerPath && (
-                      <img src={flyerPublicUrl(siteEvent.flyerPath)} alt={`${siteEvent.title} flyer`} style={{ width: '100%', height: 170, objectFit: 'cover', borderRadius: 10, marginBottom: 14, display: 'block' }} />
-                    )}
-                    <span className="event-date">
-                      {siteEvent.eventDate ? new Date(`${siteEvent.eventDate}T00:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Date to be announced'}
-                      {formatEventTimeRange(siteEvent.eventTime, siteEvent.eventEndTime) ? ` · ${formatEventTimeRange(siteEvent.eventTime, siteEvent.eventEndTime)}` : ''}
-                    </span>
-                    <h3 className="display">{siteEvent.title}</h3>
-                    {siteEvent.description && <p>{siteEvent.description}</p>}
-                    {siteEvent.location && <div className="event-loc">📍 {siteEvent.location}</div>}
-                    {siteEvent.ticketingEnabled && <a href={`/event/${siteEvent.id}`} className="btn btn-gold" onClick={(event) => { event.preventDefault(); navigateTo(`/event/${siteEvent.id}`) }} style={{ display: 'inline-block', marginTop: 12 }}>Get tickets</a>}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
-        )
-      case 'team':
-        return (
-          <section className="team" id="team" key="team">
-            <div className="wrap">
-              <div className="section-head">
-                <span className="eyebrow">{team.eyebrow || 'The People Behind KADA'}</span>
-                <h2 className="display">{team.title || 'Meet the team.'}</h2>
-              </div>
-              <div className="team-row reveal">
-                {teamMembers.map((member) => (
-                  <div className="team-card" key={member.name}>
-                    {member.photo
-                      ? <div className="photo" style={{ backgroundImage: `url('${member.photo}')` }}></div>
-                      : <div className="photo placeholder-photo"><span>Photo coming soon</span></div>}
-                    <div className="info"><div className="name display">{member.name}</div><div className="role">{member.role}</div></div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
-        )
-      case 'videos':
-        return (
-          <section className="videos" id="videos" key="videos">
-            <div className="wrap">
-              <div className="section-head">
-                <span className="eyebrow">In Their Own Words</span>
-                <h2 className="display">Real stories, <em>real confidence.</em></h2>
-              </div>
 
-              <div className="video-row reveal">
-                {[['A Parent’s Story', 'parent-review.mp4', 'parent-review-poster.jpg', 'landscape'], ['A Student’s Story', 'student-review.mp4', 'student-review-poster.jpg', 'portrait']].map(([label, file, poster, orientation]) => <div className="video-card" key={label}><div className={`video-frame video-frame-${orientation}`}><video controls preload="none" poster={videoAsset(poster)}><source src={videoAsset(file)} type="video/mp4" />Your browser cannot play this video.</video><span className="video-play" aria-hidden="true">▶</span></div><div className="video-caption"><div className="who display">{label}</div><div className="what">Watch the review</div></div></div>)}
-              </div>
-            </div>
-          </section>
-        )
-      case 'sponsors':
-        return (
-          <section className="sponsors partners" key="sponsors">
-            <div className="wrap">
-              <span className="eyebrow">As seen on</span>
-              <div className="partner-row reveal">
-                {[
-                  ['BBC', '/images/partners/bbc.png'],
-                  ['ITV', '/images/partners/itv.jpeg'],
-                  ['Commonwealth Games Birmingham 2022', '/images/partners/commonwealth-games-birmingham-2022.jpeg'],
-                  ['NHS', '/images/partners/nhs.png'],
-                  ["Britain's Got Talent", '/images/partners/britains-got-talent.jpeg'],
-                ].map(([name, src]) => <img key={name} src={src} alt={name} title={name} loading="lazy" />)}
-              </div>
-            </div>
-          </section>
-        )
-      case 'contact':
-        return (
-          <section className="contact" id="contact" key="contact">
-            <div className="wrap">
-              <div className="eyebrow">Get In Touch</div>
-              <h2 className="display">{contact.heading || "Let's talk."}</h2>
-              <p>{contact.intro || "Whether you're a parent, a school, or an organisation looking to partner with us, we'd love to hear from you."}</p>
-              <ContactForm />
-              <div className="contact-details">
-                <div><span className="k">Email</span><a href={`mailto:${contact.email || 'bookings@kingsarkdance.com'}`} style={{ color: 'inherit' }}>{contact.email || 'bookings@kingsarkdance.com'}</a></div>
-                <div><span className="k">Phone</span><a href={`tel:${(contact.phone || '+44 7535 897732').replace(/\s/g, '')}`} style={{ color: 'inherit' }}>{contact.phone || '+44 7535 897732'}</a></div>
-                <div><span className="k">Address</span>{contact.address || '395 College Rd, Birmingham B44 0HF'}</div>
-              </div>
-            </div>
-          </section>
-        )
-      default:
-        return null
-    }
-  }
-
-  const orderedVisibleSections = (sectionLayout && sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER)
-    .filter((section) => section.visible)
-    .sort((a, b) => a.sortOrder - b.sortOrder)
-
-  return (
-    <div className="site-public">
-      {orderedVisibleSections.map((section) => {
-        const rendered = renderSection(section.sectionKey)
-        if (!rendered) return null
-        return SectionError ? <SectionError key={section.sectionKey}>{rendered}</SectionError> : rendered
-      })}
       <footer>
         <div className="wrap footer-row">
           <div>

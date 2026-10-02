@@ -315,6 +315,18 @@ function toDbJob(row) {
   return { id: row.id, booking_id: row.bookingId || null, date: row.date, session_type: row.sessionType, student_count: Number(row.studentCount || 0), location_area: row.locationArea, instructor_pay: Number(row.instructorPay || 0), status: row.status, claimed_by: row.claimedBy || null, rejection_reason: row.rejectionReason || null, published_at: row.publishedAt, claimed_at: row.claimedAt || null, decided_at: row.decidedAt || null }
 }
 
+// Homepage content blocks (published ones for visitors; all of them for staff
+// with the site area, via RLS), each with its linked published event attached.
+async function loadSiteBlocks() {
+  if (!supabaseReady) return null
+  const { data, error } = await supabase.from('site_blocks').select('*').order('created_at')
+  if (error) return null
+  const eventIds = [...new Set((data || []).map((row) => row.event_id).filter(Boolean))]
+  const { data: linked } = eventIds.length ? await supabase.from('events').select('*').in('id', eventIds).eq('status', 'published') : { data: [] }
+  const byId = new Map((linked || []).map((row) => [row.id, normalizeEvent(row)]))
+  return (data || []).map((row) => ({ ...row, event: byId.get(row.event_id) || null }))
+}
+
 async function loadTable(tableName, fallback) {
   if (!supabaseReady) {
     return parseStored(tableName, fallback)
@@ -895,6 +907,8 @@ function App() {
   const [paymentLinkFocus, setPaymentLinkFocus] = useState('')
   const [siteEvents, setSiteEvents] = useState([])
   const [sectionLayout, setSectionLayout] = useState([])
+  // Custom homepage content blocks (Homepage layout > Add content block).
+  const [siteBlocks, setSiteBlocks] = useState([])
   const [siteContent, setSiteContent] = useState({})
   const [classSessions, setClassSessions] = useState([])
   const [classSessionsVersion, setClassSessionsVersion] = useState(0)
@@ -1151,9 +1165,10 @@ function App() {
     let mounted = true
     supabase.from('site_sections').select('*').order('sort_order').then(({ data, error }) => {
       if (mounted && !error && data?.length) {
-        setSectionLayout(data.map((row) => ({ sectionKey: row.section_key, label: row.label, visible: row.visible, sortOrder: row.sort_order })))
+        setSectionLayout(data.map((row) => ({ sectionKey: row.section_key, label: row.label, visible: row.visible, sortOrder: row.sort_order, template: row.template || '', mirror: Boolean(row.mirror) })))
       }
     })
+    loadSiteBlocks().then((blocks) => { if (mounted && blocks) setSiteBlocks(blocks) })
     return () => { mounted = false }
   }, [view])
 
@@ -1587,8 +1602,35 @@ function App() {
   }
   const saveSectionLayout = async (next) => {
     setSectionLayout(next)
-    const { error } = await supabase.from('site_sections').upsert(next.map((section) => ({ section_key: section.sectionKey, label: section.label, visible: section.visible, sort_order: section.sortOrder })))
-    setToast(error ? `Layout could not be saved: ${error.message}` : 'Homepage layout updated.')
+    const { error } = await supabase.from('site_sections').upsert(next.map((section) => ({ section_key: section.sectionKey, label: section.label, visible: section.visible, sort_order: section.sortOrder, template: section.template || null, mirror: Boolean(section.mirror) })))
+    setToast(error ? `Layout could not be saved: ${/template|mirror/.test(error.message) ? 'apply supabase/migrations/20261003_site_block_templates.sql first' : error.message}` : 'Homepage layout updated.')
+  }
+  // Create or edit a content block; a new one is added to the end of the homepage.
+  const saveSiteBlock = async (block) => {
+    const isNew = !block.id
+    const id = block.id || `blk-${crypto.randomUUID().slice(0, 12)}`
+    const row = { id, kind: block.kind, template: block.template, mirror: Boolean(block.mirror), eyebrow: block.eyebrow || '', title: block.title, body: block.body || '', image_url: block.image_url || '', cta_label: block.cta_label || '', cta_action: block.cta_action || 'none', cta_url: block.cta_url || '', event_id: block.event_id || null, items: block.items || [], published: block.published !== false, updated_at: new Date().toISOString() }
+    const { error } = await supabase.from('site_blocks').upsert(row, { onConflict: 'id' })
+    if (error) { setToast(`Content block could not be saved: ${/site_blocks/.test(error.message) ? 'apply supabase/migrations/20261003_site_block_templates.sql first' : error.message}`); return null }
+    const layout = sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER
+    const sectionKey = `block:${id}`
+    const existing = layout.find((section) => section.sectionKey === sectionKey)
+    const section = existing ? { ...existing, label: row.title } : { sectionKey, label: row.title, visible: true, sortOrder: Math.max(0, ...layout.map((item) => item.sortOrder)) + 10, template: '', mirror: false }
+    const { error: sectionError } = await supabase.from('site_sections').upsert({ section_key: section.sectionKey, label: section.label, visible: section.visible, sort_order: section.sortOrder, template: null, mirror: false })
+    if (sectionError) { setToast(`The block was saved but could not be placed on the homepage: ${sectionError.message}`); return null }
+    setSectionLayout([...layout.filter((item) => item.sectionKey !== sectionKey), section])
+    const blocks = await loadSiteBlocks()
+    if (blocks) setSiteBlocks(blocks)
+    setToast(isNew ? `"${row.title}" added to the homepage.` : `"${row.title}" saved.`)
+    return id
+  }
+  const deleteSiteBlock = async (id) => {
+    const { error } = await supabase.from('site_blocks').delete().eq('id', id)
+    if (error) { setToast(`Content block could not be deleted: ${error.message}`); return }
+    await supabase.from('site_sections').delete().eq('section_key', `block:${id}`)
+    setSectionLayout((current) => current.filter((section) => section.sectionKey !== `block:${id}`))
+    setSiteBlocks((current) => current.filter((block) => block.id !== id))
+    setToast('Content block removed from the homepage.')
   }
   const saveSiteContent = async (key, value) => {
     setSiteContent((current) => ({ ...current, [key]: value }))
@@ -1910,6 +1952,7 @@ function App() {
         <HomePage
           SectionError={SectionError}
           siteEvents={siteEvents}
+          siteBlocks={siteBlocks}
           siteContent={siteContent}
           sectionLayout={sectionLayout}
           navigatePublicSection={navigatePublicSection}
@@ -2029,7 +2072,7 @@ function App() {
           {(isAdmin || can('schools')) && tab === 'schools' && <div className="panel"><div className="panel-head"><h3>Schools</h3><Button small onClick={() => setSchoolModal(emptySchool())}>Add school</Button></div><input style={{ ...inputStyle, marginBottom: 12 }} placeholder="Search schools" value={schoolSearch} onChange={(event) => setSchoolSearch(event.target.value)} /><SchoolsTable schools={visibleSchools} bookings={bookings} expanded={showAllSchools} onToggleExpand={() => setShowAllSchools(!showAllSchools)} onSaveSchool={saveSchool} onView={setSchoolRecord} onMessage={(school) => setMessageTarget({ kind: 'school', id: school.id, name: school.name })} /></div>}
           {isAdmin && tab === 'instructors' && <div className="panel"><div className="panel-head"><h3>Instructors and assignments</h3><Button small onClick={() => setInstructorModal({ id: crypto.randomUUID(), name: '', email: '', phone: '', rate: 100, locationAreas: '', gender: '', dbsStatus: 'Missing' })}>Add instructor</Button></div><div style={{ display: 'grid', gridTemplateColumns: '1fr 180px', gap: 8, marginBottom: 12 }}><input style={inputStyle} placeholder="Search by name, location, gender" value={instructorSearch} onChange={(event) => setInstructorSearch(event.target.value)} /><select style={inputStyle} value={instructorSort} onChange={(event) => setInstructorSort(event.target.value)}><option value="name">Sort by name</option><option value="location">Sort by location</option><option value="gender">Sort by gender</option><option value="completed">Sort by completed</option></select></div><InstructorsTable instructors={visibleInstructors} expanded={showAllInstructors} onToggleExpand={() => setShowAllInstructors(!showAllInstructors)} completedBy={completedByInstructor} onSaveInstructor={saveInstructor} onMessage={(instructor) => setMessageTarget({ kind: 'instructor', id: instructor.id, name: instructor.name })} onEdit={setInstructorModal} onOpenDbs={openDbsFile} onReviewDbs={reviewDbs} /></div>}
           {can('events') && (tab === 'events-published' || tab === 'events-drafts' || tab === 'events-archived') && <EventsPage view={tab === 'events-published' ? 'published' : tab === 'events-archived' ? 'archived' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} session={session} />}
-          {can('site') && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} />}
+          {can('site') && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} blocks={siteBlocks} events={events} onSaveBlock={saveSiteBlock} onDeleteBlock={deleteSiteBlock} />}
           {can('site') && tab === 'site-content' && <SiteContentPage content={siteContent} onSave={saveSiteContent} />}
           {can('sales') && tab === 'payment-links' && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><PaymentLinksPage focusLinkId={paymentLinkFocus} onFocusHandled={() => setPaymentLinkFocus('')} /></Suspense>}
           {can('attendance') && tab === 'attendance' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><AttendancePage session={session} isAdmin={isAdmin} /></Suspense>}
