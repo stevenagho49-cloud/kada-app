@@ -86,11 +86,11 @@ export default function SubscriptionsPage({ session, families, busyId, onAction,
       key: 'plan', label: 'Plan', render: (family) => family.membership_pricing === 'per_child' ? (
         <div>
           <div style={{ color: OPS_COLORS.ink }}>Monthly Membership · {money(family.membership_monthly_pence || 0)}/month</div>
-          <div style={{ fontSize: 11.5, color: OPS_COLORS.muted }}>{family.membership_children ? `${family.membership_children} ${family.membership_children === 1 ? 'child' : 'children'} × £25 (per child)` : 'Per child'}</div>
+          <div style={{ fontSize: 11.5, color: OPS_COLORS.muted }}>{family.membership_children ? `${family.membership_children} ${family.membership_children === 1 ? 'child' : 'children'} × ${money(Math.round((family.membership_monthly_pence || 0) / family.membership_children))} (per child)` : 'Per child'}</div>
         </div>
       ) : (
         <div>
-          <div style={{ color: OPS_COLORS.ink }}>Monthly Membership · {money(family.membership_monthly_pence || 2500)}/month</div>
+          <div style={{ color: OPS_COLORS.ink }}>Monthly Membership{family.membership_monthly_pence ? ` · ${money(family.membership_monthly_pence)}/month` : ''}</div>
           <div style={{ fontSize: 11.5, color: OPS_COLORS.muted }}>Old flat rate per family, kept until you switch it</div>
         </div>
       ),
@@ -119,7 +119,7 @@ export default function SubscriptionsPage({ session, families, busyId, onAction,
             onChange={(action) => {
               if (action.startsWith('set:')) onSaveFamily(family, { membership_status: action.slice(4) })
               else if (action === 'per-child') {
-                if (window.confirm(`Switch ${family.guardian_name || 'this family'} from the flat £25/month to £25 per child? The new amount starts from their next payment, and they'll be emailed about it.`)) onAction(family, action)
+                if (window.confirm(`Switch ${family.guardian_name || 'this family'} from their flat rate${family.membership_monthly_pence ? ` (${money(family.membership_monthly_pence)}/month)` : ''} to the Monthly Membership price per child? The new amount starts from their next payment, and they'll be emailed about it.`)) onAction(family, action)
               } else onAction(family, action)
             }}
           />

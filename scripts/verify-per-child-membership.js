@@ -14,6 +14,11 @@ import Stripe from 'stripe'
 //   4. Day Pass for 2 children is £20, and £16 with the 20% code
 //   5. A family on the old flat £25 rate keeps quantity 1 through the sweep, until
 //      an admin uses "Switch to per-child pricing", which makes it 3 × £25
+//   6. Prices have one source: /api/public/class-prices is Stripe's prices, the
+//      homepage shows them, and shows whatever that endpoint says (not a copy)
+//   7. A family with an active membership can't start a second one: in their
+//      dashboard the class is "included" (no checkout, no new subscription), and
+//      the public form refuses their email unless they sign in
 // Everything is removed at the end (Stripe test subscriptions cancelled).
 //
 // Requires: node server/index.js on PORT (default 4242) serving a build of this
@@ -174,6 +179,47 @@ async function run() {
     const swept = await authed('/api/admin/memberships/sync', { familyId: family.id })
     subscription = await stripe.subscriptions.retrieve(afterPay.stripe_subscription_id)
     check('Child removed: back to quantity 2 (£50/month)', swept.changed && swept.children === 2 && subscription.items.data[0].quantity === 2, `qty ${subscription.items.data[0].quantity}`)
+
+    /* 7. An existing member books another class: included, no second subscription. */
+    const subscriptionsBefore = (await stripe.subscriptions.list({ customer: afterPay.stripe_customer_id, status: 'all' })).data.length
+    await parent.goto(`${serverBase}/?r=4#ops/book-class`)
+    await parent.getByRole('heading', { name: 'Book a class' }).waitFor({ timeout: 30000 })
+    await parent.getByText('You already have a Monthly Membership, so this class is').waitFor({ timeout: 15000 })
+    check('Member sees the class is included, with no discount box or payment', await parent.getByLabel('Discount code').count() === 0 && await parent.getByRole('button', { name: 'Book (included in membership)' }).count() === 1)
+    await shot(parent, 'member-included-form')
+    await parent.getByRole('button', { name: 'Book (included in membership)' }).click()
+    await parent.getByText("You're booked in!").waitFor({ timeout: 30000 })
+    await shot(parent, 'member-included-booked')
+    const { data: includedBooking } = await service.from('bookings').select('price,payment_status,notes,status').eq('family_id', family.id).ilike('notes', 'Included in the family%').maybeSingle()
+    const { data: memberAfter } = await service.from('parent_families').select('stripe_subscription_id').eq('id', family.id).single()
+    const subscriptionsAfter = (await stripe.subscriptions.list({ customer: afterPay.stripe_customer_id, status: 'all' })).data.length
+    check('Booked as included: £0, confirmed, same subscription, no new one in Stripe', includedBooking?.price === 0 && includedBooking.status === 'Confirmed' && memberAfter.stripe_subscription_id === afterPay.stripe_subscription_id && subscriptionsAfter === subscriptionsBefore, `${subscriptionsBefore} → ${subscriptionsAfter} subscriptions`)
+    const anonymous = await fetch(`${serverBase}/api/stripe/create-checkout-session`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: serverBase }, body: JSON.stringify({ planType: 'monthly_membership', className: (await service.from('class_sessions').select('name').eq('active', true).limit(1).single()).data.name, classDate: '2099-01-01', parentName: 'Someone', parentEmail, students: [{ name: 'Extra Child', dateOfBirth: '2015-01-01' }] }) })
+    // The date check runs first for a bad date; use a real one below.
+    const { data: memberClass } = await service.from('class_sessions').select('name,day_of_week').eq('active', true).limit(1).single()
+    const nowDate = new Date(); const ahead = (Number(memberClass.day_of_week) - nowDate.getUTCDay() + 7) % 7 || 7
+    const memberDate = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() + ahead)).toISOString().slice(0, 10)
+    const signedOut = await fetch(`${serverBase}/api/stripe/create-checkout-session`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: serverBase }, body: JSON.stringify({ planType: 'monthly_membership', className: memberClass.name, classDate: memberDate, parentName: 'Someone', parentEmail, students: [{ name: 'Extra Child', dateOfBirth: '2015-01-01' }] }) })
+    const signedOutBody = await signedOut.json()
+    check("Public form with a member's email: refused (409), nothing created", anonymous.status === 400 && signedOut.status === 409 && /already has an active Monthly Membership/.test(signedOutBody.error) && (await service.from('students').select('id').eq('family_id', family.id).eq('name', 'Extra Child')).data.length === 0, signedOutBody.error)
+
+    /* 6. One price source. */
+    const stripePrices = { monthly_membership: (await stripe.prices.retrieve(process.env.STRIPE_MONTHLY_PRICE_ID)).unit_amount, day_pass: (await stripe.prices.retrieve(process.env.STRIPE_DAY_PASS_PRICE_ID)).unit_amount }
+    const served = await fetch(`${serverBase}/api/public/class-prices`).then((response) => response.json())
+    check('Price endpoint is exactly the Stripe prices', served.monthly_membership === stripePrices.monthly_membership && served.day_pass === stripePrices.day_pass, JSON.stringify(served))
+    const visitor = await browser.newPage({ viewport: { width: 1280, height: 1000 } })
+    const homepagePlans = async () => {
+      await visitor.goto(`${serverBase}/?v=${Date.now()}`)
+      await visitor.locator('a[href="#class-booking"]').first().click()
+      await visitor.waitForFunction(() => { const option = document.querySelector('option[value=monthly_membership]'); return option && !option.textContent.includes('…') }, null, { timeout: 30000 })
+      return visitor.evaluate(() => [...document.querySelectorAll('option[value=monthly_membership], option[value=day_pass]')].map((option) => option.textContent).join(' | '))
+    }
+    const realPlans = await homepagePlans()
+    check('Homepage shows the Stripe prices: £25/month per child, £10 per child', realPlans.includes(`£${stripePrices.monthly_membership / 100}/month per child`) && realPlans.includes(`£${stripePrices.day_pass / 100} per child`), realPlans)
+    await visitor.route('**/api/public/class-prices', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ monthly_membership: 3000, day_pass: 1200 }) }))
+    const fedPlans = await homepagePlans()
+    check('Homepage follows the price source (fed £30/£12, shows £30/£12): no copy of its own', fedPlans.includes('£30/month per child') && fedPlans.includes('£12 per child'), fedPlans)
+    await visitor.close()
 
     /* 4. Day Pass is per child too. */
     const parentToken = (await createClient(supabaseUrl, process.env.VITE_SUPABASE_ANON_KEY, { auth: { persistSession: false } }).auth.signInWithPassword({ email: parentEmail, password: parentPassword })).data.session.access_token

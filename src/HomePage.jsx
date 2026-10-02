@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { flyerPublicUrl, formatEventTimeRange } from './ops/EventsPage'
 import { ClassDatePicker, DAY_NAMES, classEndedOnDate, nextClassDate, startOfToday } from './lib/classDates'
 import { DiscountCodeField, poundsFromPence } from './lib/DiscountCodeField'
+import { useClassPrices, priceLabel } from './lib/classPrices'
 
 const discountLabelStyle = { display: 'block', fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#767066', marginBottom: 8 }
 const discountButtonStyle = { border: '1px solid #ddd3b3', borderRadius: 8, background: '#0b3d2e', color: '#fffdf8', padding: '0 16px', fontWeight: 700, cursor: 'pointer' }
@@ -113,19 +114,20 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
     { label: 'YouTube', url: social.youtube },
     { label: 'Facebook', url: social.facebook },
   ].filter((link) => link.url)
-  const prices = siteContent.prices || {}
   const images = siteContent.images || {}
   const heroImg = images.hero || '/images/hero-workshop.jpeg'
   const heroFloatImg = images.heroFloat || '/images/nVgB0rjQ.jpeg'
   const aboutImg = images.about || '/images/about-kada.jpeg'
   const workshopsImg = images.workshopsBg || '/images/u.dance sunday warm up2.JPG'
   const classesImg = images.classesBg || '/images/u.dance saturday20.JPG'
-  const membershipPounds = (prices.membershipPence ?? 2500) / 100
-  const dayPassPounds = (prices.dayPassPence ?? 1000) / 100
-  // Priced per child; a discount code comes off the total.
+  // Per-child prices from Stripe (what checkout charges); a discount code comes off the total.
+  const classPriceList = useClassPrices()
+  const membershipPence = classPriceList?.monthly_membership ?? null
+  const dayPassPence = classPriceList?.day_pass ?? null
   const isMembershipBooking = parentBooking.planType === 'monthly_membership'
   const classChildren = Math.max(1, parentBooking.students.length)
-  const classBasePence = Math.round((isMembershipBooking ? membershipPounds : dayPassPounds) * 100) * classChildren
+  const classUnitPence = isMembershipBooking ? membershipPence : dayPassPence
+  const classBase = classUnitPence === null ? '£…' : poundsFromPence(classUnitPence * classChildren)
   const teamMembers = Array.isArray(team.members) && team.members.length ? team.members : [
     { name: 'Steven', role: 'Founder & Lead Instructor', photo: '/images/team-steven.jpg' },
     { name: 'Temilade', role: 'Programme Coordinator', photo: '' },
@@ -242,7 +244,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
               <div className="wrap quote-wrap">
                 <div className="section-head left-align"><span className="eyebrow">Saturday Classes</span><h2 className="display">Reserve a place.</h2><p>Secure your child's place through secure checkout. The booking is confirmed after payment is completed.</p></div>
                 <form className="quote-form" onSubmit={startClassCheckout}>
-                  <label><span>Plan</span><select value={parentBooking.planType} onChange={(event) => setParentBooking({ ...parentBooking, planType: event.target.value })}><option value="monthly_membership">Monthly Membership (£{membershipPounds}/month per child)</option><option value="day_pass">Day Pass (£{dayPassPounds} per child)</option></select></label>
+                  <label><span>Plan</span><select value={parentBooking.planType} onChange={(event) => setParentBooking({ ...parentBooking, planType: event.target.value })}><option value="monthly_membership">Monthly Membership ({priceLabel(membershipPence)}/month per child)</option><option value="day_pass">Day Pass ({priceLabel(dayPassPence)} per child)</option></select></label>
                   {classSessions.length === 0 ? (
                     <p className="class-date-hint">Class times are being finalised. Please check back shortly.</p>
                   ) : (
@@ -255,7 +257,7 @@ export default function HomePage({ SectionError, siteEvents, siteContent = {}, s
                   <label><span>Parent / guardian email</span><input type="email" value={parentBooking.parentEmail} onChange={(event) => setParentBooking({ ...parentBooking, parentEmail: event.target.value })} required /></label>
                   <div><span className="label">Children</span>{parentBooking.students.map((student, index) => <div key={index} className="student-row"><input aria-label={`Child ${index + 1} name`} placeholder="Child name" value={student.name} onChange={(event) => { const students = [...parentBooking.students]; students[index] = { ...student, name: event.target.value }; setParentBooking({ ...parentBooking, students }) }} required /><input aria-label={`Child ${index + 1} date of birth`} type="date" value={student.dateOfBirth} onChange={(event) => { const students = [...parentBooking.students]; students[index] = { ...student, dateOfBirth: event.target.value }; setParentBooking({ ...parentBooking, students }) }} required />{index > 0 && <button type="button" className="remove-child" onClick={() => setParentBooking({ ...parentBooking, students: parentBooking.students.filter((_, childIndex) => childIndex !== index) })}>Remove</button>}</div>)}<button type="button" className="add-child" onClick={() => setParentBooking({ ...parentBooking, students: [...parentBooking.students, { name: '', dateOfBirth: '' }] })}>+ Add another child</button></div>
                   <div style={{ marginTop: 18 }}><DiscountCodeField scope="class" request={{ planType: parentBooking.planType, children: classChildren }} value={parentBooking.discountCode || ''} onChange={(code) => setParentBooking({ ...parentBooking, discountCode: code })} onApplied={setClassDiscount} labelStyle={discountLabelStyle} buttonStyle={discountButtonStyle} /></div>
-                  <div className="quote-summary"><div><span className="label">Price</span><strong>{classDiscount ? `${poundsFromPence(classDiscount.totalPence)}${isMembershipBooking ? (classDiscount.membershipDuration === 'forever' ? ' / month' : ` first month, then ${poundsFromPence(classBasePence)}/month`) : ''}` : `${poundsFromPence(classBasePence)}${isMembershipBooking ? ' / month' : ''}`}</strong><span style={{ display: 'block', fontSize: 12, opacity: 0.75 }}>{classChildren} {classChildren === 1 ? 'child' : 'children'} × £{isMembershipBooking ? membershipPounds : dayPassPounds}{isMembershipBooking ? ' (covers every child on your account)' : ''}</span></div><div><span className="label">Payment</span><strong>{classFree ? 'Free' : parentBooking.planType === 'monthly_membership' ? 'Recurring' : 'One-time'}</strong></div></div>
+                  <div className="quote-summary"><div><span className="label">Price</span><strong>{classDiscount ? `${poundsFromPence(classDiscount.totalPence)}${isMembershipBooking ? (classDiscount.membershipDuration === 'forever' ? ' / month' : ` first month, then ${classBase}/month`) : ''}` : `${classBase}${isMembershipBooking ? ' / month' : ''}`}</strong><span style={{ display: 'block', fontSize: 12, opacity: 0.75 }}>{classChildren} {classChildren === 1 ? 'child' : 'children'} × {priceLabel(classUnitPence)}{isMembershipBooking ? ' (covers every child on your account)' : ''}</span></div><div><span className="label">Payment</span><strong>{classFree ? 'Free' : parentBooking.planType === 'monthly_membership' ? 'Recurring' : 'One-time'}</strong></div></div>
                   <button type="submit" className="btn btn-gold submit-btn" disabled={checkoutBusy || !parentBooking.classDate || !classSessions.length}>{checkoutBusy ? 'Opening checkout…' : classFree ? 'Confirm free booking' : 'Continue to payment'}</button>
                 </form>
               </div>

@@ -5,6 +5,7 @@
 // before relying on them formally.
 
 import { useSiteLogo } from './lib/useSiteLogo'
+import { useClassPrices, priceLabel } from './lib/classPrices'
 
 const emerald = '#0b3d2e'
 const gold = '#c9a227'
@@ -83,8 +84,8 @@ const LEGAL_CONTENT = {
       {
         heading: 'Classes and memberships',
         paragraphs: [
-          'Monthly membership is £25/month for each child on your account, as a rolling subscription paid through Stripe. If you add or remove a child, the monthly amount changes from your next payment. Any discount code applies to the total. You can cancel at any time from your parent dashboard or the Stripe billing portal. Cancellation stops future payments and your child\u2019s place remains active until the end of the paid period.',
-          'A Day Pass is £10 per child and covers one scheduled class date for the children named at checkout.',
+          'Monthly membership is {{membership}}/month for each child on your account, as a rolling subscription paid through Stripe. If you add or remove a child, the monthly amount changes from your next payment. Any discount code applies to the total. You can cancel at any time from your parent dashboard or the Stripe billing portal. Cancellation stops future payments and your child\u2019s place remains active until the end of the paid period.',
+          'A Day Pass is {{day_pass}} per child and covers one scheduled class date for the children named at checkout.',
           'Class places are confirmed only after payment completes. If a class is full or cancelled by us, we will offer an alternative date or a full refund.',
         ],
       },
@@ -162,6 +163,9 @@ const LEGAL_CONTENT = {
 export function LegalPage({ page, onBack }) {
   const logoUrl = useSiteLogo()
   const content = LEGAL_CONTENT[page] || LEGAL_CONTENT.privacy
+  // Class prices are the live Stripe prices, never a copy typed into the text.
+  const prices = useClassPrices()
+  const fill = (text) => text.replace('{{membership}}', priceLabel(prices?.monthly_membership)).replace('{{day_pass}}', priceLabel(prices?.day_pass))
   return (
     <div style={{ minHeight: '100vh', background: cream, fontFamily: sans, color: ink }}>
       <header style={{ background: emerald, color: ivory }}>
@@ -185,7 +189,7 @@ export function LegalPage({ page, onBack }) {
             <section key={section.heading} style={{ borderTop: `1px solid ${rule}`, paddingTop: 18, marginBottom: 18 }}>
               <h2 style={{ fontFamily: serif, fontSize: 20, fontWeight: 400, margin: '0 0 8px', color: emerald }}>{section.heading}</h2>
               {section.paragraphs.map((paragraph, index) => (
-                <p key={index} style={{ fontSize: 14, lineHeight: 1.7, color: ink, margin: '0 0 10px' }}>{paragraph}</p>
+                <p key={index} style={{ fontSize: 14, lineHeight: 1.7, color: ink, margin: '0 0 10px' }}>{fill(paragraph)}</p>
               ))}
             </section>
           ))}

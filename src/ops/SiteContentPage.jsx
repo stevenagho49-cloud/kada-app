@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ImageField, OpsButton, OPS_COLORS, opsInputStyle } from './ui'
 import { AddressAutocomplete } from '../lib/AddressAutocomplete'
+import { useClassPrices, priceLabel } from '../lib/classPrices'
 
 /* ------------------------------------------------------------------ */
 /* Operations > Site > Site content ,  edit homepage copy, team,        */
@@ -51,6 +52,7 @@ function ContentSection({ title, description, children, onSave, saving, dirty })
 }
 
 export function SiteContentPage({ content, onSave }) {
+  const classPrices = useClassPrices()
   // Local drafts per key; dirty tracking per section so each has its own Save.
   const [drafts, setDrafts] = useState(() => ({ ...content }))
   const [dirty, setDirty] = useState({})
@@ -155,11 +157,10 @@ export function SiteContentPage({ content, onSave }) {
         <AddressField label="Address" value={d('contact').address || ''} onChange={(value) => edit('contact', { address: value })} />
       </ContentSection>
 
-      <ContentSection title="Prices" description="Class plan prices shown on the booking form. The Stripe prices themselves are set in Stripe ,  these must match what Stripe charges." dirty={dirty.prices} saving={savingKey === 'prices'} onSave={() => save('prices')}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <TextField label="Monthly membership (£)" type="number" value={String((d('prices').membershipPence ?? 2500) / 100)} onChange={(value) => edit('prices', { membershipPence: Math.round(Number(value || 0) * 100) })} />
-          <TextField label="Day pass (£)" type="number" value={String((d('prices').dayPassPence ?? 1000) / 100)} onChange={(value) => edit('prices', { dayPassPence: Math.round(Number(value || 0) * 100) })} />
-        </div>
+      <ContentSection title="Prices" description="Workshop prices shown on the school quote form." dirty={dirty.prices} saving={savingKey === 'prices'} onSave={() => save('prices')}>
+        <p style={{ margin: '0 0 12px', fontSize: 13, color: OPS_COLORS.muted }}>
+          Class prices are read live from Stripe, the same prices checkout charges, so the website can never show a different number: Monthly Membership <strong style={{ color: OPS_COLORS.ink }}>{priceLabel(classPrices?.monthly_membership)}/month per child</strong>, Day Pass <strong style={{ color: OPS_COLORS.ink }}>{priceLabel(classPrices?.day_pass)} per child</strong>. To change them, change the prices in Stripe.
+        </p>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
           <TextField label="Workshop: full day (£)" type="number" value={String(d('prices').workshopFullDayPounds ?? 490)} onChange={(value) => edit('prices', { workshopFullDayPounds: Number(value || 0) })} />
           <TextField label="Workshop: half day (£)" type="number" value={String(d('prices').workshopHalfDayPounds ?? 260)} onChange={(value) => edit('prices', { workshopHalfDayPounds: Number(value || 0) })} />
