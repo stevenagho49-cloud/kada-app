@@ -1854,3 +1854,7 @@ footer {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Operations > Students: rows open the student's record. */
+.student-row-link:hover,
+.student-row-link:focus-visible { background: #f6f1e2; outline: none; }

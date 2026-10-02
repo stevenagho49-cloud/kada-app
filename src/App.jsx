@@ -17,6 +17,7 @@ import { SiteAnalytics } from './ops/SiteAnalytics'
 import { PaymentsPanel } from './ops/PaymentsPanel'
 import { useAttendanceRows, AttendanceDots } from './ops/attendanceShared'
 import { childStats, formatRate } from './ops/attendanceStats'
+import { StudentRecord } from './ops/StudentRecord'
 import HomePage, { DEFAULT_SECTION_ORDER } from './HomePage'
 import { applySiteFavicon } from './lib/useSiteLogo'
 
@@ -635,11 +636,13 @@ function NeedsAttention({ jobs, bookings, instructors, messages, schools, signup
   return <Card style={{ padding: 18, marginBottom: 20, borderColor: '#ead7a3', background: '#fff8e8' }}><h3 style={{ margin: '0 0 10px', color: emerald }}>Needs attention</h3>{notifications.map((notification) => <div key={notification.id} style={{ display: 'flex', alignItems: 'center', gap: 8, borderTop: `1px solid ${rule}` }}><button type="button" onClick={notification.onOpen} style={{ flex: 1, display: 'block', padding: '9px 0', textAlign: 'left', border: 0, background: 'transparent', cursor: 'pointer', color: ink }}>{notification.label}</button><button type="button" aria-label={`Dismiss ${notification.label}`} title="Dismiss notification" onClick={() => onDismiss(notification.id)} style={{ border: 0, background: 'transparent', color: muted, cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 6 }}>×</button></div>)}</Card>
 }
 
-function StudentPlansView({ students, canSeeAttendance }) {
+function StudentPlansView({ students, canSeeAttendance, session }) {
   // Attendance summary per child, for users who can read the register (RLS).
   const { rows: attendanceRows, error: attendanceError } = useAttendanceRows(canSeeAttendance)
   const attendance = new Map(childStats(attendanceRows || []).map((child) => [child.studentId, child]))
-  return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Students</h2><p style={{ color: muted }}>Current membership status{canSeeAttendance ? ' and attendance' : ''} by student.</p>{attendanceError && <p style={{ color: '#a3401f' }}>{attendanceError}</p>}<Card>{students.length ? students.map((student) => { const summary = attendance.get(student.id); return <div key={student.id} style={{ padding: '13px 18px', borderTop: `1px solid ${rule}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}><div><strong>{student.name}</strong>{student.className && <div style={{ fontSize: 12, color: muted }}>{student.className}</div>}</div><div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>{canSeeAttendance && (summary ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13 }}><span>Attended <strong>{summary.present}</strong> of {summary.marked} · <strong>{formatRate(summary.rate)}</strong></span><AttendanceDots history={summary.history} size={10} /></span> : <span style={{ fontSize: 12, color: muted }}>{attendanceRows ? 'No attendance marked yet' : ''}</span>)}<Badge text={student.membershipStatus} tone={student.membershipStatus === 'active' ? 'green' : student.membershipStatus === 'cancelled' ? 'red' : 'gold'} /></div></div> }) : <p style={{ padding: 18, color: muted }}>No students found.</p>}</Card></div>
+  // Clicking a student opens their full record (guardian, plan, bookings).
+  const [openId, setOpenId] = useState('')
+  return <div><h2 style={{ fontFamily: serif, color: emerald, fontWeight: 400 }}>Students</h2><p style={{ color: muted }}>Current membership status{canSeeAttendance ? ' and attendance' : ''} by student. Click a student to open their full record.</p>{attendanceError && <p style={{ color: '#a3401f' }}>{attendanceError}</p>}{openId && session && <StudentRecord session={session} studentId={openId} attendance={canSeeAttendance ? attendance.get(openId) || { marked: 0 } : null} onClose={() => setOpenId('')} />}<Card>{students.length ? students.map((student) => { const summary = attendance.get(student.id); return <div key={student.id} role="button" tabIndex={0} aria-label={`Open ${student.name}'s record`} onClick={() => setOpenId(student.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpenId(student.id) } }} className="student-row-link" style={{ padding: '13px 18px', borderTop: `1px solid ${rule}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', cursor: 'pointer' }}><div><strong style={{ color: emerald }}>{student.name}</strong>{student.className && <div style={{ fontSize: 12, color: muted }}>{student.className}</div>}</div><div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>{canSeeAttendance && (summary ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13 }}><span>Attended <strong>{summary.present}</strong> of {summary.marked} · <strong>{formatRate(summary.rate)}</strong></span><AttendanceDots history={summary.history} size={10} /></span> : <span style={{ fontSize: 12, color: muted }}>{attendanceRows ? 'No attendance marked yet' : ''}</span>)}<Badge text={student.membershipStatus} tone={student.membershipStatus === 'active' ? 'green' : student.membershipStatus === 'cancelled' ? 'red' : 'gold'} /></div></div> }) : <p style={{ padding: 18, color: muted }}>No students found.</p>}</Card></div>
 }
 
 function DbsUpload({ instructor, onUpload, uploading }) {
@@ -1982,7 +1985,7 @@ function App() {
           </div>
           )}
 
-          {tab === 'students' && (isAdmin || can('students')) && <StudentPlansView students={students} canSeeAttendance={can('attendance')} />}
+          {tab === 'students' && (isAdmin || can('students')) && <StudentPlansView students={students} canSeeAttendance={can('attendance')} session={session} />}
           {tab === 'invoice-settings' && (isAdmin || can('sales')) && <InvoiceSettings settings={invoiceSettings} onSave={saveInvoiceSettings} saving={invoiceSettingsSaving} />}
           {tab === 'contacts' && can('contacts') && <ContactsPage />}
           {tab === 'team' && isAdmin && session && <TeamPage session={session} />}

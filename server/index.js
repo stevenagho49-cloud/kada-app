@@ -1466,6 +1466,55 @@ app.post('/api/parent/settings', async (request, response) => {
 /* ------------------------------------------------------------------ */
 const AWARD_BADGES = ['star', 'team', 'growth', 'sun', 'heart', 'music', 'crown', 'bolt']
 
+/* Operations > Students: one child's full record. Admins, and staff with the
+   'students' area (the same gate as the Students page). */
+app.get('/api/admin/students/:id/record', async (request, response) => {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })
+  const { data: profile } = await supabase.from('profiles').select('role,permissions').eq('id', user.id).maybeSingle()
+  if (!(profile?.role === 'admin' || (profile?.role === 'staff' && (profile.permissions || []).includes('students')))) return response.status(403).json({ error: 'You need the students permission to open student records.' })
+  const { data: student } = await supabase.from('students').select('*').eq('id', request.params.id).maybeSingle()
+  if (!student) return response.status(404).json({ error: 'Student not found.' })
+  const { data: family } = student.family_id
+    ? await supabase.from('parent_families').select('*').eq('id', student.family_id).maybeSingle()
+    : student.parent_email ? await supabase.from('parent_families').select('*').ilike('guardian_email', likeExact(student.parent_email)).limit(1).maybeSingle() : { data: null }
+  // A child has one record per booking: gather every record of this child.
+  const sameChild = (row) => String(row.name || '').trim().toLowerCase() === String(student.name || '').trim().toLowerCase() && row.date_of_birth === student.date_of_birth
+  const { data: familyStudents } = family ? await supabase.from('students').select('*').eq('family_id', family.id) : { data: [student] }
+  const records = (familyStudents || []).filter(sameChild)
+  const childBookingIds = new Set(records.map((row) => row.booking_id).filter(Boolean))
+  const siblings = [...new Map((familyStudents || []).filter((row) => !sameChild(row)).map((row) => [`${row.name.trim().toLowerCase()}|${row.date_of_birth}`, row.name])).values()]
+  const { data: bookings } = family
+    ? await supabase.from('bookings').select('*').eq('family_id', family.id).order('date', { ascending: false, nullsFirst: false })
+    : childBookingIds.size ? await supabase.from('bookings').select('*').in('id', [...childBookingIds]) : { data: [] }
+  const latest = records.find((row) => row.membership_status === 'active') || student
+  response.json({
+    student: {
+      id: student.id, name: student.name, dateOfBirth: student.date_of_birth, className: latest.class_name || student.class_name || '', term: latest.term || '',
+      membershipStatus: records.some((row) => row.membership_status === 'active') ? 'active' : student.membership_status,
+      dietaryRequirements: records.map((row) => row.dietary_requirements).find(Boolean) || '', medicalNotes: records.map((row) => row.medical_notes).find(Boolean) || '',
+      photoConsent: records.map((row) => row.photo_consent).find((value) => value !== null && value !== undefined) ?? null,
+      recordIds: records.map((row) => row.id),
+    },
+    guardian: {
+      name: family?.guardian_name || student.parent_name || '', email: family?.guardian_email || student.parent_email || '',
+      phone: family?.guardian_phone || '', address: family?.address || '',
+      emergencyName: family?.emergency_contact_name || '', emergencyPhone: family?.emergency_contact_phone || '',
+    },
+    family: family ? {
+      id: family.id, planType: family.plan_type, membershipStatus: family.membership_status, paused: Boolean(family.paused_at),
+      pricing: family.membership_pricing || null, children: family.membership_children || null, monthlyPence: family.membership_monthly_pence || null,
+      hasSubscription: Boolean(family.stripe_subscription_id), hasLogin: Boolean(family.owner_user_id), since: family.created_at,
+    } : null,
+    siblings,
+    bookings: (bookings || []).map((row) => ({
+      id: row.id, date: row.date || '', sessionType: row.session_type || '', status: row.status || '', paymentStatus: row.payment_status || '',
+      invoiceStatus: row.invoice_status || '', invoiceNumber: row.invoice_number || '', price: Number(row.price || 0), notes: row.notes || '',
+      includesChild: childBookingIds.has(row.id), arrears: Boolean(row.arrears_months?.length),
+    })),
+  })
+})
+
 async function requireAttendanceAccess(request, response) {
   const user = await authenticatedUser(request)
   if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
