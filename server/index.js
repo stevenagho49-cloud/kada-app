@@ -3660,7 +3660,22 @@ async function familyChildCount(familyId, includeBookingId = '') {
   return new Set((rows || []).filter((row) => !createdByAbandoned(row)).map((child) => `${String(child.name || '').trim().toLowerCase()}|${child.date_of_birth}`)).size
 }
 const childrenLabel = (count) => `${count} ${count === 1 ? 'child' : 'children'}`
-const planTotalLabel = (plan, children) => `${money(plan.pricePence * children)}/${plan.interval}`
+
+// Discount codes staff can attach to a subscription request: the same codes as
+// the class checkout (active, usable on class bookings), off the family's total.
+const SUBSCRIPTION_DISCOUNT_MIGRATION = 'Apply supabase/migrations/20261002_subscription_request_discount.sql in the Supabase SQL Editor.'
+const discountSnapshot = (code) => ({ code: code.code, type: code.type, percentOff: code.percentOff, amountOffPence: code.amountOffPence, membershipDuration: code.membershipDuration === 'forever' ? 'forever' : 'once' })
+async function subscriptionDiscountCodes() {
+  return (await loadDiscountCodes()).filter((code) => code.active && code.appliesTo.includes('class'))
+    .map((code) => ({ code: code.code, label: discountLabel(code), description: code.description || '', membershipDuration: code.membershipDuration === 'forever' ? 'forever' : 'once' }))
+}
+// Price of a request: full total, and with its discount (if any) for the first
+// payment and the months after (a 'once' code only discounts the first).
+function subscriptionQuote(plan, children, discount = null) {
+  const totals = applyDiscount(discount, plan.pricePence * children)
+  return { ...totals, laterPence: discount?.membershipDuration === 'forever' ? totals.totalPence : totals.subtotalPence, discount: discount ? { code: discount.code, label: discountLabel(discount), membershipDuration: discount.membershipDuration } : null }
+}
+const planTotalLabel = (plan, quote) => (quote.discountPence > 0 && quote.laterPence !== quote.totalPence ? `${money(quote.totalPence)} first ${plan.interval}` : `${money(quote.totalPence)}/${plan.interval}`)
 const hasLiveSubscription = (family) => Boolean(family?.stripe_subscription_id) && family.membership_status === 'active'
 
 // Login state of each family's parent account, for Sales > Subscriptions:
@@ -3689,29 +3704,41 @@ app.get('/api/admin/family-accounts', async (request, response) => {
 app.get('/api/admin/subscription-requests', async (request, response) => {
   const access = await requireInvoiceAccess(request, response)
   if (!access) return
-  const [{ data, error }, plans] = await Promise.all([
+  const [{ data, error }, plans, discountCodes] = await Promise.all([
     supabase.from('subscription_requests').select('id,family_id,plan_type,recipient,status,error,created_at,completed_at').order('created_at', { ascending: false }).limit(1000),
     subscriptionPlanList(),
+    subscriptionDiscountCodes().catch(() => []),
   ])
-  if (error) return response.status(500).json({ error: /subscription_requests/.test(error.message) ? `Subscription requests are not set up yet. ${MANUAL_ARREARS_MIGRATION}` : error.message, plans })
-  response.json({ plans, requests: (data || []).map((row) => ({ id: row.id, familyId: row.family_id, planType: row.plan_type, recipient: row.recipient, status: row.status, error: row.error || '', createdAt: row.created_at, completedAt: row.completed_at })) })
+  if (error) return response.status(500).json({ error: /subscription_requests/.test(error.message) ? `Subscription requests are not set up yet. ${MANUAL_ARREARS_MIGRATION}` : error.message, plans, discountCodes })
+  response.json({ plans, discountCodes, requests: (data || []).map((row) => ({ id: row.id, familyId: row.family_id, planType: row.plan_type, recipient: row.recipient, status: row.status, error: row.error || '', createdAt: row.created_at, completedAt: row.completed_at })) })
 })
 
-// What a request for this family would charge, for the Send subscription request form.
+// What a request for this family would charge (with the chosen discount code,
+// if any), for the Send subscription request form.
 app.get('/api/admin/subscription-requests/quote', async (request, response) => {
   const access = await requireInvoiceAccess(request, response)
   if (!access) return
   const familyId = String(request.query.familyId || '')
   if (!familyId) return response.status(400).json({ error: 'Choose a family.' })
-  const [children, plans] = await Promise.all([familyChildCount(familyId), subscriptionPlanList()])
-  response.json({ children, plans: plans.map((plan) => ({ ...plan, totalPence: plan.pricePence * children })) })
+  const [children, plans, discount] = await Promise.all([familyChildCount(familyId), subscriptionPlanList(), findDiscountCode(request.query.discountCode, 'class')])
+  if (discount.error) return response.status(400).json({ error: discount.error })
+  response.json({ children, plans: plans.map((plan) => ({ ...plan, ...subscriptionQuote(plan, children, discount.code && discountSnapshot(discount.code)) })) })
 })
+
+// The discount box in a subscription request email: the code, the full price
+// struck through and the discounted price, so the parent sees what they pay.
+function subscriptionDiscountHtml(plan, quote) {
+  if (!quote.discount || quote.discountPence <= 0) return ''
+  const every = quote.discount.membershipDuration === 'forever'
+  const after = every ? '' : `<br><span style="font-size:13px;color:#767066">This discount is for your first ${escHtml(plan.interval)}; after that it's ${money(quote.laterPence)} a ${escHtml(plan.interval)}.</span>`
+  return `<div style="background:#faf6ec;border:1px solid #e6dcc3;border-radius:8px;padding:12px 16px;margin:14px 0"><div style="font-size:13px;color:#767066">Discount code <strong style="color:#0b3d2e">${escHtml(quote.discount.code)}</strong> (${escHtml(quote.discount.label)}${every ? ` every ${escHtml(plan.interval)}` : ` your first ${escHtml(plan.interval)}`}) is already applied:</div><div style="font-size:18px;margin-top:4px"><span style="text-decoration:line-through;color:#767066">${money(quote.subtotalPence)}</span> <strong style="color:#0b3d2e">${money(quote.totalPence)}</strong> ${every ? `a ${escHtml(plan.interval)}` : `for your first ${escHtml(plan.interval)}`} <span style="font-size:13px;color:#767066">(you save ${money(quote.discountPence)})</span></div>${after}</div>`
+}
 
 app.post('/api/admin/subscription-requests', async (request, response) => {
   const access = await requireInvoiceAccess(request, response)
   if (!access) return
   if (!process.env.RESEND_API_KEY) return response.status(503).json({ error: 'Resend is not configured on the server.' })
-  const { familyId, planType } = request.body || {}
+  const { familyId, planType, discountCode } = request.body || {}
   const plan = (await subscriptionPlanList()).find((item) => item.planType === planType)
   if (!plan) return response.status(400).json({ error: 'Choose a subscription plan.' })
   if (!plan.available) return response.status(503).json({ error: 'Stripe is not configured for this plan on the server.' })
@@ -3721,25 +3748,33 @@ app.post('/api/admin/subscription-requests', async (request, response) => {
   if (hasLiveSubscription(family)) return response.status(409).json({ error: `${family.guardian_name || 'This family'} already has an active subscription.` })
   const children = await familyChildCount(family.id)
   if (!children) return response.status(400).json({ error: `${family.guardian_name || 'This family'} has no children on their account yet. The membership is priced per child, so add their children first.` })
-  const totalPence = plan.pricePence * children
+  // Optional discount code: the same codes (and the same rule) as the class
+  // checkout, taken off the total for all the family's children.
+  const found = await findDiscountCode(discountCode, 'class')
+  if (found.error) return response.status(400).json({ error: found.error })
+  const discount = found.code ? discountSnapshot(found.code) : null
+  const quote = subscriptionQuote(plan, children, discount)
+  if (quote.totalPence > 0 && quote.totalPence < 30) return response.status(400).json({ error: 'With that discount the first payment is too small to take by card.' })
+  const totalPence = quote.subtotalPence
 
   const { data: claim, error: claimError } = await supabase.from('subscription_requests')
-    .insert({ family_id: family.id, plan_type: plan.planType, recipient: family.guardian_email, sent_by: access.user.id })
+    .insert({ family_id: family.id, plan_type: plan.planType, recipient: family.guardian_email, sent_by: access.user.id, ...(discount ? { discount } : {}) })
     .select('id,token').single()
   if (claimError) {
-    return response.status(500).json({ error: /subscription_requests/.test(claimError.message) ? `Subscription requests are not set up yet. ${MANUAL_ARREARS_MIGRATION}` : `The request could not be saved: ${claimError.message}` })
+    const missing = /discount/.test(claimError.message) ? SUBSCRIPTION_DISCOUNT_MIGRATION : /subscription_requests/.test(claimError.message) ? MANUAL_ARREARS_MIGRATION : ''
+    return response.status(500).json({ error: missing ? `Subscription requests ${discount ? 'with a discount code ' : ''}are not set up yet. ${missing}` : `The request could not be saved: ${claimError.message}` })
   }
   const link = `${APP_URL}/api/subscribe/${claim.token}`
   const firstName = (family.guardian_name || '').split(' ')[0] || 'there'
   const result = await sendEmail({
     to: family.guardian_email,
     bcc: ADMIN_EMAIL,
-    subject: `Set up your ${plan.label} (${planTotalLabel(plan, children)}) - King's Ark Dance Academy`,
-    html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml(firstName)},</p><p>We'd like to move your family onto our <strong>${escHtml(plan.label)}</strong>, paid automatically by card, so you don't need to pay for classes one at a time. It's ${money(plan.pricePence)} a ${escHtml(plan.interval)} per child: with <strong>${childrenLabel(children)}</strong> on your account that's <strong>${money(totalPence)} a ${escHtml(plan.interval)}</strong>.</p><p>The button below takes you to Stripe's secure checkout to set it up. Your first payment of ${money(totalPence)} is taken today, then on the same date each ${escHtml(plan.interval)}. You can cancel at any time from your KADA account.</p><p style="margin:20px 0 6px"><a href="${link}" style="background:#c9a227;color:#0b3d2e;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Set up my ${escHtml(plan.label)} →</a></p><p style="color:#767066;font-size:12px;margin:0 0 14px">Secure card payment by Stripe. If the button doesn't work, copy this link into your browser:<br><span style="word-break:break-all">${link}</span></p><p>Any questions, just reply to this email.</p><p>Thank you,<br>King's Ark Dance Academy</p></div>`,
+    subject: `Set up your ${plan.label} (${planTotalLabel(plan, quote)}${quote.discountPence > 0 ? `, ${discountLabel(discount)}` : ''}) - King's Ark Dance Academy`,
+    html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml(firstName)},</p><p>We'd like to move your family onto our <strong>${escHtml(plan.label)}</strong>, paid automatically by card, so you don't need to pay for classes one at a time. It's ${money(plan.pricePence)} a ${escHtml(plan.interval)} per child: with <strong>${childrenLabel(children)}</strong> on your account that's <strong>${money(totalPence)} a ${escHtml(plan.interval)}</strong>.</p>${subscriptionDiscountHtml(plan, quote)}<p>The button below takes you to Stripe's secure checkout to set it up${quote.discountPence > 0 ? ', with your discount already applied' : ''}. Your first payment of ${money(quote.totalPence)} is taken today, then ${quote.laterPence !== quote.totalPence ? `${money(quote.laterPence)} ` : ''}on the same date each ${escHtml(plan.interval)}. You can cancel at any time from your KADA account.</p><p style="margin:20px 0 6px"><a href="${link}" style="background:#c9a227;color:#0b3d2e;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Set up my ${escHtml(plan.label)} →</a></p><p style="color:#767066;font-size:12px;margin:0 0 14px">Secure card payment by Stripe. If the button doesn't work, copy this link into your browser:<br><span style="word-break:break-all">${link}</span></p><p>Any questions, just reply to this email.</p><p>Thank you,<br>King's Ark Dance Academy</p></div>`,
   })
   await supabase.from('subscription_requests').update(result.sent ? { status: 'sent', resend_id: result.id } : { status: 'failed', error: result.reason }).eq('id', claim.id)
   if (!result.sent) return response.status(502).json({ error: `The email could not be sent: ${result.reason}` })
-  response.json({ id: claim.id, recipient: family.guardian_email, plan, children, totalPence, emailId: result.id })
+  response.json({ id: claim.id, recipient: family.guardian_email, plan, children, totalPence: quote.totalPence, subtotalPence: quote.subtotalPence, laterPence: quote.laterPence, discount: quote.discount, emailId: result.id })
 })
 
 // Webhook (and return page) handler for kind=subscription_request. Safe to run
@@ -3790,8 +3825,13 @@ async function recordSubscriptionRequest(session) {
 
   const plan = (await subscriptionPlanList()).find((item) => item.planType === subscriptionRequest.plan_type) || { label: 'Membership', pricePence: 0, interval: 'month' }
   const email = session.customer_details?.email || family?.guardian_email || subscriptionRequest.recipient
-  const children = plan.pricePence ? Math.round(Number(session.amount_total ?? plan.pricePence) / plan.pricePence) || 1 : 1
-  const amountLabel = `${money(session.amount_total ?? plan.pricePence)} a ${plan.interval} for ${childrenLabel(children)}`
+  // Children from the checkout's metadata: amount_total is after any discount.
+  const children = Number(metadata.children) || (plan.pricePence ? Math.round(Number(session.amount_total ?? plan.pricePence) / plan.pricePence) || 1 : 1)
+  const fullPence = plan.pricePence * children
+  const paidPence = session.amount_total ?? fullPence
+  const amountLabel = metadata.discount_code && paidPence !== fullPence
+    ? `${money(paidPence)}${metadata.discount_duration === 'forever' ? ` a ${plan.interval}` : ` for the first ${plan.interval}, then ${money(fullPence)} a ${plan.interval}`} for ${childrenLabel(children)}, with discount code ${metadata.discount_code}`
+    : `${money(paidPence)} a ${plan.interval} for ${childrenLabel(children)}`
   const emailResult = await sendEmail({
     to: email,
     subject: `Your ${plan.label} is set up - King's Ark Dance Academy`,
@@ -3842,9 +3882,22 @@ app.get('/api/subscribe/:token', async (request, response) => {
     plan_type: subscriptionRequest.plan_type,
     children: String(children),
   }
+  // A discount code attached when the request was sent goes straight onto the
+  // checkout (the terms the email showed), so the parent doesn't type anything.
+  const discount = subscriptionRequest.discount?.code ? subscriptionRequest.discount : null
+  const totals = applyDiscount(discount, (await classPrices())[subscriptionRequest.plan_type] * children)
+  if (discount && totals.discountPence > 0) Object.assign(metadata, discountMetadata(discount, totals), { discount_duration: discount.membershipDuration })
+  let discounts = []
+  try {
+    if (discount && totals.discountPence > 0) discounts = [{ coupon: await stripeCouponId({ code: discount, duration: discount.membershipDuration }) }]
+  } catch (error) {
+    console.error('Subscription request coupon creation failed:', error)
+    return invoicePayPage(response, { status: 502, title: 'Sign-up could not start', body: '<p>Something went wrong applying your discount. Please try the link again in a moment.</p>' })
+  }
   const params = {
     mode: 'subscription',
     line_items: [{ price: priceId, quantity: children }],
+    ...(discounts.length ? { discounts } : {}),
     client_reference_id: family.id,
     metadata,
     subscription_data: { metadata: { ...metadata, kada_pricing: 'per_child', kada_family_id: family.id }, description: `KADA ${plan.label} · ${family.guardian_name || family.guardian_email} · ${childrenLabel(children)}`.slice(0, 500) },

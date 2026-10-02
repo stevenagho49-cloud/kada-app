@@ -154,29 +154,34 @@ export function CreateArrearsModal({ session, families, initialFamilyId = '', on
 export function SubscriptionRequestModal({ session, families, initialFamilyId = '', onClose, onSent }) {
   const authedFetch = useAuthedFetch(session)
   const [plans, setPlans] = useState(null)
-  const [form, setForm] = useState({ familyId: initialFamilyId, planType: '' })
+  const [discountCodes, setDiscountCodes] = useState([])
+  const [form, setForm] = useState({ familyId: initialFamilyId, planType: '', discountCode: '' })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     authedFetch('/api/admin/subscription-requests')
-      .then((result) => { setPlans(result.plans); setForm((current) => ({ ...current, planType: current.planType || result.plans?.[0]?.planType || '' })) })
+      .then((result) => { setPlans(result.plans); setDiscountCodes(result.discountCodes || []); setForm((current) => ({ ...current, planType: current.planType || result.plans?.[0]?.planType || '' })) })
       .catch((loadError) => { setPlans([]); setError(loadError.message) })
   }, [])
 
-  // Priced per child: how many children this family has on file.
+  // Priced per child: how many children this family has on file, and the
+  // total with the chosen discount code (worked out by the server).
   const [quote, setQuote] = useState(null)
   useEffect(() => {
     if (!form.familyId) return
-    authedFetch(`/api/admin/subscription-requests/quote?familyId=${encodeURIComponent(form.familyId)}`)
-      .then((result) => setQuote({ familyId: form.familyId, children: result.children }))
+    setError('')
+    authedFetch(`/api/admin/subscription-requests/quote?familyId=${encodeURIComponent(form.familyId)}&discountCode=${encodeURIComponent(form.discountCode)}`)
+      .then((result) => setQuote({ familyId: form.familyId, discountCode: form.discountCode, children: result.children, plans: result.plans }))
       .catch((loadError) => setError(loadError.message))
-  }, [form.familyId])
+  }, [form.familyId, form.discountCode])
 
   const family = families.find((item) => item.id === form.familyId)
   const plan = (plans || []).find((item) => item.planType === form.planType)
-  const children = quote?.familyId === form.familyId ? quote.children : null
-  const ready = family?.guardian_email && !hasLiveSubscription(family) && plan?.available && children > 0
+  const current = quote?.familyId === form.familyId && quote.discountCode === form.discountCode ? quote : null
+  const children = current ? current.children : null
+  const priced = current?.plans?.find((item) => item.planType === form.planType)
+  const ready = family?.guardian_email && !hasLiveSubscription(family) && plan?.available && children > 0 && priced
   const childrenLabel = (count) => `${count} ${count === 1 ? 'child' : 'children'}`
 
   const submit = async (event) => {
@@ -211,10 +216,17 @@ export function SubscriptionRequestModal({ session, families, initialFamilyId = 
             </label>
           ))}
         </div>
+        <Field label="Discount code (optional)">
+          <select style={opsInputStyle} value={form.discountCode} onChange={(event) => setForm({ ...form, discountCode: event.target.value })}>
+            <option value="">No discount</option>
+            {discountCodes.map((item) => <option key={item.code} value={item.code}>{item.code} · {item.label}{item.membershipDuration === 'forever' ? ' every month' : ' first month'}{item.description ? ` · ${item.description}` : ''}</option>)}
+          </select>
+        </Field>
         {family && children === 0 && <p style={{ color: OPS_COLORS.warn, fontSize: 13, margin: '0 0 12px' }}>This family has no children on their account yet. The membership is priced per child, so add their children first.</p>}
         {ready && (
           <p style={{ background: '#faf6ec', border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 6, padding: '9px 12px', fontSize: 13, margin: '0 0 12px' }}>
-            {family.guardian_name || 'The parent'} ({family.guardian_email}) will be emailed a link to start the <strong>{plan.label}</strong> for {childrenLabel(children)} at <strong>{money(plan.pricePence * children)}/{plan.interval}</strong> ({money(plan.pricePence)} per child).
+            {family.guardian_name || 'The parent'} ({family.guardian_email}) will be emailed a link to start the <strong>{plan.label}</strong> for {childrenLabel(children)} at <strong>{money(priced.subtotalPence)}/{plan.interval}</strong> ({money(plan.pricePence)} per child).
+            {priced.discount && priced.discountPence > 0 && <> With <strong>{priced.discount.code}</strong> ({priced.discount.label}) they pay <strong>{money(priced.totalPence)}</strong> {priced.discount.membershipDuration === 'forever' ? `a ${plan.interval}` : `for the first ${plan.interval}, then ${money(priced.laterPence)}/${plan.interval}`}. The code is already applied when they open Stripe checkout.</>}
           </p>
         )}
         {error && <p style={{ color: OPS_COLORS.warn, fontSize: 13, margin: '0 0 12px' }}>{error}</p>}
