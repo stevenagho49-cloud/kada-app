@@ -7,7 +7,10 @@ import Stripe from 'stripe'
 // checkout (an Enquiry, payment 'pending', £75) completes a subscription
 // request. The old checkout must become payment 'superseded' with a note, stay
 // an Enquiry (history kept, children still on the register), refuse to be
-// invoiced, and show "Covered by membership" on Bookings.
+// invoiced, and show "Covered by membership" on Bookings. On the parent's own
+// dashboard it shows "Covered by membership" with no "Cancel booking" button,
+// and the server refuses to cancel it (cancelling would drop the children off
+// the register).
 // The subscription completion is the real webhook handler fed a signed
 // checkout.session.completed event (no card payment; nothing is charged).
 // Everything is deleted at the end unless KEEP=1. Emails go to resend.dev
@@ -87,6 +90,30 @@ async function run() {
     const text = (await row.innerText()).replace(/\s+/g, ' ')
     check('Bookings list shows "Covered by membership" and no Invoice button', /covered by membership/i.test(text) && (await row.getByRole('button', { name: 'Invoice' }).count()) === 0, text.slice(0, 200))
     if (process.env.SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.SCREENSHOT_DIR}/superseded-bookings.png` })
+
+    /* The parent's own dashboard */
+    const parentPassword = `Verify-${stamp}-parent!`
+    const { data: parentUser } = await service.auth.admin.createUser({ email: parentEmail, password: parentPassword, email_confirm: true, user_metadata: { role: 'parent', full_name: `Supersede Verify ${tag}` }, app_metadata: { signup_notified_at: new Date().toISOString() } })
+    cleanup.users.push(parentUser.user.id)
+    await service.from('profiles').update({ role: 'parent' }).eq('id', parentUser.user.id)
+    // Hand the test family to this login in place of the empty one sign-up made.
+    for (let i = 0; i < 20; i += 1) { if ((await service.from('parent_families').select('id').eq('owner_user_id', parentUser.user.id)).data?.length) break; await new Promise((resolve) => setTimeout(resolve, 500)) } // eslint-disable-line no-await-in-loop
+    await service.from('parent_families').delete().eq('owner_user_id', parentUser.user.id)
+    await service.from('parent_families').update({ owner_user_id: parentUser.user.id }).eq('id', familyId)
+    await service.from('profiles').update({ family_id: familyId }).eq('id', parentUser.user.id)
+    const parentSession = (await createClient(supabaseUrl, process.env.VITE_SUPABASE_ANON_KEY, { auth: { persistSession: false } }).auth.signInWithPassword({ email: parentEmail, password: parentPassword })).data.session
+    const parentContext = await browser.newContext({ viewport: { width: 390, height: 844 } })
+    await parentContext.addInitScript(([name, value]) => window.localStorage.setItem(name, value), [`sb-${new URL(supabaseUrl).hostname.split('.')[0]}-auth-token`, JSON.stringify(parentSession)])
+    const parentPage = await parentContext.newPage()
+    await parentPage.goto(`${serverBase}/#ops/bookings`)
+    const parentRow = parentPage.locator('tr', { hasText: CLASS })
+    await parentRow.first().waitFor({ timeout: 30000 })
+    const parentText = (await parentRow.first().innerText()).replace(/\s+/g, ' ')
+    check('Parent dashboard: booking shows "Covered by membership" with no "Cancel booking" button', /covered by membership/i.test(parentText) && (await parentPage.getByRole('button', { name: 'Cancel booking' }).count()) === 0, parentText)
+    if (process.env.SCREENSHOT_DIR) await parentPage.screenshot({ path: `${process.env.SCREENSHOT_DIR}/superseded-parent.png` })
+    const cancel = await fetch(`${serverBase}/api/parent/cancel-booking`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${parentSession.access_token}` }, body: JSON.stringify({ bookingId }) })
+    const { data: stillOpen } = await service.from('bookings').select('status').eq('id', bookingId).single()
+    check('Server refuses a direct cancel request and the booking stays an Enquiry', cancel.status === 409 && stillOpen.status === 'Enquiry', `HTTP ${cancel.status}, ${stillOpen.status}`)
   } finally {
     await browser.close()
   }

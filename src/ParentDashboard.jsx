@@ -69,8 +69,10 @@ function ParentDashboard({ initialTab = '', session, family, bookings, students,
     { key: 'session', label: 'Class', render: (booking) => <strong style={{ color: emerald }}>{booking.sessionType}</strong> },
     { key: 'date', label: 'Date', render: (booking) => booking.date || 'To be confirmed' },
     { key: 'price', label: 'Price', render: (booking) => formatCurrency(booking.price) },
-    { key: 'status', label: 'Status', render: (booking) => <Pill text={booking.status} tone={booking.status === 'Cancelled' ? 'red' : booking.status === 'Confirmed' ? 'green' : 'gold'} /> },
-    { key: 'actions', label: '', render: (booking) => booking.status !== 'Cancelled' ? <OpsButton small variant="danger" onClick={() => onCancelBooking(booking.id)}>Cancel booking</OpsButton> : null },
+    { key: 'status', label: 'Status', render: (booking) => booking.paymentStatus === 'superseded' ? <Pill text="Covered by membership" tone="green" /> : <Pill text={booking.status} tone={booking.status === 'Cancelled' ? 'red' : booking.status === 'Confirmed' ? 'green' : 'gold'} /> },
+    // A superseded booking is an unpaid checkout now covered by the membership:
+    // cancelling it would only take the children off the register.
+    { key: 'actions', label: '', render: (booking) => booking.status !== 'Cancelled' && booking.paymentStatus !== 'superseded' ? <OpsButton small variant="danger" onClick={() => onCancelBooking(booking.id)}>Cancel booking</OpsButton> : null },
   ]
   const invoiceColumns = [
     { key: 'invoice', label: 'Invoice', render: (invoice) => <div><strong style={{ color: emerald }}>{invoice.invoiceNumber || 'Invoice'}</strong><div style={{ fontSize: 12, color: muted }}>{invoice.description}</div>{invoice.monthsLabel && <div style={{ fontSize: 12, color: emerald }}>Covers {invoice.monthsLabel}</div>}</div> },
