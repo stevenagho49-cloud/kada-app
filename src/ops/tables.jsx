@@ -95,7 +95,9 @@ export function BookingsTable({
             options={INVOICE_STATUS_OPTIONS}
             onChange={(value) => onSaveBooking({ ...booking, invoiceStatus: value })}
           />
-          {canIssueInvoices && <OpsButton small variant="ghost" onClick={() => onInvoice(booking)}>Invoice</OpsButton>}
+          {booking.paymentStatus === 'superseded'
+            ? <span title="An unpaid checkout now covered by the family's Monthly Membership: nothing to invoice or chase."><Pill text="Covered by membership" tone="green" /></span>
+            : canIssueInvoices && <OpsButton small variant="ghost" onClick={() => onInvoice(booking)}>Invoice</OpsButton>}
         </div>
       ),
     },

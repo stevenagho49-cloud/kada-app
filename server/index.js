@@ -511,6 +511,7 @@ async function recordClassBooking(session) {
     // New children on a family with a per-child membership raise its monthly quantity.
     if (!session.subscription) syncMembershipSoon(metadata.family_id, 'children added by a class booking')
   }
+  if (session.subscription) await supersedeUnpaidCheckouts(metadata.family_id, 'covered by the Monthly Membership started with this family\'s paid class booking', metadata.booking_id)
   if (!error) {
     const bookingLabel = metadata.included_in_membership ? 'New class booking (included in membership)' : Number(metadata.amount_pence || 0) === 0 ? 'New class booking (free with discount code)' : 'New paid class booking'
     await notifyAdmin(bookingLabel, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>${bookingLabel}</h2><p><strong>Parent:</strong> ${escHtml(metadata.parent_name || '')} (${escHtml(session.customer_details?.email || metadata.parent_email || '')})<br><strong>Class:</strong> ${escHtml(metadata.class_name || '')} (${planType})<br><strong>Date:</strong> ${metadata.class_date}<br><strong>Amount:</strong> ${money(metadata.amount_pence)}${metadata.discount_code ? `<br><strong>Discount code:</strong> ${escHtml(metadata.discount_code)} (-${money(metadata.discount_pence)})` : ''}<br><strong>Children:</strong> ${studentList.length}</p>${dashboardButton('bookings', 'View booking', metadata.booking_id)}</div>`, 'new-booking')
@@ -2716,6 +2717,9 @@ app.post('/api/invoices/send', async (request, response) => {
     return response.status(400).json({ error: 'A confirmed booking and school contact email are required.' })
   }
 
+  const { data: current } = await supabase.from('bookings').select('payment_status').eq('id', booking.id).maybeSingle()
+  if (current?.payment_status === 'superseded') return response.status(409).json({ error: "This booking is covered by the family's Monthly Membership, so there is nothing to invoice." })
+
   const { data: settings, error: settingsError } = await supabase.from('invoice_settings').select('account_name,sort_code,account_number').eq('id', 'default').single()
   if (settingsError) return response.status(500).json({ error: 'Invoice payment details could not be loaded.' })
 
@@ -3751,20 +3755,15 @@ async function subscriptionPlanList() {
 // The membership covers the whole family but is priced per child: one Stripe
 // line item for the plan's price with quantity = the family's children.
 // Children a per-child membership charges for: every child on the family's
-// account, counted once (a child can have one record per booking), leaving out
-// children typed in on a class checkout that was never paid (checkout creates
-// them as student-parent-<uuid>-N, and an unpaid one can be moved on to the next
-// checkout). A child already on the account (signed up, added from the Children
-// tab, or from a paid booking) who was attached to such a checkout still counts. includeBookingId counts that checkout's new
-// children too (the one being paid for right now).
-async function familyChildCount(familyId, includeBookingId = '') {
-  const { data: rows, error } = await supabase.from('students').select('id,name,date_of_birth,booking_id').eq('family_id', familyId)
+// account, counted once (a child can have one record per booking). Children
+// first typed in on a class checkout that was never paid count too: they are
+// enrolled (Students page, register), e.g. families moving over with an enquiry
+// booking, and leaving them out told staff such a family had no children. A
+// later checkout moves an unpaid child's record rather than copying it.
+async function familyChildCount(familyId) {
+  const { data: rows, error } = await supabase.from('students').select('name,date_of_birth').eq('family_id', familyId)
   if (error) throw error
-  const bookingIds = [...new Set((rows || []).map((row) => row.booking_id).filter(Boolean))]
-  const { data: bookings } = bookingIds.length ? await supabase.from('bookings').select('id,payment_status').in('id', bookingIds) : { data: [] }
-  const abandoned = new Set((bookings || []).filter((booking) => booking.payment_status === 'pending' && booking.id !== includeBookingId).map((booking) => booking.id))
-  const createdByAbandoned = (row) => row.booking_id && abandoned.has(row.booking_id) && String(row.id).startsWith('student-parent-')
-  return new Set((rows || []).filter((row) => !createdByAbandoned(row)).map((child) => `${String(child.name || '').trim().toLowerCase()}|${child.date_of_birth}`)).size
+  return new Set((rows || []).map((child) => `${String(child.name || '').trim().toLowerCase()}|${child.date_of_birth}`)).size
 }
 const childrenLabel = (count) => `${count} ${count === 1 ? 'child' : 'children'}`
 
@@ -3903,6 +3902,20 @@ async function enrolUnassignedChildren(familyId) {
   if (enrolError) await alertFailure("A new member's children could not be put in a class", enrolError, { Family: familyId, Class: className })
 }
 
+// Once a family's Monthly Membership is active, a class checkout they started and
+// never paid (an Enquiry with payment 'pending') is covered by the membership:
+// it becomes payment 'superseded' with a note, so nobody invoices or chases it.
+// It stays an Enquiry (not Cancelled), keeping its history and keeping its
+// children on the register.
+async function supersedeUnpaidCheckouts(familyId, why, exceptBookingId = '') {
+  const { data: rows, error } = await supabase.from('bookings').select('id,notes').eq('family_id', familyId).eq('payment_status', 'pending').is('invoice_sent_at', null).neq('status', 'Cancelled')
+  if (error) return alertFailure("Unpaid checkouts of a new member could not be checked (one may still look like it needs payment)", error, { Family: familyId })
+  const note = `Superseded ${londonNow().date}: ${why}. No separate payment due.`
+  for (const row of (rows || []).filter((item) => item.id !== exceptBookingId)) {
+    await checkedWrite("A new member's unpaid checkout could not be marked as covered by the membership (it may get invoiced or chased)", supabase.from('bookings').update({ payment_status: 'superseded', notes: [row.notes, note].filter(Boolean).join('\n') }).eq('id', row.id).eq('payment_status', 'pending'), { Family: familyId, Booking: row.id }) // eslint-disable-line no-await-in-loop
+  }
+}
+
 // Webhook (and return page) handler for kind=subscription_request. Safe to run
 // more than once for the same session: the family update is the same each time
 // and only the first run claims the request and sends the emails.
@@ -3943,6 +3956,7 @@ async function recordSubscriptionRequest(session) {
       return { ok: false }
     }
     await enrolUnassignedChildren(family.id)
+    await supersedeUnpaidCheckouts(family.id, 'covered by the Monthly Membership set up from a subscription request')
   }
   const { data: claimed, error: claimError } = await supabase.from('subscription_requests')
     .update({ status: 'completed', completed_at: new Date().toISOString(), stripe_checkout_session_id: session.id, stripe_subscription_id: subscriptionId })
@@ -4243,7 +4257,7 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   // A child on a checkout that was never paid (still 'pending') is free to move.
   const childBookingIds = [...new Set((familyChildren || []).map((child) => child.booking_id).filter(Boolean))]
   const { data: childBookings } = childBookingIds.length ? await supabase.from('bookings').select('id,payment_status').in('id', childBookingIds) : { data: [] }
-  const abandoned = new Set((childBookings || []).filter((row) => row.payment_status === 'pending').map((row) => row.id))
+  const abandoned = new Set((childBookings || []).filter((row) => ['pending', 'superseded'].includes(row.payment_status)).map((row) => row.id))
   const unbooked = (familyChildren || []).filter((child) => !child.booking_id || abandoned.has(child.booking_id))
   const newStudents = []
   for (const [index, student] of students.entries()) {
@@ -4274,7 +4288,7 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   // child on the family's account (including the ones on this booking).
   let children = students.length
   try {
-    if (isMembership) children = Math.max(1, await familyChildCount(familyId, bookingId))
+    if (isMembership) children = Math.max(1, await familyChildCount(familyId))
   } catch {
     return response.status(500).json({ error: 'Your children could not be counted. Please try again.' })
   }

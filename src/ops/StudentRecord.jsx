@@ -33,6 +33,7 @@ function planText(family) {
 function bookingState(booking) {
   if (booking.status === 'Cancelled') return { text: 'Cancelled', tone: 'red' }
   if (booking.paymentStatus === 'pending') return { text: 'Checkout not finished', tone: 'default' }
+  if (booking.paymentStatus === 'superseded') return { text: 'Covered by membership', tone: 'green' }
   if (booking.invoiceStatus === 'Paid' || booking.paymentStatus === 'paid') return { text: 'Paid', tone: 'green' }
   if (booking.invoiceStatus === 'Sent') return { text: 'Invoice unpaid', tone: 'gold' }
   return { text: booking.status || 'Booked', tone: 'default' }

@@ -1307,7 +1307,8 @@ function App() {
   const stats = useMemo(() => {
     // Abandoned checkouts sit at paymentStatus 'pending' ,  they are not real
     // bookings, so keep them out of the dashboard numbers entirely.
-    const live = bookings.filter((booking) => booking.status !== 'Cancelled' && booking.paymentStatus !== 'pending')
+    // Superseded ones were covered by a membership, so they bring in nothing either.
+    const live = bookings.filter((booking) => booking.status !== 'Cancelled' && !['pending', 'superseded'].includes(booking.paymentStatus))
     const upcomingCount = live.length
     const classRevenue = live.reduce((sum, booking) => sum + Number(booking.price || 0), 0)
     const eventRevenue = ticketOrders
@@ -1511,7 +1512,7 @@ function App() {
     setBookingModal(null)
     // The row must exist before the invoice endpoint numbers it and marks it sent.
     if (await saveRows('bookings', next)) return
-    if (booking.status === 'Confirmed' && booking.invoiceStatus === 'Not sent' && previous?.status !== 'Confirmed' && (schools.find((item) => item.id === booking.schoolId)?.email || booking.contactEmail)) await sendInvoice(booking)
+    if (booking.status === 'Confirmed' && booking.invoiceStatus === 'Not sent' && booking.paymentStatus !== 'superseded' && previous?.status !== 'Confirmed' && (schools.find((item) => item.id === booking.schoolId)?.email || booking.contactEmail)) await sendInvoice(booking)
   }
   const saveSchool = (school) => { const next = schools.some((item) => item.id === school.id) ? schools.map((item) => item.id === school.id ? school : item) : [school, ...schools]; persistRows('schools', next, setSchools); setSchoolModal(null); setSchoolRecord(next.find((item) => item.id === school.id) || null) }
   const saveInstructor = (instructor) => { const next = instructors.some((item) => item.id === instructor.id) ? instructors.map((item) => item.id === instructor.id ? instructor : item) : [instructor, ...instructors]; persistRows('instructors', next, setInstructors); setInstructorModal(null) }
