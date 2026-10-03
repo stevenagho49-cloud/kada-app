@@ -201,7 +201,7 @@ function Register({ session }) {
           </div>
 
           {!children.length ? (
-            <EmptyState icon="🧒" title="Nobody registered for this session" body="Children appear here once they have a Day Pass for this date or an active membership for this class." />
+            <EmptyState icon="🧒" title="Nobody registered for this session" body="Children appear here once they are enrolled in this class, or have a Day Pass for this date." />
           ) : (
             <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
               {children.map((child) => (
@@ -209,7 +209,7 @@ function Register({ session }) {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 16, fontWeight: 700, color: OPS_COLORS.ink, overflowWrap: 'anywhere' }}>{child.name}</div>
                     <div style={{ fontSize: 11.5, color: OPS_COLORS.muted }}>
-                      {child.plan === 'membership' ? 'Member' : child.plan === 'day_pass' ? 'Day Pass' : 'Added to this register'}
+                      {child.plan === 'membership' ? 'Member' : child.plan === 'day_pass' ? 'Day Pass' : child.plan === 'enrolled' ? 'Enrolled' : 'Added to this register'}
                       {child.markedBy && child.status ? ` · ${child.markedBy}` : ''}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>

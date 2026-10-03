@@ -257,8 +257,9 @@ async function run() {
     check('Stripe subscription is active: £25/month × 2 = £50/month', subscription.status === 'active' && subscription.items.data[0]?.price?.id === process.env.STRIPE_MONTHLY_PRICE_ID && subscription.items.data[0]?.quantity === 2, `${subscription.status}, qty ${subscription.items.data[0]?.quantity}`)
     const { data: completedRequest } = await service.from('subscription_requests').select('status,completed_at,stripe_subscription_id').eq('id', sent.id).single()
     check('Request marked completed', completedRequest.status === 'completed' && completedRequest.stripe_subscription_id === family.stripe_subscription_id)
-    const { data: kids } = await service.from('students').select('membership_status').eq('family_id', cleanup.familyId)
+    const { data: kids } = await service.from('students').select('membership_status,class_name,term').eq('family_id', cleanup.familyId)
     check("Both children's memberships are now active", kids.length === 3 && kids.every((kid) => kid.membership_status === 'active'))
+    check('Children without a class are enrolled in a class from today, so they reach the register', kids.every((kid) => kid.class_name && /^\d{4}-\d{2}-\d{2}$/.test(kid.term || '')), kids.map((kid) => `${kid.class_name}:${kid.term}`).join(', '))
 
     const subDelivery = await replayCheckoutEvent(subSessionId)
     const { data: afterReplay } = await service.from('subscription_requests').select('completed_at').eq('id', sent.id).single()

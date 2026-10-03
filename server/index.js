@@ -3777,6 +3777,24 @@ app.post('/api/admin/subscription-requests', async (request, response) => {
   response.json({ id: claim.id, recipient: family.guardian_email, plan, children, totalPence: quote.totalPence, subtotalPence: quote.subtotalPence, laterPence: quote.laterPence, discount: quote.discount, emailId: result.id })
 })
 
+// Children added on the parent account have no class, so they would never reach a
+// register. Put them in the class a sibling attends, else the only scheduled class,
+// starting today (London). Children who already have a class are left alone.
+async function enrolUnassignedChildren(familyId) {
+  const { data: kids, error } = await supabase.from('students').select('id,class_name').eq('family_id', familyId)
+  if (error) return console.error('Enrol children lookup failed:', error)
+  const unassigned = (kids || []).filter((kid) => !kid.class_name)
+  if (!unassigned.length) return
+  let className = kids.find((kid) => kid.class_name)?.class_name
+  if (!className) {
+    const { data: classes } = await supabase.from('class_sessions').select('name').eq('active', true)
+    if (classes?.length === 1) className = classes[0].name
+  }
+  if (!className) return console.error(`Family ${familyId}: children not enrolled in a class (no sibling class and not exactly one scheduled class).`)
+  const { error: enrolError } = await supabase.from('students').update({ class_name: className, term: londonNow().date }).in('id', unassigned.map((kid) => kid.id))
+  if (enrolError) console.error('Enrol children failed:', enrolError)
+}
+
 // Webhook (and return page) handler for kind=subscription_request. Safe to run
 // more than once for the same session: the family update is the same each time
 // and only the first run claims the request and sends the emails.
@@ -3813,6 +3831,7 @@ async function recordSubscriptionRequest(session) {
   if (family) {
     const { error: studentError } = await supabase.from('students').update({ membership_status: 'active' }).eq('family_id', family.id)
     if (studentError) console.error('Subscription request student update failed:', studentError)
+    await enrolUnassignedChildren(family.id)
   }
   const { data: claimed, error: claimError } = await supabase.from('subscription_requests')
     .update({ status: 'completed', completed_at: new Date().toISOString(), stripe_checkout_session_id: session.id, stripe_subscription_id: subscriptionId })

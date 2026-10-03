@@ -6,7 +6,8 @@ import { childStats, sessionStats, trend, overallByDate } from '../src/ops/atten
 // project. Creates test children in the real "Saturday Gospel Afrobeats" class
 // and three temporary staff logins, then checks:
 //   1. Who is on the register: members from their start date, Day Passes on
-//      their date only; cancelled and unpaid bookings excluded
+//      their date only; enrolled-but-unpaid (inactive) children included;
+//      cancelled bookings excluded
 //   2. Permission gate: attendance-only staff can take the register (without
 //      reading the students table); staff without the permission, and anonymous
 //      visitors, can't read, write or list anything
@@ -49,7 +50,7 @@ const week = (n) => addDays(session, -7 * n) // n weeks before the session
 
 // Test data ids.
 const familyId = `att-verify-family-${stamp}`
-const ids = { member: `att-verify-member-${stamp}`, dayToday: `att-verify-daypass-${stamp}`, dayCancelled: `att-verify-cancelled-${stamp}`, dayPast: `att-verify-past-${stamp}`, unpaid: `att-verify-unpaid-${stamp}` }
+const ids = { member: `att-verify-member-${stamp}`, dayToday: `att-verify-daypass-${stamp}`, dayCancelled: `att-verify-cancelled-${stamp}`, dayPast: `att-verify-past-${stamp}`, unpaid: `att-verify-unpaid-${stamp}`, enquiry: `att-verify-enquiry-${stamp}` }
 const kids = {
   ada: { id: `att-verify-ada-${stamp}`, name: `Ada Verify ${stamp}`, booking: ids.member, term: week(4) },
   ben: { id: `att-verify-ben-${stamp}`, name: `Ben Verify ${stamp}`, booking: ids.member, term: week(4) },
@@ -57,6 +58,8 @@ const kids = {
   xavi: { id: `att-verify-xavi-${stamp}`, name: `Xavi Verify ${stamp}`, booking: ids.dayCancelled, term: session },
   dami: { id: `att-verify-dami-${stamp}`, name: `Dami Verify ${stamp}`, booking: ids.dayPast, term: week(1) },
   ines: { id: `att-verify-ines-${stamp}`, name: `Ines Verify ${stamp}`, booking: ids.unpaid, term: week(4), status: 'inactive' },
+  // Same shape as a family moving onto the new system: plain enquiry booking, not paid yet.
+  enzo: { id: `att-verify-enzo-${stamp}`, name: `Enzo Verify ${stamp}`, booking: ids.enquiry, term: week(4), status: 'inactive' },
 }
 const testIds = new Set(Object.values(kids).map((kid) => kid.id))
 
@@ -87,6 +90,7 @@ async function setup() {
     booking(ids.dayCancelled, 'day_pass', session, { status: 'Cancelled' }),
     booking(ids.dayPast, 'day_pass', week(1)),
     booking(ids.unpaid, 'monthly_membership', week(4), { status: 'Enquiry', payment_status: 'pending', invoice_status: 'Not sent' }),
+    booking(ids.enquiry, 'x', week(4), { session_type: CLASS, status: 'Enquiry', payment_status: 'pending', invoice_status: 'Not sent' }),
   ])
   if (bookingError) throw new Error(`bookings: ${bookingError.message}`)
   const { error: studentError } = await service.from('students').insert(Object.values(kids).map((kid) => ({ id: kid.id, booking_id: kid.booking, family_id: familyId, parent_name: 'Attendance Verify', parent_email: 'delivered@resend.dev', name: kid.name, date_of_birth: '2016-05-01', class_name: CLASS, term: kid.term, membership_status: kid.status || 'active' })))
@@ -110,11 +114,14 @@ async function run() {
 
   // 1. Who is on the register.
   let roster = await rosterIds(leader, session)
-  check('register for the session: both members + today\'s Day Pass', sameSet(roster.ids, [kids.ada.id, kids.ben.id, kids.cara.id]), roster.error || roster.ids.map((id) => id.split('-')[2]).join(','))
-  check('cancelled Day Pass and unpaid membership are not on it', !roster.ids.includes(kids.xavi.id) && !roster.ids.includes(kids.ines.id))
+  check('register for the session: members + today\'s Day Pass + enrolled-but-unpaid children', sameSet(roster.ids, [kids.ada.id, kids.ben.id, kids.cara.id, kids.ines.id, kids.enzo.id]), roster.error || roster.ids.map((id) => id.split('-')[2]).join(','))
+  check('cancelled Day Pass is not on it', !roster.ids.includes(kids.xavi.id))
+  check('inactive enquiry child is labelled Enrolled', roster.rows?.find((row) => row.student_id === kids.enzo.id)?.plan === 'enrolled')
+  const addable = ((await leader.rpc('attendance_class_students', { p_class: CLASS })).data || []).map((row) => row.student_id)
+  check('inactive children can be added by hand', addable.includes(kids.ines.id) && addable.includes(kids.enzo.id))
   check('nobody starts marked', roster.rows?.filter((row) => testIds.has(row.student_id)).every((row) => row.status === null))
   roster = await rosterIds(leader, week(1))
-  check('last week: members + that week\'s Day Pass only', sameSet(roster.ids, [kids.ada.id, kids.ben.id, kids.dami.id]))
+  check('last week: enrolled children + that week\'s Day Pass only', sameSet(roster.ids, [kids.ada.id, kids.ben.id, kids.dami.id, kids.ines.id, kids.enzo.id]))
   roster = await rosterIds(leader, week(5))
   check('before the membership started: nobody', roster.ids.length === 0)
 
