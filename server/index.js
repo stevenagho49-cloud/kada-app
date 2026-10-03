@@ -62,7 +62,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // idempotencyKey: Resend returns the original email instead of sending again
 // when the same key is reused within 24h (used by campaign sends, which can be
 // resumed after a restart). Rate-limited calls (429) are retried with backoff.
-async function sendEmail({ to, subject, html, attachments = [], idempotencyKey = '', bcc = '' }) {
+async function sendEmail({ to, subject, html, attachments = [], idempotencyKey = '', bcc = '', headers = null }) {
   if (!process.env.RESEND_API_KEY || !to) return { sent: false, reason: 'email not configured' }
   for (let attempt = 1; ; attempt += 1) {
     try {
@@ -76,6 +76,7 @@ async function sendEmail({ to, subject, html, attachments = [], idempotencyKey =
           subject,
           html,
           ...(attachments.length ? { attachments } : {}),
+          ...(headers ? { headers } : {}),
         }),
       })
       const result = await resendResponse.json()
@@ -311,8 +312,10 @@ function verifySvixSignature(rawBody, headers, secret) {
 async function applyResendEvent({ emailId, type, at, data = {} }) {
   const event = String(type || '').replace(/^email\./, '')
   if (!emailId || !(event in RESEND_EVENT_RANK)) return { matched: false }
-  const { data: row } = await supabase.from('campaign_sends').select('id,last_event,delivered_at,delivery_delayed_at,bounced_at,complained_at,resend_opened_at,resend_clicked_at').eq('resend_id', emailId).maybeSingle()
+  const { data: row } = await supabase.from('campaign_sends').select('id,email,campaign_id,last_event,delivered_at,delivery_delayed_at,bounced_at,complained_at,resend_opened_at,resend_clicked_at').eq('resend_id', emailId).maybeSingle()
   if (!row) return { matched: false } // a transactional email, not a campaign send
+  // Marking a campaign as spam counts as unsubscribing from all campaigns.
+  if (event === 'complained') await recordUnsubscribe(row.email, 'spam-complaint', row.campaign_id)
   const when = at || new Date().toISOString()
   const update = {}
   if (event === 'delivered' && !row.delivered_at) update.delivered_at = when
@@ -2052,7 +2055,6 @@ app.post('/api/admin/invitations/:id/resend', async (request, response) => {
 /* Each send creates individual campaign_sends rows so every recipient   */
 /* gets their own Resend email (proper deliverability, no To: lists).    */
 /* ------------------------------------------------------------------ */
-const CAMPAIGN_AUDIENCES = ['all', 'school', 'parent', 'client', 'partner', 'other', 'custom']
 const RECURRENCE_MS = { none: 0, daily: 86400000, weekly: 604800000, monthly: 2592000000 }
 
 /* Normalise a hand-entered list into unique, valid, lowercased addresses. */
@@ -2061,41 +2063,120 @@ function cleanEmailList(value) {
   return [...new Set(list.map((item) => String(item).trim().toLowerCase()).filter((item) => /.+@.+\..+/.test(item)))]
 }
 
-/* Whether the custom_emails column exists (migration applied). Probed once   */
-/* and cached; if absent we fall back to storing the list in the campaign    */
-/* name so one-off sends still work before the migration is applied.          */
-let customEmailsSupported = null
-async function hasCustomEmailsColumn() {
-  if (customEmailsSupported !== null) return customEmailsSupported
-  const { error } = await supabase.from('campaigns').select('custom_emails').limit(0)
-  customEmailsSupported = !(error && /custom_emails/.test(error.message))
-  return customEmailsSupported
+/* ------------------------------------------------------------------ */
+/* Campaign audiences. A campaign picks any number of segments; each    */
+/* person gets one email however many segments they are in (matched by */
+/* email). Segments map to real data only:                             */
+/*   all            every contact                                       */
+/*   kind:<kind>    contacts of one kind (school, parent, …)            */
+/*   tag:<tag>      contacts carrying a tag (import lists, events)      */
+/*   db:…           parent accounts, school records, instructors, paid  */
+/*                  event ticket buyers (not all of them are contacts)  */
+/* Typed addresses are added on top. Then the campaign's own exclusions */
+/* and everyone on the unsubscribe list are removed, always.            */
+/* ------------------------------------------------------------------ */
+const SEGMENTS_MIGRATION = 'Apply supabase/migrations/20261004_campaign_segments_unsubscribes.sql in the Supabase SQL Editor.'
+const CONTACT_KIND_LABELS = { school: 'School contacts', parent: 'Parent contacts', client: 'Clients', partner: 'Partners', 'event-attendee': 'Event attendees', other: 'Other contacts' }
+const DATA_SEGMENTS = {
+  'db:parent-accounts': { label: 'Parent accounts', load: async () => (await selectAll(() => supabase.from('parent_families').select('guardian_name,guardian_email').order('id'))).map((row) => ({ email: row.guardian_email, name: row.guardian_name })) },
+  'db:schools': { label: 'School records', load: async () => (await selectAll(() => supabase.from('schools').select('name,contact_name,email').order('id'))).map((row) => ({ email: row.email, name: row.contact_name || row.name })) },
+  'db:instructors': { label: 'Instructors', load: async () => (await selectAll(() => supabase.from('instructors').select('name,email').order('id'))).map((row) => ({ email: row.email, name: row.name })) },
+  'db:ticket-buyers': { label: 'Event ticket buyers', load: async () => (await selectAll(() => supabase.from('event_ticket_orders').select('buyer_name,buyer_email').eq('payment_status', 'paid').order('id'))).map((row) => ({ email: row.buyer_email, name: row.buyer_name })) },
+}
+const LEGACY_AUDIENCE = { all: ['all'], school: ['kind:school'], parent: ['kind:parent'], client: ['kind:client'], partner: ['kind:partner'], other: ['kind:other'], custom: [], multi: [] }
+const segmentLabel = (key) => (key === 'all' ? 'Everyone in Contacts' : key.startsWith('kind:') ? CONTACT_KIND_LABELS[key.slice(5)] || key.slice(5) : key.startsWith('tag:') ? `Tag: ${key.slice(4)}` : DATA_SEGMENTS[key]?.label || key)
+const isSegmentKey = (key) => key === 'all' || (key.startsWith('kind:') && key.slice(5) in CONTACT_KIND_LABELS) || (key.startsWith('tag:') && key.length > 4) || key in DATA_SEGMENTS
+const campaignAudiences = (campaign) => (campaign.audiences?.length ? campaign.audiences : LEGACY_AUDIENCE[campaign.audience] || [])
+const normalEmail = (value) => String(value || '').trim().toLowerCase()
+
+async function unsubscribedEmails() {
+  const rows = await selectAll(() => supabase.from('email_unsubscribes').select('email').order('email')).catch((error) => {
+    throw new Error(/email_unsubscribes/.test(error.message) ? `Unsubscribes are not set up yet, so nothing can be sent safely. ${SEGMENTS_MIGRATION}` : `The unsubscribe list could not be loaded: ${error.message}`)
+  })
+  return new Set(rows.map((row) => row.email))
 }
 
-async function campaignRecipients(audience, customEmails = []) {
-  const recipients = []
-  const seen = new Set()
-  const add = (contact) => {
-    if (!contact.email) return
-    const email = contact.email.toLowerCase()
-    if (seen.has(email)) return
-    seen.add(email)
-    recipients.push({ id: contact.id || null, name: contact.name || '', email })
+async function recordUnsubscribe(email, source, campaignId = null) {
+  const clean = normalEmail(email)
+  if (!clean) return { error: null }
+  const { error } = await supabase.from('email_unsubscribes').upsert({ email: clean, source, campaign_id: campaignId || null }, { onConflict: 'email', ignoreDuplicates: true })
+  if (error) await alertFailure('An unsubscribe could not be saved (this person may get the next campaign)', error, { Email: clean, How: source })
+  return { error }
+}
+
+// Everyone a campaign would reach, with how the number was arrived at.
+async function resolveAudience({ audiences = [], customEmails = [], excludedEmails = [] }) {
+  const keys = [...new Set((audiences || []).map(String))]
+  const unknown = keys.filter((key) => !isSegmentKey(key))
+  if (unknown.length) throw new Error(`Unknown audience: ${unknown.join(', ')}`)
+  const contacts = keys.some((key) => key === 'all' || key.startsWith('kind:') || key.startsWith('tag:'))
+    ? await selectAll(() => supabase.from('contacts').select('id,name,email,kind,tags').order('id'))
+    : []
+  const segments = []
+  for (const key of keys) {
+    const members = key === 'all' ? contacts
+      : key.startsWith('kind:') ? contacts.filter((contact) => contact.kind === key.slice(5))
+      : key.startsWith('tag:') ? contacts.filter((contact) => (contact.tags || []).includes(key.slice(4)))
+      : await DATA_SEGMENTS[key].load() // eslint-disable-line no-await-in-loop
+    segments.push({ key, label: segmentLabel(key), members: members.map((member) => ({ email: normalEmail(member.email), name: member.name || '', contactId: member.id || null })).filter((member) => /.+@.+\..+/.test(member.email)) })
   }
-  if (audience !== 'custom') {
-    // PostgREST returns at most 1,000 rows per request, so page through the CRM.
-    for (let from = 0; ; from += 1000) {
-      let query = supabase.from('contacts').select('id,name,email,kind').order('id').range(from, from + 999)
-      if (audience !== 'all') query = query.eq('kind', audience)
-      const { data, error } = await query // eslint-disable-line no-await-in-loop
-      if (error) throw new Error(`Contacts could not be loaded: ${error.message}`)
-      ;(data || []).forEach(add)
-      if ((data || []).length < 1000) break
+  const typed = cleanEmailList(customEmails)
+  if (typed.length) segments.push({ key: 'custom', label: 'Typed addresses', members: typed.map((email) => ({ email, name: email.split('@')[0].replace(/[._-]+/g, ' '), contactId: null })) })
+  const byEmail = new Map()
+  let duplicates = 0
+  for (const segment of segments) {
+    for (const member of segment.members) {
+      const existing = byEmail.get(member.email)
+      if (existing) {
+        duplicates += 1
+        if (!existing.segments.includes(segment.label)) existing.segments.push(segment.label)
+        if (!existing.contactId && member.contactId) Object.assign(existing, { contactId: member.contactId, name: member.name || existing.name })
+      } else {
+        byEmail.set(member.email, { ...member, segments: [segment.label] })
+      }
     }
   }
-  // One-off list always sends, whether it is the audience or extra addresses.
-  cleanEmailList(customEmails).forEach((email) => add({ email, name: email.split('@')[0].replace(/[._-]+/g, ' ') }))
-  return recipients
+  const unsubscribed = await unsubscribedEmails()
+  const excluded = new Set(cleanEmailList(excludedEmails))
+  const everyone = [...byEmail.values()].map((person) => ({ ...person, unsubscribed: unsubscribed.has(person.email), excluded: excluded.has(person.email) }))
+  const recipients = everyone.filter((person) => !person.unsubscribed && !person.excluded)
+  return {
+    recipients,
+    everyone,
+    breakdown: segments.map((segment) => ({ key: segment.key, label: segment.label, count: segment.members.length })),
+    matched: byEmail.size,
+    duplicates,
+    unsubscribed: everyone.filter((person) => person.unsubscribed).length,
+    excluded: everyone.filter((person) => person.excluded && !person.unsubscribed).length,
+    total: recipients.length,
+  }
+}
+
+/* Unsubscribe links. The token is the address plus a signature, so a link only */
+/* ever unsubscribes the person it was sent to. Opening the link shows a        */
+/* confirm button (mail scanners that follow links can't unsubscribe anyone);  */
+/* mail apps' one-click unsubscribe POSTs straight to the same address.        */
+const unsubscribeKey = () => process.env.UNSUBSCRIBE_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'kada'
+const unsubscribeSignature = (email) => createHmac('sha256', unsubscribeKey()).update(`unsubscribe:${email}`).digest('base64url').slice(0, 32)
+function unsubscribeUrl(email, campaignId = '') {
+  const clean = normalEmail(email)
+  return `${APP_URL}/api/unsubscribe/${Buffer.from(clean).toString('base64url')}.${unsubscribeSignature(clean)}${campaignId ? `?c=${campaignId}` : ''}`
+}
+function emailFromUnsubscribeToken(token) {
+  const [encoded, signature] = String(token || '').split('.')
+  if (!encoded || !signature) return ''
+  const email = normalEmail(Buffer.from(encoded, 'base64url').toString('utf8'))
+  const expected = Buffer.from(unsubscribeSignature(email))
+  const given = Buffer.from(signature)
+  return given.length === expected.length && timingSafeEqual(given, expected) ? email : ''
+}
+// Adds the unsubscribe link to a campaign email's footer (or under it).
+function withUnsubscribeLink(html, url) {
+  const link = `<a href="${url}" style="color:#767066;text-decoration:underline">Unsubscribe</a>`
+  const footer = "You're receiving this because you're part of the KADA community."
+  return String(html).includes(footer)
+    ? String(html).replace(footer, `${footer} ${link} from these emails.`)
+    : `${html}<p style="text-align:center;font-family:Arial,sans-serif;font-size:12px;color:#767066;margin:16px 0">Don't want these emails? ${link}.</p>`
 }
 
 /* Whether the Resend delivery-tracking columns exist (cached, probed once). */
@@ -2146,7 +2227,8 @@ async function queueDueCampaigns() {
     const markerMatch = /\s*\[one-off: ([^\]]+)\]$/.exec(campaign.name || '')
     const isOneOff = Boolean(markerMatch)
     const list = (campaign.custom_emails && campaign.custom_emails.length) ? campaign.custom_emails : (isOneOff ? cleanEmailList(markerMatch[1]) : [])
-    let recipients = isOneOff ? list.map((email) => ({ id: null, email })) : await campaignRecipients(campaign.audience, list) // eslint-disable-line no-await-in-loop
+    // eslint-disable-next-line no-await-in-loop
+    let recipients = (await resolveAudience({ audiences: isOneOff ? [] : campaignAudiences(campaign), customEmails: list, excludedEmails: campaign.excluded_emails || [] })).recipients.map((person) => ({ id: person.contactId, email: person.email }))
     if (campaign.recurrence === 'none') {
       // A one-off campaign that was paused and rescheduled carries on: nobody gets it twice.
       const already = await selectAll(() => supabase.from('campaign_sends').select('email').eq('campaign_id', campaign.id).in('status', ['queued', 'sent'])) // eslint-disable-line no-await-in-loop
@@ -2196,17 +2278,24 @@ async function sendQueuedCampaignEmails() {
     const contactIds = batch.map((row) => row.contact_id).filter(Boolean)
     const { data: contacts } = contactIds.length ? await supabase.from('contacts').select('id,name').in('id', contactIds) : { data: [] } // eslint-disable-line no-await-in-loop
     const nameById = new Map((contacts || []).map((contact) => [contact.id, contact.name]))
+    // Re-read every batch: someone who unsubscribes mid-send is never emailed.
+    const unsubscribed = await unsubscribedEmails() // eslint-disable-line no-await-in-loop
     let progressed = false
     for (const row of batch) {
       const campaign = campaigns.get(row.campaign_id)
       if (campaign?.status === 'paused') continue // left queued; picked up again if it is rescheduled
       progressed = true
+      if (unsubscribed.has(normalEmail(row.email))) {
+        const { error: skipError } = await supabase.from('campaign_sends').update({ status: 'skipped', error: 'Unsubscribed before this email went out.' }).eq('id', row.id).eq('status', 'queued') // eslint-disable-line no-await-in-loop
+        if (skipError) throw new Error(`Campaign email to ${row.email} was held back (unsubscribed), but that could not be saved: ${skipError.message}`)
+        continue
+      }
       const name = (nameById.get(row.contact_id) || row.email.split('@')[0].replace(/[._-]+/g, ' ')).trim() || 'there'
       const html = String(campaign?.body_html || '').replace(/{{name}}/g, escHtml(name))
       const result = campaign?.blockError
         ? { sent: false, reason: campaign.blockError }
         : campaign
-        ? await sendEmail({ to: row.email, subject: campaign.subject, html: track ? instrumentCampaignHtml(html, row.id) : html, idempotencyKey: `campaign-send-${row.id}` }) // eslint-disable-line no-await-in-loop
+        ? await sendEmail({ to: row.email, subject: campaign.subject, html: withUnsubscribeLink(track ? instrumentCampaignHtml(html, row.id) : html, unsubscribeUrl(row.email, campaign.id)), headers: { 'List-Unsubscribe': `<${unsubscribeUrl(row.email, campaign.id)}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' }, idempotencyKey: `campaign-send-${row.id}` }) // eslint-disable-line no-await-in-loop
         : { sent: false, reason: 'Campaign was deleted.' }
       const update = { status: result.sent ? 'sent' : 'failed', error: result.sent ? null : result.reason, sent_at: result.sent ? new Date().toISOString() : null }
       if (tracking && result.sent) Object.assign(update, { resend_id: result.id, last_event: 'sent' })
@@ -2240,43 +2329,40 @@ setTimeout(() => { runDueCampaigns().catch((error) => alertFailure('The email ca
 app.post('/api/admin/campaigns', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
-  const { name, subject, previewText = '', bodyHtml = '', audience = 'all', recurrence = 'none', scheduledAt = null, customEmails = [] } = request.body || {}
+  const { name, subject, previewText = '', bodyHtml = '', audiences = [], recurrence = 'none', scheduledAt = null, customEmails = [], excludedEmails = [] } = request.body || {}
   if (!name || !subject || !bodyHtml) return response.status(400).json({ error: 'Name, subject and body are required.' })
-  if (!CAMPAIGN_AUDIENCES.includes(audience)) return response.status(400).json({ error: 'Unknown audience.' })
   if (!Object.keys(RECURRENCE_MS).includes(recurrence)) return response.status(400).json({ error: 'Unknown schedule.' })
+  const keys = [...new Set((Array.isArray(audiences) ? audiences : []).map(String))]
+  const unknown = keys.filter((key) => !isSegmentKey(key))
+  if (unknown.length) return response.status(400).json({ error: `Unknown audience: ${unknown.join(', ')}` })
   const emails = cleanEmailList(customEmails)
-  if (audience === 'custom' && !emails.length) return response.status(400).json({ error: 'Add at least one email address for a one-off list.' })
-  const hasColumn = await hasCustomEmailsColumn()
-  // Until the custom-list migration is applied, the campaigns table rejects
-  // audience 'custom' and has no custom_emails column. Store a valid audience
-  // ('other') and carry the real audience + addresses in the campaign name so
-  // the send path can recover them and the emails still go out.
-  const storedAudience = hasColumn || audience !== 'custom' ? audience : 'other'
-  const marker = !hasColumn && audience === 'custom' ? ` [one-off: ${emails.join(', ')}]` : ''
-  const storedName = `${name}${marker}`
-  const record = { name: storedName, subject, preview_text: previewText, body_html: bodyHtml, audience: storedAudience, recurrence, scheduled_at: scheduledAt, status: scheduledAt ? 'scheduled' : 'draft', created_by: user.id }
-  if (hasColumn) record.custom_emails = emails
+  if (!keys.length && !emails.length) return response.status(400).json({ error: 'Choose at least one audience, or type some email addresses.' })
+  const record = { name, subject, preview_text: previewText, body_html: bodyHtml, audience: keys.length ? 'multi' : 'custom', audiences: keys, custom_emails: emails, excluded_emails: cleanEmailList(excludedEmails), recurrence, scheduled_at: scheduledAt, status: scheduledAt ? 'scheduled' : 'draft', created_by: user.id }
   const { data, error } = await supabase.from('campaigns').insert(record).select().maybeSingle()
-  if (error) return response.status(500).json({ error: `Campaign could not be saved: ${error.message}` })
+  if (error) return response.status(500).json({ error: /audiences|excluded_emails|campaigns_audience_check/.test(error.message) ? `Audience segments are not set up yet. ${SEGMENTS_MIGRATION}` : `Campaign could not be saved: ${error.message}` })
   response.json({ campaign: data })
 })
 
 app.get('/api/admin/campaigns', async (request, response) => {
   const user = await requireAdmin(request, response)
   if (!user) return
-  const { data, error } = await supabase.from('campaigns').select('id,name,subject,audience,status,recurrence,scheduled_at,updated_at').order('updated_at', { ascending: false })
+  const { data, error } = await supabase.from('campaigns').select('*').order('updated_at', { ascending: false })
   if (error) return response.status(500).json({ error: 'Campaigns could not be loaded.' })
   const counts = {}
   const sendRows = await selectAll(() => supabase.from('campaign_sends').select('campaign_id,status').order('id')).catch(() => [])
   sendRows.forEach((row) => {
-    counts[row.campaign_id] = counts[row.campaign_id] || { sent: 0, failed: 0, queued: 0 }
-    counts[row.campaign_id][row.status === 'sent' ? 'sent' : row.status === 'queued' ? 'queued' : 'failed'] += 1
+    counts[row.campaign_id] = counts[row.campaign_id] || { sent: 0, failed: 0, queued: 0, skipped: 0 }
+    counts[row.campaign_id][['sent', 'queued', 'skipped'].includes(row.status) ? row.status : 'failed'] += 1
   })
   response.json({ campaigns: (data || []).map((campaign) => {
     const oneOff = /\s*\[one-off: ([^\]]+)\]$/.exec(campaign.name || '')?.[1]
+    const { body_html: bodyHtml, ...summary } = campaign // eslint-disable-line no-unused-vars
     return {
-      ...campaign,
+      ...summary,
       audience: oneOff ? 'custom' : campaign.audience,
+      audienceLabels: (oneOff ? [] : campaignAudiences(campaign)).map(segmentLabel),
+      excludedCount: (campaign.excluded_emails || []).length,
+      skippedCount: counts[campaign.id]?.skipped || 0,
       custom_emails: (campaign.custom_emails && campaign.custom_emails.length) ? campaign.custom_emails : (oneOff ? cleanEmailList(oneOff) : []),
       name: oneOff ? campaign.name.replace(/\s*\[one-off: [^\]]+\]$/, '') : campaign.name,
       sentCount: counts[campaign.id]?.sent || 0,
@@ -2288,17 +2374,55 @@ app.get('/api/admin/campaigns', async (request, response) => {
 
 // How many people a campaign will actually reach (unique addresses), shown
 // before sending so a big send is never a surprise.
-app.post('/api/admin/campaigns/audience-count', async (request, response) => {
-  const user = await requireAdmin(request, response)
-  if (!user) return
-  const { audience = 'all', customEmails = [] } = request.body || {}
-  if (!CAMPAIGN_AUDIENCES.includes(audience)) return response.status(400).json({ error: 'Unknown audience.' })
+// The segments a campaign can pick, with how many addresses each holds.
+app.get('/api/admin/campaigns/segments', async (request, response) => {
+  if (!(await requireAdmin(request, response))) return
   try {
-    const recipients = await campaignRecipients(audience, cleanEmailList(customEmails))
-    response.json({ count: recipients.length })
+    const contacts = await selectAll(() => supabase.from('contacts').select('email,kind,tags').order('id'))
+    const withEmail = contacts.filter((contact) => /.+@.+\..+/.test(normalEmail(contact.email)))
+    const kinds = Object.keys(CONTACT_KIND_LABELS).map((kind) => ({ key: `kind:${kind}`, label: CONTACT_KIND_LABELS[kind], group: 'Contacts', count: withEmail.filter((contact) => contact.kind === kind).length }))
+    const tagCounts = {}
+    withEmail.forEach((contact) => (contact.tags || []).forEach((tag) => { tagCounts[tag] = (tagCounts[tag] || 0) + 1 }))
+    const tags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).map(([tag, count]) => ({ key: `tag:${tag}`, label: tag, group: 'Contact tags', count }))
+    const data = await Promise.all(Object.entries(DATA_SEGMENTS).map(async ([key, segment]) => ({ key, label: segment.label, group: 'Accounts and records', count: new Set((await segment.load()).map((row) => normalEmail(row.email)).filter((email) => /.+@.+\..+/.test(email))).size })))
+    const { count: unsubscribedCount, error } = await supabase.from('email_unsubscribes').select('email', { count: 'exact', head: true })
+    response.json({ segments: [{ key: 'all', label: 'Everyone in Contacts', group: 'Contacts', count: withEmail.length }, ...kinds, ...data, ...tags], unsubscribedCount: error ? null : unsubscribedCount, migrationNeeded: error ? SEGMENTS_MIGRATION : '' })
   } catch (error) {
     response.status(500).json({ error: error.message })
   }
+})
+
+// Exactly who a campaign would reach: totals, how they were arrived at, and the
+// people (so admin can exclude individuals).
+app.post('/api/admin/campaigns/audience-preview', async (request, response) => {
+  if (!(await requireAdmin(request, response))) return
+  const { audiences = [], customEmails = [], excludedEmails = [] } = request.body || {}
+  try {
+    const result = await resolveAudience({ audiences, customEmails, excludedEmails })
+    response.json({ ...result, recipients: undefined, people: result.everyone.map((person) => ({ email: person.email, name: person.name, segments: person.segments, excluded: person.excluded, unsubscribed: person.unsubscribed })) })
+  } catch (error) {
+    response.status(/Unknown audience/.test(error.message) ? 400 : 500).json({ error: error.message })
+  }
+})
+
+app.get('/api/unsubscribe/:token', async (request, response) => {
+  const email = emailFromUnsubscribeToken(request.params.token)
+  if (!email || !supabase) return invoicePayPage(response, { title: 'Link not recognised', status: 404, body: '<p>This unsubscribe link is not valid. Reply to any of our emails, or email <a href="mailto:bookings@kingsarkdance.com" style="color:#0b3d2e">bookings@kingsarkdance.com</a>, and we will take you off our list.</p>' })
+  const { data: already } = await supabase.from('email_unsubscribes').select('email').eq('email', email).maybeSingle()
+  if (already) return invoicePayPage(response, { title: "You're unsubscribed", body: `<p><strong>${escHtml(email)}</strong> won't receive any more news or campaign emails from King's Ark Dance Academy.</p><p>You'll still get emails about your own bookings, tickets and payments.</p>` })
+  invoicePayPage(response, { title: 'Unsubscribe', body: `<p>Stop news and campaign emails from King's Ark Dance Academy to <strong>${escHtml(email)}</strong>?</p><form method="post"><button type="submit" style="background:#0b3d2e;color:#fffdf8;border:0;padding:12px 22px;border-radius:8px;font-weight:700;font-size:15px;cursor:pointer">Unsubscribe</button></form><p style="color:#767066;font-size:13px">You'll still get emails about your own bookings, tickets and payments.</p>` })
+})
+
+// The confirm button, and mail apps' one-click unsubscribe (RFC 8058).
+app.post('/api/unsubscribe/:token', express.urlencoded({ extended: false }), async (request, response) => {
+  const email = emailFromUnsubscribeToken(request.params.token)
+  const oneClick = request.body?.['List-Unsubscribe'] === 'One-Click'
+  if (!email || !supabase) return oneClick ? response.status(404).send('Unknown link') : invoicePayPage(response, { title: 'Link not recognised', status: 404, body: '<p>This unsubscribe link is not valid.</p>' })
+  const campaignId = /^[0-9a-f-]{36}$/.test(String(request.query.c || '')) ? String(request.query.c) : null
+  const { error } = await recordUnsubscribe(email, oneClick ? 'one-click' : 'link', campaignId)
+  if (oneClick) return error ? response.status(500).send('Could not unsubscribe') : response.send('Unsubscribed')
+  if (error) return invoicePayPage(response, { title: 'Something went wrong', status: 500, body: '<p>We could not save that just now. Please try again, or email <a href="mailto:bookings@kingsarkdance.com" style="color:#0b3d2e">bookings@kingsarkdance.com</a> and we will take you off our list.</p>' })
+  invoicePayPage(response, { title: "You're unsubscribed", body: `<p><strong>${escHtml(email)}</strong> won't receive any more news or campaign emails from King's Ark Dance Academy.</p><p>You'll still get emails about your own bookings, tickets and payments.</p>` })
 })
 
 app.post('/api/admin/campaigns/:id/schedule', async (request, response) => {
@@ -2630,6 +2754,7 @@ app.get('/api/admin/campaigns/:id/analytics', async (request, response) => {
     queued: list.filter((row) => row.status === 'queued').length,
     sent: accepted.length,
     failed: list.filter((row) => row.status === 'failed').length + accepted.filter((row) => row.last_event === 'failed').length,
+    skipped: list.filter((row) => row.status === 'skipped').length,
     delivered: delivered.length,
     bounced: bounced.length,
     complained: complained.length,

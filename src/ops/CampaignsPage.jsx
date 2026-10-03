@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { OpsButton, Pill, OPS_COLORS, opsInputStyle } from './ui'
 import { TEMPLATES, TEMPLATE_CATEGORIES } from './emailTemplates'
 import { VisualEmailEditor, sectionsToHtml } from './VisualEmailEditor'
+import { CampaignAudience } from './CampaignAudience'
 
 /* ------------------------------------------------------------------ */
 /* Operations > Marketing > Campaigns ,  design emails from 50 brand    */
@@ -9,15 +10,6 @@ import { VisualEmailEditor, sectionsToHtml } from './VisualEmailEditor'
 /* recurring, and track sent/failed per campaign. Admins only.         */
 /* ------------------------------------------------------------------ */
 
-const AUDIENCES = [
-  { value: 'all', label: 'Everyone (all contacts)' },
-  { value: 'school', label: 'Schools' },
-  { value: 'parent', label: 'Parents' },
-  { value: 'client', label: 'Clients' },
-  { value: 'partner', label: 'Partners' },
-  { value: 'other', label: 'Other' },
-  { value: 'custom', label: 'One-off email list (type the addresses)' },
-]
 const RECURRENCE = [
   { value: 'none', label: 'Send once' },
   { value: 'daily', label: 'Repeat daily' },
@@ -29,7 +21,7 @@ const STATUS_TONES = { draft: 'default', scheduled: 'gold', active: 'green', pau
 const labelStyle = { display: 'block', fontSize: 12, fontWeight: 700, color: OPS_COLORS.emerald, marginBottom: 4 }
 const sectionStyle = { border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 10, padding: 16, background: OPS_COLORS.ivory, marginBottom: 14 }
 
-const emptyDraft = { name: '', subject: '', previewText: '', bodyHtml: '', audience: 'all', recurrence: 'none', scheduledAt: '', customEmails: '' }
+const emptyDraft = { name: '', subject: '', previewText: '', bodyHtml: '', audiences: [], excludedEmails: [], recurrence: 'none', scheduledAt: '', customEmails: '' }
 
 // "Promote this event" (Events page): a draft built around the event block.
 export function promoteEventDraft(event, events) {
@@ -52,7 +44,7 @@ export function CampaignsPage({ session, events = [], seedEventId = '', onSeedUs
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [draft, setDraft] = useState(emptyDraft)
-  const [audienceCount, setAudienceCount] = useState(null)
+  const [audiencePreview, setAudiencePreview] = useState(null)
   const [saving, setSaving] = useState(false)
   const [templateCategory, setTemplateCategory] = useState(TEMPLATE_CATEGORIES[0])
   const [aiPrompt, setAiPrompt] = useState('')
@@ -82,19 +74,6 @@ export function CampaignsPage({ session, events = [], seedEventId = '', onSeedUs
     }
     setLoading(false)
   }
-  // How many unique addresses this campaign will reach, before anything is sent.
-  useEffect(() => {
-    let mounted = true
-    setAudienceCount(null)
-    const timer = window.setTimeout(() => {
-      fetch('/api/admin/campaigns/audience-count', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` }, body: JSON.stringify({ audience: draft.audience, customEmails: draft.customEmails }) })
-        .then((response) => (response.ok ? response.json() : null))
-        .then((result) => { if (mounted && result) setAudienceCount(result.count) })
-        .catch(() => {})
-    }, 400)
-    return () => { mounted = false; window.clearTimeout(timer) }
-  }, [draft.audience, draft.customEmails, session])
-
   useEffect(() => { void load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Arrived from "Promote this event": start the draft from that event.
@@ -130,6 +109,9 @@ export function CampaignsPage({ session, events = [], seedEventId = '', onSeedUs
   const saveAndSchedule = async (sendNow = false) => {
     if (!draft.name.trim() || !draft.subject.trim() || !draft.bodyHtml.trim()) { setError('Give the campaign a name, subject and body.'); return }
     if (!sendNow && !draft.scheduledAt && draft.recurrence === 'none') { setError('Pick a date/time, choose a repeat, or use "Send now".'); return }
+    if (!audiencePreview) { setError('Choose who this goes to: tick at least one audience group, or type some addresses.'); return }
+    if (!audiencePreview.total) { setError('Nobody would receive this: everyone in the chosen groups is excluded or has unsubscribed.'); return }
+    if (sendNow && !window.confirm(`Send "${draft.subject.trim()}" to ${audiencePreview.total.toLocaleString('en-GB')} ${audiencePreview.total === 1 ? 'person' : 'people'} now?`)) return
     setSaving(true)
     setError('')
     try {
@@ -140,8 +122,9 @@ export function CampaignsPage({ session, events = [], seedEventId = '', onSeedUs
           subject: draft.subject.trim(),
           previewText: draft.previewText,
           bodyHtml: draft.bodyHtml,
-          audience: draft.audience,
+          audiences: draft.audiences,
           customEmails: draft.customEmails,
+          excludedEmails: draft.excludedEmails,
           recurrence: draft.recurrence,
           scheduledAt: draft.scheduledAt ? new Date(draft.scheduledAt).toISOString() : null,
         }),
@@ -229,22 +212,17 @@ export function CampaignsPage({ session, events = [], seedEventId = '', onSeedUs
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <label style={{ display: 'block' }}><span style={labelStyle}>Campaign name (internal)</span><input style={opsInputStyle} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-          <label style={{ display: 'block' }}><span style={labelStyle}>Audience</span>
-            <select style={opsInputStyle} value={draft.audience} onChange={(event) => setDraft({ ...draft, audience: event.target.value })}>
-              {AUDIENCES.map((audience) => <option key={audience.value} value={audience.value}>{audience.label}</option>)}
-            </select>
-            <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>{audienceCount === null ? 'Counting recipients…' : `Will be sent to ${audienceCount.toLocaleString('en-GB')} ${audienceCount === 1 ? 'person' : 'people'} (one email each)`}</span>
-          </label>
           <label style={{ display: 'block' }}><span style={labelStyle}>Subject line</span><input style={opsInputStyle} value={draft.subject} onChange={(event) => setDraft({ ...draft, subject: event.target.value })} /></label>
           <label style={{ display: 'block' }}><span style={labelStyle}>Inbox preview text</span><input style={opsInputStyle} value={draft.previewText} onChange={(event) => setDraft({ ...draft, previewText: event.target.value })} /></label>
         </div>
-        {draft.audience === 'custom' && (
-          <label style={{ display: 'block', marginTop: 10 }}>
-            <span style={labelStyle}>One-off email list ,  one or many addresses</span>
-            <textarea style={{ ...opsInputStyle, minHeight: 90, fontFamily: 'monospace', fontSize: 12.5 }} placeholder={'jane@oakridge.sch.uk\nmrsmith@stmarys.org, temi@kingsarkdance.com'} value={draft.customEmails} onChange={(event) => setDraft({ ...draft, customEmails: event.target.value })} />
-            <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>Separate addresses with commas, semicolons or new lines. Anyone already in Contacts is only emailed once.</span>
-          </label>
-        )}
+        <CampaignAudience
+          session={session}
+          audiences={draft.audiences}
+          customEmails={draft.customEmails}
+          excludedEmails={draft.excludedEmails}
+          onChange={(changes) => setDraft((current) => ({ ...current, ...changes }))}
+          onPreview={setAudiencePreview}
+        />
         <div style={{ marginTop: 10 }}>
           <span style={labelStyle}>Email content ,  edit it like a document ({'{{name}}'} inserts the recipient's name). Use Preview to see the finished email.</span>
           {preview
@@ -275,9 +253,9 @@ export function CampaignsPage({ session, events = [], seedEventId = '', onSeedUs
               <div style={{ flex: 1, minWidth: 200 }}>
                 <strong>{campaign.name}</strong>
                 <div style={{ fontSize: 12, color: OPS_COLORS.muted }}>
-                  {AUDIENCES.find((audience) => audience.value === campaign.audience)?.label}{campaign.audience === 'custom' && campaign.custom_emails?.length ? ` (${campaign.custom_emails.length} address${campaign.custom_emails.length === 1 ? '' : 'es'})` : ''} · {RECURRENCE.find((option) => option.value === campaign.recurrence)?.label}
+                  {[...(campaign.audienceLabels || []), ...(campaign.custom_emails?.length ? [`${campaign.custom_emails.length} typed address${campaign.custom_emails.length === 1 ? '' : 'es'}`] : [])].join(' + ') || 'No audience'}{campaign.excludedCount ? ` (${campaign.excludedCount} excluded)` : ''} · {RECURRENCE.find((option) => option.value === campaign.recurrence)?.label}
                   {campaign.scheduled_at ? ` · ${new Date(campaign.scheduled_at).toLocaleString('en-GB')}` : ''}
-                  {campaign.queuedCount ? ` · ${campaign.queuedCount} still sending` : ''}{campaign.sentCount ? ` · ${campaign.sentCount} accepted by Resend` : ''}{campaign.failedCount ? ` · ${campaign.failedCount} failed` : ''}
+                  {campaign.queuedCount ? ` · ${campaign.queuedCount} still sending` : ''}{campaign.sentCount ? ` · ${campaign.sentCount} accepted by Resend` : ''}{campaign.failedCount ? ` · ${campaign.failedCount} failed` : ''}{campaign.skippedCount ? ` · ${campaign.skippedCount} held back (unsubscribed)` : ''}
                 </div>
               </div>
               <Pill text={campaign.status} tone={STATUS_TONES[campaign.status]} />
@@ -354,6 +332,7 @@ function CampaignAnalytics({ session, campaign, onClose }) {
   const pct = (part, whole) => (whole ? `${Math.round((part / whole) * 100)}%` : '0%')
   const deliveryKnown = data?.tracking?.deliveryColumns
   const statusOf = (recipient) => {
+    if (recipient.status === 'skipped') return { text: 'Unsubscribed', tone: 'default' }
     if (recipient.status !== 'sent') return { text: recipient.status, tone: recipient.status === 'failed' ? 'red' : 'default' }
     if (recipient.complained_at || recipient.last_event === 'complained') return { text: 'Marked as spam', tone: 'red' }
     if (recipient.bounced_at || recipient.last_event === 'bounced') return { text: 'Bounced', tone: 'red' }
@@ -383,6 +362,7 @@ function CampaignAnalytics({ session, campaign, onClose }) {
                   ...(data.awaiting ? [['Awaiting result', data.awaiting]] : []),
                 ] : []),
                 ['Failed to send', data.failed],
+                ...(data.skipped ? [['Held back (unsubscribed)', data.skipped]] : []),
                 ['Opened', `${data.opened} (${pct(data.opened, deliveryKnown ? data.delivered : data.sent)})`],
                 ['Clicked', `${data.clicked} (${pct(data.clicked, deliveryKnown ? data.delivered : data.sent)})`],
               ].map(([label, value]) => (

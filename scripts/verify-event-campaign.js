@@ -107,8 +107,8 @@ async function run() {
     /* 3. A real send to a one-off address */
     const name = page.locator('label', { hasText: 'Campaign name (internal)' }).locator('input')
     await name.fill(`Promote: ${event.title} (verify ${tag})`)
-    await page.locator('label', { hasText: 'Audience' }).locator('select').selectOption('custom')
-    await page.locator('textarea[placeholder*="oakridge"]').fill(inbox('ui'))
+    await page.getByLabel('Extra email addresses').fill(inbox('ui'))
+    await page.getByTestId('recipient-total').filter({ hasText: 'Will be sent to 1 person' }).waitFor({ timeout: 20000 })
     await page.getByRole('button', { name: 'Send now' }).click()
     await page.getByText('Sending has started').waitFor({ timeout: 30000 })
     const { data: campaign } = await service.from('campaigns').select('*').ilike('name', `%(verify ${tag})%`).single()
@@ -133,7 +133,7 @@ async function run() {
 
     /* 4. Stale copy in the saved HTML → current event data at send time */
     const staleBlock = `<!--kada-event:${EVENT_ID}--><div><h2>${event.title}</h2><p><strong>When:</strong> Wednesday, 1 January 2020 · 9am</p><p><strong>Where:</strong> Old Venue</p></div><!--/kada-event-->`
-    const stale = await api('/api/admin/campaigns', { name: `Stale event block (verify ${tag})`, subject: `Stale block check ${tag}`, bodyHtml: `<div style="padding:28px 28px 8px"><p style="margin:0 0 14px;font-size:15px">Hi {{name}}</p>${staleBlock}</div>`, audience: 'custom', customEmails: [inbox('stale')], recurrence: 'none' })
+    const stale = await api('/api/admin/campaigns', { name: `Stale event block (verify ${tag})`, subject: `Stale block check ${tag}`, bodyHtml: `<div style="padding:28px 28px 8px"><p style="margin:0 0 14px;font-size:15px">Hi {{name}}</p>${staleBlock}</div>`, customEmails: [inbox('stale')], recurrence: 'none' })
     cleanup.campaigns.push(stale.campaign.id)
     await api(`/api/admin/campaigns/${stale.campaign.id}/send-now`)
     const [staleSend] = await waitFor(async () => { const rows = await sendsFor(stale.campaign.id); return rows.length && rows.every((r) => r.status !== 'queued') ? rows : null }, 'the stale-block send')
@@ -142,7 +142,7 @@ async function run() {
 
     /* 5. An event that doesn't exist is never sent */
     const missingId = `verify-no-such-event-${tag}`
-    const missing = await api('/api/admin/campaigns', { name: `Missing event (verify ${tag})`, subject: `Missing event check ${tag}`, bodyHtml: `<p>Hi</p><!--kada-event:${missingId}--><p>gone</p><!--/kada-event-->`, audience: 'custom', customEmails: [inbox('missing')], recurrence: 'none' })
+    const missing = await api('/api/admin/campaigns', { name: `Missing event (verify ${tag})`, subject: `Missing event check ${tag}`, bodyHtml: `<p>Hi</p><!--kada-event:${missingId}--><p>gone</p><!--/kada-event-->`, customEmails: [inbox('missing')], recurrence: 'none' })
     cleanup.campaigns.push(missing.campaign.id)
     await api(`/api/admin/campaigns/${missing.campaign.id}/send-now`)
     const [missingSend] = await waitFor(async () => { const rows = await sendsFor(missing.campaign.id); return rows.length && rows.every((r) => r.status !== 'queued') ? rows : null }, 'the missing-event send')
