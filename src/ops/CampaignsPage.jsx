@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { OpsButton, Pill, OPS_COLORS, opsInputStyle } from './ui'
 import { TEMPLATES, TEMPLATE_CATEGORIES } from './emailTemplates'
-import { VisualEmailEditor } from './VisualEmailEditor'
+import { VisualEmailEditor, sectionsToHtml } from './VisualEmailEditor'
 
 /* ------------------------------------------------------------------ */
 /* Operations > Marketing > Campaigns ,  design emails from 50 brand    */
@@ -31,7 +31,22 @@ const sectionStyle = { border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 10,
 
 const emptyDraft = { name: '', subject: '', previewText: '', bodyHtml: '', audience: 'all', recurrence: 'none', scheduledAt: '', customEmails: '' }
 
-export function CampaignsPage({ session }) {
+// "Promote this event" (Events page): a draft built around the event block.
+export function promoteEventDraft(event, events) {
+  return {
+    ...emptyDraft,
+    name: `Promote: ${event.title}`,
+    subject: event.title,
+    previewText: [event.eventDate && new Date(`${event.eventDate}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }), event.location].filter(Boolean).join(' · '),
+    bodyHtml: sectionsToHtml([
+      { type: 'eyebrow', text: "You're invited" },
+      { type: 'paragraph', text: `Hi {{name}}, we'd love to see you at ${event.title}. Here are the details:` },
+      { type: 'event', eventId: event.id },
+    ], events),
+  }
+}
+
+export function CampaignsPage({ session, events = [], seedEventId = '', onSeedUsed = () => {} }) {
   const [campaigns, setCampaigns] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -81,6 +96,17 @@ export function CampaignsPage({ session }) {
   }, [draft.audience, draft.customEmails, session])
 
   useEffect(() => { void load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Arrived from "Promote this event": start the draft from that event.
+  useEffect(() => {
+    const event = seedEventId && events.find((item) => item.id === seedEventId)
+    if (!event) return
+    setDraft(promoteEventDraft(event, events))
+    setPreview(false)
+    setNotice(`Campaign started for "${event.title}". Pick the audience, check the wording, then send or schedule. The event's details are refreshed from the Events page when each email goes out.`)
+    onSeedUsed()
+    window.setTimeout(() => document.getElementById('campaign-compose')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+  }, [seedEventId, events]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const applyTemplate = (template) => {
     setDraft((current) => ({ ...current, name: template.name, subject: template.subject, bodyHtml: template.body }))
@@ -196,7 +222,7 @@ export function CampaignsPage({ session }) {
         </p>
       </div>
 
-      <div style={sectionStyle}>
+      <div id="campaign-compose" style={sectionStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
           <h4 style={{ margin: '0 0 10px', fontSize: 15, color: OPS_COLORS.emerald }}>3 · Compose & schedule</h4>
           <OpsButton small variant="ghost" onClick={() => setPreview((current) => !current)}>{preview ? 'Back to editing' : 'Preview'}</OpsButton>
@@ -223,7 +249,7 @@ export function CampaignsPage({ session }) {
           <span style={labelStyle}>Email content ,  edit it like a document ({'{{name}}'} inserts the recipient's name). Use Preview to see the finished email.</span>
           {preview
             ? <div style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, overflow: 'hidden' }} dangerouslySetInnerHTML={{ __html: draft.bodyHtml.replace(/{{name}}/g, 'Sarah') }} />
-            : <VisualEmailEditor key={draft.name + draft.subject} value={draft.bodyHtml} onChange={(html) => setDraft((current) => ({ ...current, bodyHtml: html }))} />}
+            : <VisualEmailEditor key={draft.name + draft.subject} events={events} value={draft.bodyHtml} onChange={(html) => setDraft((current) => ({ ...current, bodyHtml: html }))} />}
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
           <label style={{ display: 'block' }}><span style={labelStyle}>Schedule</span>

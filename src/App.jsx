@@ -895,6 +895,7 @@ function App() {
   const [jobs, setJobs] = useState([])
   const [messages, setMessages] = useState([])
   const [events, setEvents] = useState([])
+  const [promoteEventId, setPromoteEventId] = useState('')
   const [ticketOrders, setTicketOrders] = useState([])
   const [eventModal, setEventModal] = useState(null)
   const [eventPageId, setEventPageId] = useState(() => parseRoute().eventId)
@@ -2064,7 +2065,7 @@ function App() {
           {tab === 'invoice-settings' && (isAdmin || can('sales')) && <InvoiceSettings settings={invoiceSettings} onSave={saveInvoiceSettings} saving={invoiceSettingsSaving} />}
           {tab === 'contacts' && can('contacts') && <ContactsPage />}
           {tab === 'team' && isAdmin && session && <TeamPage session={session} />}
-          {tab === 'campaigns' && isAdmin && session && <CampaignsPage session={session} />}
+          {tab === 'campaigns' && isAdmin && session && <CampaignsPage session={session} events={events} seedEventId={promoteEventId} onSeedUsed={() => setPromoteEventId('')} />}
           {tab === 'settings' && isAdmin && <SettingsPage content={siteContent} onSaveContent={saveSiteContent} session={session} />}
           {tab === 'jobs' && canSeeJobs && <JobBoardView jobs={isInstructor ? jobs.filter((job) => job.status === 'open' || job.claimedBy === profile.instructor_id) : jobs} bookings={bookings} schools={schools} instructors={instructors} canManage={canManageJobs} onClaim={claimJob} onDecision={decideJob} onPublish={publishJob} onGoToBookings={() => handleOpsSelect('bookings')} />}
 
@@ -2103,7 +2104,7 @@ function App() {
 
           {(isAdmin || can('schools')) && tab === 'schools' && <div className="panel"><div className="panel-head"><h3>Schools</h3><Button small onClick={() => setSchoolModal(emptySchool())}>Add school</Button></div><input style={{ ...inputStyle, marginBottom: 12 }} placeholder="Search schools" value={schoolSearch} onChange={(event) => setSchoolSearch(event.target.value)} /><SchoolsTable schools={visibleSchools} bookings={bookings} expanded={showAllSchools} onToggleExpand={() => setShowAllSchools(!showAllSchools)} onSaveSchool={saveSchool} onView={setSchoolRecord} onMessage={(school) => setMessageTarget({ kind: 'school', id: school.id, name: school.name })} /></div>}
           {isAdmin && tab === 'instructors' && <div className="panel"><div className="panel-head"><h3>Instructors and assignments</h3><Button small onClick={() => setInstructorModal({ id: crypto.randomUUID(), name: '', email: '', phone: '', rate: 100, locationAreas: '', gender: '', dbsStatus: 'Missing' })}>Add instructor</Button></div><div style={{ display: 'grid', gridTemplateColumns: '1fr 180px', gap: 8, marginBottom: 12 }}><input style={inputStyle} placeholder="Search by name, location, gender" value={instructorSearch} onChange={(event) => setInstructorSearch(event.target.value)} /><select style={inputStyle} value={instructorSort} onChange={(event) => setInstructorSort(event.target.value)}><option value="name">Sort by name</option><option value="location">Sort by location</option><option value="gender">Sort by gender</option><option value="completed">Sort by completed</option></select></div><InstructorsTable instructors={visibleInstructors} expanded={showAllInstructors} onToggleExpand={() => setShowAllInstructors(!showAllInstructors)} completedBy={completedByInstructor} onSaveInstructor={saveInstructor} onMessage={(instructor) => setMessageTarget({ kind: 'instructor', id: instructor.id, name: instructor.name })} onEdit={setInstructorModal} onOpenDbs={openDbsFile} onReviewDbs={reviewDbs} /></div>}
-          {can('events') && (tab === 'events-published' || tab === 'events-drafts' || tab === 'events-archived') && <EventsPage view={tab === 'events-published' ? 'published' : tab === 'events-archived' ? 'archived' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} session={session} />}
+          {can('events') && (tab === 'events-published' || tab === 'events-drafts' || tab === 'events-archived') && <EventsPage view={tab === 'events-published' ? 'published' : tab === 'events-archived' ? 'archived' : 'drafts'} events={events} onSaveEvent={saveEvent} onEditEvent={setEventModal} onDeleteEvent={deleteEvent} onAddEvent={() => setEventModal(emptyEvent())} onPromoteEvent={isAdmin ? (event) => { setPromoteEventId(event.id); handleOpsSelect('campaigns') } : undefined} session={session} />}
           {can('site') && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} blocks={siteBlocks} events={events} onSaveBlock={saveSiteBlock} onDeleteBlock={deleteSiteBlock} />}
           {can('site') && tab === 'site-content' && <SiteContentPage content={siteContent} onSave={saveSiteContent} />}
           {can('sales') && tab === 'payment-links' && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><PaymentLinksPage focusLinkId={paymentLinkFocus} onFocusHandled={() => setPaymentLinkFocus('')} /></Suspense>}

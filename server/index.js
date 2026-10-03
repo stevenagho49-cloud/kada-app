@@ -8,6 +8,7 @@ import PDFDocument from 'pdfkit'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHmac, timingSafeEqual } from 'node:crypto'
+import { eventIdsIn, refreshEventBlocks } from '../src/eventEmailBlock.js'
 
 const app = express()
 // Render (and most hosts) sit behind a single proxy ,  trust one hop so req.ip
@@ -1970,6 +1971,21 @@ async function queueDueCampaigns() {
   return queued
 }
 
+// Event blocks in a campaign are redrawn from each event's current row, so a
+// changed date, time, venue or flyer is what goes out. A block whose event was
+// deleted or unpublished stops the campaign (every send fails with the reason).
+async function withLiveEvents(campaign) {
+  const ids = eventIdsIn(campaign.body_html)
+  if (!ids.length) return campaign
+  const { data: rows, error } = await supabase.from('events').select('*').in('id', ids)
+  if (error) throw new Error(`Campaign "${campaign.name}": its events could not be loaded: ${error.message}`)
+  const { html, missing } = refreshEventBlocks(campaign.body_html, new Map((rows || []).map((row) => [row.id, row])), { siteUrl: APP_URL, supabaseUrl })
+  if (!missing.length) return { ...campaign, body_html: html }
+  const blockError = `This email features an event that is deleted or no longer published (${missing.join(', ')}), so it was not sent. Publish the event again or remove it from the campaign.`
+  await alertFailure(`Campaign "${campaign.name}" was not sent`, blockError, { Campaign: campaign.id })
+  return { ...campaign, blockError }
+}
+
 async function sendQueuedCampaignEmails() {
   const track = await hasAnalytics()
   const tracking = await hasDeliveryTracking()
@@ -1983,7 +1999,7 @@ async function sendQueuedCampaignEmails() {
     const missing = [...new Set(batch.map((row) => row.campaign_id))].filter((id) => !campaigns.has(id))
     if (missing.length) {
       const { data: rows } = await supabase.from('campaigns').select('id,name,subject,body_html,status').in('id', missing) // eslint-disable-line no-await-in-loop
-      ;(rows || []).forEach((row) => campaigns.set(row.id, row))
+      for (const row of rows || []) campaigns.set(row.id, await withLiveEvents(row)) // eslint-disable-line no-await-in-loop
     }
     const contactIds = batch.map((row) => row.contact_id).filter(Boolean)
     const { data: contacts } = contactIds.length ? await supabase.from('contacts').select('id,name').in('id', contactIds) : { data: [] } // eslint-disable-line no-await-in-loop
@@ -1995,7 +2011,9 @@ async function sendQueuedCampaignEmails() {
       progressed = true
       const name = (nameById.get(row.contact_id) || row.email.split('@')[0].replace(/[._-]+/g, ' ')).trim() || 'there'
       const html = String(campaign?.body_html || '').replace(/{{name}}/g, escHtml(name))
-      const result = campaign
+      const result = campaign?.blockError
+        ? { sent: false, reason: campaign.blockError }
+        : campaign
         ? await sendEmail({ to: row.email, subject: campaign.subject, html: track ? instrumentCampaignHtml(html, row.id) : html, idempotencyKey: `campaign-send-${row.id}` }) // eslint-disable-line no-await-in-loop
         : { sent: false, reason: 'Campaign was deleted.' }
       const update = { status: result.sent ? 'sent' : 'failed', error: result.sent ? null : result.reason, sent_at: result.sent ? new Date().toISOString() : null }

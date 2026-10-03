@@ -108,7 +108,7 @@ const COPY = {
   },
 }
 
-export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEvent, onAddEvent, session }) {
+export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEvent, onAddEvent, onPromoteEvent, session }) {
   const copy = COPY[view] || COPY.published
   const filtered = events.filter((event) => (view === 'published' ? event.status === 'published' : view === 'archived' ? event.status === 'archived' : event.status === 'draft'))
   const [expanded, setExpanded] = useState(false)
@@ -176,6 +176,13 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
             )}
           </div>
         ) : <span style={{ fontSize: 12, color: OPS_COLORS.muted }}>Not on sale</span>
+      ),
+    },
+    {
+      key: 'promote', label: '', render: (event) => (
+        onPromoteEvent && event.status === 'published'
+          ? <OpsButton small variant="gold" onClick={() => onPromoteEvent(event)}>✉ Promote this event</OpsButton>
+          : null
       ),
     },
     {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { OpsButton, OPS_COLORS, opsInputStyle } from './ui'
+import { renderEventBlock } from '../eventEmailBlock'
 
 /* ------------------------------------------------------------------ */
 /* Visual email composer ,  edit the email like a document, not code.   */
@@ -19,6 +20,7 @@ const MUTED = '#767066'
 const SERIF = "Georgia,'Times New Roman',serif"
 const SANS = 'Arial,Helvetica,sans-serif'
 const SITE = 'https://kingsarkdance.com'
+const EVENT_OPTIONS = { siteUrl: SITE, supabaseUrl: import.meta.env.VITE_SUPABASE_URL }
 
 export const emailShell = (inner) => `<div style="background:${C};padding:32px 16px;font-family:${SANS};color:${INK};line-height:1.6"><div style="max-width:560px;margin:0 auto;background:${IVORY};border:1px solid #e4ddc9;border-radius:14px;overflow:hidden"><div style="height:6px;background:linear-gradient(90deg,${E},${G})"></div><div style="padding:28px 28px 8px">${inner}</div><div style="padding:18px 28px 26px;font-size:12px;color:${MUTED};border-top:1px solid #eee7d2;margin-top:20px">King's Ark Dance Academy · Birmingham · <a href="${SITE}" style="color:${E}">kingsarkdance.com</a><br>You're receiving this because you're part of the KADA community.</div></div></div>`
 
@@ -33,8 +35,11 @@ const S = {
   ctaGold: (label, url) => `<p style="margin:20px 0 6px"><a href="${url || SITE}" style="background:${G};color:${E};padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block;font-size:14px">${label || 'Find out more'} →</a></p>`,
 }
 
-/* Sections → complete email HTML. */
-export function sectionsToHtml(sections) {
+/* Sections → complete email HTML. Event blocks are drawn from the events  */
+/* passed in (the server redraws them from live data when sending); an     */
+/* event that isn't loaded keeps the block it was saved with.              */
+export function sectionsToHtml(sections, events = []) {
+  const eventsById = new Map(events.map((event) => [event.id, event]))
   const inner = sections.map((section) => {
     if (section.type === 'eyebrow') return S.eyebrow(section.text)
     if (section.type === 'heading') return S.heading(section.text)
@@ -44,6 +49,8 @@ export function sectionsToHtml(sections) {
     if (section.type === 'divider') return S.divider()
     if (section.type === 'cta') return S.cta(section.text, section.url)
     if (section.type === 'ctaGold') return S.ctaGold(section.text, section.url)
+    if (section.type === 'event') return eventsById.has(section.eventId) ? renderEventBlock(eventsById.get(section.eventId), EVENT_OPTIONS) : section.html || ''
+    if (section.type === 'custom') return section.html || ''
     return ''
   }).join('')
   return emailShell(inner)
@@ -56,24 +63,25 @@ export function htmlToSections(html) {
   const source = String(html || '')
   const innerMatch = source.match(/padding:28px 28px 8px">([\s\S]*?)<\/div><div style="padding:18px 28px 26px/)
   const body = innerMatch ? innerMatch[1] : source
-  const pattern = /<p style="font-size:11px[^"]*">([\s\S]*?)<\/p>|<h1 [^>]*>([\s\S]*?)<\/h1>|<p style="margin:0 0 14px;font-size:15px">([\s\S]*?)<\/p>|<div style="border-left:3px[^>]*>"([\s\S]*?)"<div[^>]*>\. ([\s\S]*?)<\/div><\/div>|<hr[^>]*>|<p style="margin:20px 0 6px"><a href="([^"]*)" style="background:#0b3d2e[^"]*">([\s\S]*?) →<\/a><\/p>|<p style="margin:20px 0 6px"><a href="([^"]*)" style="background:#c9a227[^"]*">([\s\S]*?) →<\/a><\/p>|<p style="margin:0 0 14px">((?:(?!<\/p>)[\s\S])*?)<\/p>/g
+  const pattern = /<!--kada-event:([\w-]+)-->[\s\S]*?<!--\/kada-event-->|<p style="font-size:11px[^"]*">([\s\S]*?)<\/p>|<h1 [^>]*>([\s\S]*?)<\/h1>|<p style="margin:0 0 14px;font-size:15px">([\s\S]*?)<\/p>|<div style="border-left:3px[^>]*>"([\s\S]*?)"<div[^>]*>\. ([\s\S]*?)<\/div><\/div>|<hr[^>]*>|<p style="margin:20px 0 6px"><a href="([^"]*)" style="background:#0b3d2e[^"]*">([\s\S]*?) →<\/a><\/p>|<p style="margin:20px 0 6px"><a href="([^"]*)" style="background:#c9a227[^"]*">([\s\S]*?) →<\/a><\/p>|<p style="margin:0 0 14px">((?:(?!<\/p>)[\s\S])*?)<\/p>/g
   let lastIndex = 0
   let match
   while ((match = pattern.exec(body)) !== null) {
     const gap = body.slice(lastIndex, match.index).replace(/<[^>]*>/g, '').trim()
     if (gap) sections.push({ type: 'custom', html: body.slice(lastIndex, match.index) })
     lastIndex = pattern.lastIndex
-    if (match[1] !== undefined) sections.push({ type: 'eyebrow', text: match[1] })
-    else if (match[2] !== undefined) sections.push({ type: 'heading', text: match[2] })
-    else if (match[3] !== undefined) sections.push({ type: 'paragraph', text: match[3] })
-    else if (match[4] !== undefined) sections.push({ type: 'quote', text: match[4], by: match[5] || '' })
+    if (match[1] !== undefined) sections.push({ type: 'event', eventId: match[1], html: match[0] })
+    else if (match[2] !== undefined) sections.push({ type: 'eyebrow', text: match[2] })
+    else if (match[3] !== undefined) sections.push({ type: 'heading', text: match[3] })
+    else if (match[4] !== undefined) sections.push({ type: 'paragraph', text: match[4] })
+    else if (match[5] !== undefined) sections.push({ type: 'quote', text: match[5], by: match[6] || '' })
     else if (match[0].startsWith('<hr')) sections.push({ type: 'divider' })
-    else if (match[6] !== undefined) sections.push({ type: 'cta', url: match[6], text: match[7] })
-    else if (match[8] !== undefined) sections.push({ type: 'ctaGold', url: match[8], text: match[9] })
-    else if (match[10] !== undefined) {
-      const chips = [...match[10].matchAll(/<span[^>]*>([\s\S]*?)<\/span>/g)].map((chip) => chip[1])
+    else if (match[7] !== undefined) sections.push({ type: 'cta', url: match[7], text: match[8] })
+    else if (match[9] !== undefined) sections.push({ type: 'ctaGold', url: match[9], text: match[10] })
+    else if (match[11] !== undefined) {
+      const chips = [...match[11].matchAll(/<span[^>]*>([\s\S]*?)<\/span>/g)].map((chip) => chip[1])
       if (chips.length) sections.push({ type: 'chips', items: chips })
-      else sections.push({ type: 'paragraph', text: match[10] })
+      else sections.push({ type: 'paragraph', text: match[11] })
     }
   }
   const tail = body.slice(lastIndex).replace(/<[^>]*>/g, '').trim()
@@ -102,11 +110,15 @@ function blankSection(type) {
   return { type }
 }
 
-export function VisualEmailEditor({ value, onChange }) {
+export function VisualEmailEditor({ value, onChange, events = [] }) {
   const [sections, setSections] = useState(() => htmlToSections(value))
+  const [focusIndex, setFocusIndex] = useState(-1)
+  const [eventChoice, setEventChoice] = useState('')
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
-  useEffect(() => { onChangeRef.current(sectionsToHtml(sections)) }, [sections])
+  useEffect(() => { onChangeRef.current(sectionsToHtml(sections, events)) }, [sections, events])
+  const published = events.filter((event) => event.status === 'published')
+  const eventTitle = (id) => events.find((event) => event.id === id)?.title
 
   const update = (index, changes) => setSections((current) => current.map((section, i) => (i === index ? { ...section, ...changes } : section)))
   const move = (index, direction) => setSections((current) => {
@@ -118,14 +130,22 @@ export function VisualEmailEditor({ value, onChange }) {
   })
   const remove = (index) => setSections((current) => current.filter((_, i) => i !== index))
   const add = (type) => setSections((current) => [...current, blankSection(type)])
+  // Goes below the block last clicked into (the "cursor"), else at the end.
+  const insertEvent = () => {
+    if (!eventChoice) return
+    const at = focusIndex >= 0 ? focusIndex + 1 : sections.length
+    setSections((current) => [...current.slice(0, at), { type: 'event', eventId: eventChoice }, ...current.slice(at)])
+    setFocusIndex(at)
+    setEventChoice('')
+  }
 
-  const kindLabel = { eyebrow: 'Small intro line', heading: 'Heading', paragraph: 'Text', quote: 'Quote', chips: 'Tag chips', divider: 'Divider', cta: 'Button (green)', ctaGold: 'Button (gold)', custom: 'Custom block (from template)' }
+  const kindLabel = { eyebrow: 'Small intro line', heading: 'Heading', paragraph: 'Text', quote: 'Quote', chips: 'Tag chips', divider: 'Divider', cta: 'Button (green)', ctaGold: 'Button (gold)', custom: 'Custom block (from template)', event: 'Event' }
 
   return (
     <div>
       <div style={{ display: 'grid', gap: 10 }}>
         {sections.map((section, index) => (
-          <div key={index} style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: 12, background: OPS_COLORS.ivory }}>
+          <div key={index} onFocusCapture={() => setFocusIndex(index)} onPointerDown={() => setFocusIndex(index)} style={{ border: `1px solid ${focusIndex === index ? OPS_COLORS.emerald : OPS_COLORS.rule}`, borderRadius: 8, padding: 12, background: OPS_COLORS.ivory }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: OPS_COLORS.muted }}>{kindLabel[section.type] || section.type}</span>
               <span style={{ display: 'flex', gap: 4 }}>
@@ -134,6 +154,12 @@ export function VisualEmailEditor({ value, onChange }) {
                 <button type="button" onClick={() => remove(index)} title="Remove block" style={{ ...toolBtn, color: OPS_COLORS.warn }}>✕</button>
               </span>
             </div>
+            {section.type === 'event' && (
+              <div>
+                <p style={{ margin: '0 0 8px', fontSize: 13 }}><strong>{eventTitle(section.eventId) || section.eventId}</strong>: flyer, date, time, venue and ticket button. Always sent with the event's latest details.</p>
+                <div style={{ border: `1px dashed ${OPS_COLORS.rule}`, borderRadius: 8, padding: '0 10px', maxHeight: 340, overflow: 'auto', background: '#fff' }} dangerouslySetInnerHTML={{ __html: sectionsToHtml([section], events).match(/padding:28px 28px 8px">([\s\S]*?)<\/div><div style="padding:18px 28px 26px/)?.[1] || '' }} />
+              </div>
+            )}
             {section.type === 'custom' && <textarea style={{ ...opsInputStyle, minHeight: 70, fontFamily: 'monospace', fontSize: 12 }} value={section.html} onChange={(event) => update(index, { html: event.target.value })} />}
             {section.type === 'paragraph' && <textarea style={{ ...opsInputStyle, minHeight: 70 }} value={section.text} onChange={(event) => update(index, { text: event.target.value })} />}
             {(section.type === 'eyebrow' || section.type === 'heading') && <input style={opsInputStyle} value={section.text} onChange={(event) => update(index, { text: event.target.value })} />}
@@ -158,6 +184,14 @@ export function VisualEmailEditor({ value, onChange }) {
         {BLOCK_CHOICES.map((choice) => (
           <OpsButton key={choice.type} small variant="ghost" onClick={() => add(choice.type)}>+ {choice.label}</OpsButton>
         ))}
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 10 }}>
+        <span style={{ ...labelStyle, margin: 0 }}>Insert event:</span>
+        <select aria-label="Event to insert" style={{ ...opsInputStyle, width: 'auto', minWidth: 220 }} value={eventChoice} onChange={(event) => setEventChoice(event.target.value)}>
+          <option value="">{published.length ? 'Choose a published event…' : 'No published events'}</option>
+          {published.map((event) => <option key={event.id} value={event.id}>{event.title}{event.eventDate ? ` (${event.eventDate})` : ''}</option>)}
+        </select>
+        <OpsButton small variant="ghost" disabled={!eventChoice} onClick={insertEvent}>{focusIndex >= 0 ? `Insert below block ${focusIndex + 1}` : 'Insert at the end'}</OpsButton>
       </div>
     </div>
   )
