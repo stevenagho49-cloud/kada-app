@@ -147,13 +147,13 @@ async function notificationSettings() {
   return notificationSettingsCache.value
 }
 
-async function notifyAdmin(subject, html, type = '') {
+async function notifyAdmin(subject, html, type = '', { idempotencyKey = '' } = {}) {
   const settings = await notificationSettings()
   const toggleKey = { 'new-booking': 'newBooking', contact: 'newContact', jobs: 'jobAlerts', 'event-ticket': 'eventSales', 'payment-link': 'paymentLinkSales', 'invoice-payment': 'invoicePayments', signup: 'newSignups' }[type]
   if (settings && toggleKey && settings[toggleKey] === false) return { sent: false, reason: `${toggleKey} alerts disabled in Settings` }
   const to = settings?.notifyEmail || ADMIN_EMAIL
   if (!to) return { sent: false, reason: 'ADMIN_NOTIFICATION_EMAIL not set' }
-  return sendEmail({ to, subject: `[KADA] ${subject}`, html })
+  return sendEmail({ to, subject: `[KADA] ${subject}`, html, idempotencyKey })
 }
 
 /* A failed write must never only reach the server log. alertFailure emails  */
@@ -1589,12 +1589,203 @@ app.get('/api/admin/students/:id/record', async (request, response) => {
       hasSubscription: Boolean(family.stripe_subscription_id), hasLogin: Boolean(family.owner_user_id), since: family.created_at,
     } : null,
     siblings,
+    classes: ((await supabase.from('class_sessions').select('name').eq('active', true).order('day_of_week')).data || []).map((row) => row.name),
     bookings: (bookings || []).map((row) => ({
       id: row.id, date: row.date || '', sessionType: row.session_type || '', status: row.status || '', paymentStatus: row.payment_status || '',
       invoiceStatus: row.invoice_status || '', invoiceNumber: row.invoice_number || '', price: Number(row.price || 0), notes: row.notes || '',
       includesChild: childBookingIds.has(row.id), arrears: Boolean(row.arrears_months?.length),
     })),
   })
+})
+
+/* ------------------------------------------------------------------ */
+/* Families not yet in a class. A child gets a class when the parent   */
+/* books one (or a subscription request completes, or staff assign it  */
+/* below). Until then they are on no register. Staff see these families */
+/* on the Students page; the parent gets ONE gentle reminder a few days */
+/* after signing up; staff get a weekly summary email.                 */
+/* ------------------------------------------------------------------ */
+const CLASS_REMINDER_AFTER_DAYS = Number(process.env.CLASS_REMINDER_AFTER_DAYS || 4)
+// Older sign-ups are left alone (no surprise emails to old accounts).
+const CLASS_REMINDER_WITHIN_DAYS = 30
+const DAY_MS = 86400000
+
+async function studentsAccess(request, response) {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
+  const { data: profile } = await supabase.from('profiles').select('role,permissions').eq('id', user.id).maybeSingle()
+  if (!(profile?.role === 'admin' || (profile?.role === 'staff' && (profile.permissions || []).includes('students')))) { response.status(403).json({ error: 'You need the students permission for this.' }); return null }
+  return user
+}
+
+// Families (or unlinked parents) with at least one child who is in no class, and
+// families whose children are in a class but nothing has been paid.
+async function familiesNeedingAttention() {
+  const [kids, families, bookings, requests, users] = await Promise.all([
+    selectAll(() => supabase.from('students').select('id,name,date_of_birth,family_id,parent_name,parent_email,class_name,membership_status,created_at').order('id')),
+    selectAll(() => supabase.from('parent_families').select('id,guardian_name,guardian_email,owner_user_id,membership_status,plan_type,created_at').order('id')),
+    selectAll(() => supabase.from('bookings').select('id,family_id,status,payment_status').not('family_id', 'is', null).order('id')),
+    selectAll(() => supabase.from('subscription_requests').select('family_id,status,created_at').order('id')),
+    listAllAuthUsers(),
+  ])
+  const userById = new Map(users.map((user) => [user.id, user]))
+  const familyById = new Map(families.map((family) => [family.id, family]))
+  const groups = new Map()
+  for (const kid of kids) {
+    if (kid.membership_status === 'cancelled') continue
+    const key = kid.family_id && familyById.has(kid.family_id) ? kid.family_id : `email:${String(kid.parent_email || '').toLowerCase()}`
+    const group = groups.get(key) || { key, family: familyById.get(kid.family_id) || null, kids: [] }
+    group.kids.push(kid)
+    groups.set(key, group)
+  }
+  const unplaced = []
+  const unpaid = []
+  for (const group of groups.values()) {
+    const family = group.family
+    const owner = family?.owner_user_id ? userById.get(family.owner_user_id) : null
+    const familyBookings = family ? bookings.filter((row) => row.family_id === family.id && row.status !== 'Cancelled') : []
+    const latestRequest = family ? requests.filter((row) => row.family_id === family.id).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] : null
+    const base = {
+      familyId: family?.id || null,
+      guardianName: family?.guardian_name || group.kids[0].parent_name || '',
+      email: family?.guardian_email || group.kids[0].parent_email || '',
+      signedUpAt: family?.created_at || group.kids[0].created_at,
+      hasLogin: Boolean(owner),
+      emailConfirmed: Boolean(owner?.email_confirmed_at),
+      membershipStatus: family?.membership_status || null,
+      reminderSentAt: owner?.app_metadata?.class_reminder_sent_at || null,
+      subscriptionRequest: latestRequest?.status || null,
+      bookings: familyBookings.length,
+      ownerId: owner?.id || null,
+    }
+    const noClass = group.kids.filter((kid) => !kid.class_name)
+    const child = (kid) => ({ id: kid.id, name: kid.name, dateOfBirth: kid.date_of_birth, className: kid.class_name || '', status: kid.membership_status })
+    if (noClass.length) unplaced.push({ ...base, children: noClass.map(child), placedChildren: group.kids.length - noClass.length })
+    else if (family?.membership_status !== 'active' && !group.kids.some((kid) => kid.membership_status === 'active')) unpaid.push({ ...base, children: group.kids.map(child) })
+  }
+  const bySignup = (a, b) => String(a.signedUpAt).localeCompare(String(b.signedUpAt))
+  return { unplaced: unplaced.sort(bySignup), unpaid: unpaid.sort(bySignup) }
+}
+
+app.get('/api/admin/families/not-in-class', async (request, response) => {
+  if (!(await studentsAccess(request, response))) return
+  try {
+    const { unplaced } = await familiesNeedingAttention()
+    response.json({ families: unplaced.map(({ ownerId, ...family }) => family), reminderAfterDays: CLASS_REMINDER_AFTER_DAYS })
+  } catch (error) {
+    response.status(500).json({ error: `Families could not be loaded: ${error.message}` })
+  }
+})
+
+// Staff put a child in a class by hand (e.g. a walk-in before booking online).
+// Same state as a child who booked but hasn't paid: in the class from the start
+// date, on that class's register, membership unchanged (no booking is made).
+app.post('/api/admin/students/:id/class', async (request, response) => {
+  if (!(await studentsAccess(request, response))) return
+  const className = String(request.body?.className || '').trim()
+  const startDate = String(request.body?.startDate || londonNow().date).slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || Number.isNaN(Date.parse(startDate))) return response.status(400).json({ error: 'Choose a valid start date.' })
+  const { data: classes, error: classError } = await supabase.from('class_sessions').select('name').eq('active', true)
+  if (classError) return response.status(500).json({ error: `Classes could not be loaded: ${classError.message}` })
+  if (!(classes || []).some((row) => row.name === className)) return response.status(400).json({ error: 'Choose one of the classes on the schedule.' })
+  const { data: student } = await supabase.from('students').select('id,name,membership_status').eq('id', request.params.id).maybeSingle()
+  if (!student) return response.status(404).json({ error: 'Student not found.' })
+  if (student.membership_status === 'cancelled') return response.status(409).json({ error: `${student.name} is marked cancelled (their family's membership ended), so they would not appear on the register. Mark the family active on Subscriptions first.` })
+  const { data: saved, error } = await supabase.from('students').update({ class_name: className, term: startDate }).eq('id', student.id).select('id,class_name,term').single()
+  if (error) return response.status(500).json({ error: `The class could not be saved: ${error.message}` })
+  response.json({ student: { id: saved.id, className: saved.class_name, term: saved.term } })
+})
+
+function classReminderHtml({ firstName, childNames, classes }) {
+  const list = classes.map((row) => `<li><strong>${escHtml(row.name)}</strong>${row.time ? `, ${escHtml(row.time)}` : ''}</li>`).join('')
+  return `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml(firstName)},</p><p>Thank you for joining King's Ark Dance Academy. We noticed ${escHtml(childNames)} ${childNames.includes(' and ') ? "aren't" : "isn't"} booked into a class yet, so we wanted to make sure you know how to get started.</p>${list ? `<p>Our classes:</p><ul style="padding-left:20px;margin:0 0 14px">${list}</ul>` : ''}<p>You can book a Day Pass or start the Monthly Membership from your account in a couple of minutes:</p><p style="margin:20px 0 6px"><a href="${APP_URL}/#ops/book-class" style="background:#c9a227;color:#0b3d2e;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Book a class →</a></p><p>If you've already arranged things with us, or have any questions, just reply to this email. This is the only reminder we'll send.</p><p>Thank you,<br>King's Ark Dance Academy</p></div>`
+}
+
+const joinNames = (names) => (names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0] || 'your child')
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+
+// One email per family, ever: a parent who signed up CLASS_REMINDER_AFTER_DAYS+
+// days ago (within the last 30), confirmed their email, has children in no
+// class, has never booked, and hasn't been sent a subscription request.
+// Stamped on the parent's login (app_metadata.class_reminder_sent_at) before
+// sending, and the send carries an idempotency key, so it can't repeat.
+async function runClassReminders({ onlyFamilyId = '' } = {}) {
+  if (!supabase) return { checked: 0, sent: [] }
+  const { unplaced } = await familiesNeedingAttention()
+  const now = Date.now()
+  const due = unplaced.filter((family) => family.familyId && family.ownerId && family.emailConfirmed && !family.reminderSentAt
+    && family.placedChildren === 0 && family.bookings === 0 && !family.subscriptionRequest
+    && !['active', 'cancelled'].includes(family.membershipStatus)
+    && now - Date.parse(family.signedUpAt) >= CLASS_REMINDER_AFTER_DAYS * DAY_MS
+    && now - Date.parse(family.signedUpAt) <= CLASS_REMINDER_WITHIN_DAYS * DAY_MS
+    && (!onlyFamilyId || family.familyId === onlyFamilyId))
+  if (!due.length) return { checked: unplaced.length, sent: [] }
+  const { data: classRows } = await supabase.from('class_sessions').select('name,day_of_week,start_time').eq('active', true).order('day_of_week')
+  const classes = (classRows || []).map((row) => ({ name: row.name, time: [DAY_NAMES[row.day_of_week] ? `${DAY_NAMES[row.day_of_week]}s` : '', row.start_time ? String(row.start_time).slice(0, 5) : ''].filter(Boolean).join(' at ') }))
+  const sent = []
+  for (const family of due) {
+    /* eslint-disable no-await-in-loop */
+    const { data: owner, error: ownerError } = await supabase.auth.admin.getUserById(family.ownerId)
+    if (ownerError || owner.user.app_metadata?.class_reminder_sent_at) continue
+    const { error: stampError } = await supabase.auth.admin.updateUserById(family.ownerId, { app_metadata: { ...(owner.user.app_metadata || {}), class_reminder_sent_at: new Date().toISOString() } })
+    if (stampError) { await alertFailure('A "book a class" reminder could not be recorded, so it was not sent', stampError, { Parent: family.email }); continue }
+    const result = await sendEmail({
+      to: family.email,
+      subject: "Ready to book your first class? - King's Ark Dance Academy",
+      html: classReminderHtml({ firstName: (family.guardianName || '').trim().split(' ')[0] || 'there', childNames: joinNames(family.children.map((kid) => kid.name.trim().split(' ')[0])), classes }),
+      idempotencyKey: `class-reminder-${family.familyId}`,
+    })
+    if (!result.sent) {
+      // Release the stamp so the next run can try again (it still sends only once).
+      await supabase.auth.admin.updateUserById(family.ownerId, { app_metadata: { ...(owner.user.app_metadata || {}), class_reminder_sent_at: null } })
+      await alertFailure('A "book a class" reminder email was not sent', result.reason, { Parent: family.email })
+    }
+    sent.push({ familyId: family.familyId, email: family.email, sent: result.sent, emailId: result.id || null, reason: result.reason || undefined })
+    /* eslint-enable no-await-in-loop */
+  }
+  return { checked: unplaced.length, sent }
+}
+
+const ageLabel = (iso) => {
+  const days = Math.floor((Date.now() - Date.parse(iso)) / DAY_MS)
+  return days <= 0 ? 'today' : days === 1 ? '1 day ago' : `${days} days ago`
+}
+
+// Weekly staff summary: who is in no class, and who is in a class but hasn't paid.
+async function sendFamilySummary({ force = false } = {}) {
+  const now = londonNow()
+  const week = (() => { const date = new Date(`${now.date}T12:00:00Z`); const thursday = new Date(date); thursday.setUTCDate(date.getUTCDate() + 3 - ((date.getUTCDay() + 6) % 7)); const firstThursday = new Date(Date.UTC(thursday.getUTCFullYear(), 0, 4)); return `${thursday.getUTCFullYear()}-W${String(1 + Math.round(((thursday - firstThursday) / DAY_MS - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7)).padStart(2, '0')}` })()
+  const isMondayMorning = new Date(`${now.date}T12:00:00Z`).getUTCDay() === 1 && now.minutes >= 9 * 60
+  const { data: setting } = await supabase.from('app_settings').select('value').eq('key', 'weekly_family_summary').maybeSingle()
+  if (!force && (!isMondayMorning || setting?.value?.lastWeek === week)) return { sent: false, skipped: 'not due' }
+  const { unplaced, unpaid } = await familiesNeedingAttention()
+  const familyLine = (family, extra) => `<li><strong>${escHtml(family.guardianName || 'No name')}</strong> (${escHtml(family.email || 'no email')}): ${escHtml(family.children.map((kid) => kid.name.trim()).join(', '))}. Joined ${escHtml(ageLabel(family.signedUpAt))}${extra ? `; ${escHtml(extra)}` : ''}</li>`
+  const html = `<div style="font-family:Arial,sans-serif;line-height:1.6;max-width:640px"><h2 style="color:#0b3d2e">Families to follow up this week</h2>
+<h3 style="margin:18px 0 6px">Not yet in a class (${unplaced.length})</h3>${unplaced.length ? `<ul>${unplaced.map((family) => familyLine(family, [!family.hasLogin ? 'no login' : !family.emailConfirmed ? 'email not confirmed' : '', family.reminderSentAt ? `reminder sent ${ageLabel(family.reminderSentAt)}` : '', family.subscriptionRequest ? `subscription request ${family.subscriptionRequest}` : ''].filter(Boolean).join(', '))).join('')}</ul>` : '<p>None.</p>'}
+<h3 style="margin:18px 0 6px">In a class, nothing paid yet (${unpaid.length})</h3>${unpaid.length ? `<ul>${unpaid.map((family) => familyLine(family, family.subscriptionRequest ? `subscription request ${family.subscriptionRequest}` : '')).join('')}</ul>` : '<p>None.</p>'}
+<p style="color:#767066;font-size:12px">Parents not in a class get one automatic reminder ${CLASS_REMINDER_AFTER_DAYS} days after signing up, and nothing after that. Put a child in a class from their student record.</p>${dashboardButton('students', 'Open Students')}</div>`
+  const result = await notifyAdmin(`Weekly: ${unplaced.length} not in a class, ${unpaid.length} not paid`, html, 'weekly-summary', { idempotencyKey: force ? '' : `weekly-family-summary-${week}` })
+  if (result.sent && !force) await checkedWrite('The weekly family summary was sent but could not be recorded (it may be sent again this week)', supabase.from('app_settings').upsert({ key: 'weekly_family_summary', value: { lastWeek: week, sentAt: new Date().toISOString() }, updated_at: new Date().toISOString() }, { onConflict: 'key' }))
+  if (!result.sent) await alertFailure('The weekly family summary email was not sent', result.reason)
+  return { sent: result.sent, week, unplaced: unplaced.length, unpaid: unpaid.length, emailId: result.id || null }
+}
+
+const FAMILY_FOLLOWUP_INTERVAL_MS = Number(process.env.FAMILY_FOLLOWUP_INTERVAL_MS || 3600000)
+const runFamilyFollowUps = () => Promise.all([
+  runClassReminders().catch((error) => alertFailure('The "book a class" reminder check stopped with an error', error)),
+  sendFamilySummary().catch((error) => alertFailure('The weekly family summary stopped with an error', error)),
+])
+setInterval(() => { void runFamilyFollowUps() }, FAMILY_FOLLOWUP_INTERVAL_MS)
+setTimeout(() => { void runFamilyFollowUps() }, 60000)
+
+// Manual triggers (admin): run the reminder check now, or send the summary now.
+app.post('/api/admin/families/class-reminders/run', async (request, response) => {
+  if (!(await requireAdmin(request, response))) return
+  try { response.json(await runClassReminders({ onlyFamilyId: String(request.body?.familyId || '') })) } catch (error) { response.status(500).json({ error: error.message }) }
+})
+app.post('/api/admin/families/summary/send', async (request, response) => {
+  if (!(await requireAdmin(request, response))) return
+  try { response.json(await sendFamilySummary({ force: true })) } catch (error) { response.status(500).json({ error: error.message }) }
 })
 
 async function requireAttendanceAccess(request, response) {

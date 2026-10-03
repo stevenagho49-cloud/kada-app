@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Pill, OPS_COLORS, OPS_SERIF } from './ui'
+import { Pill, OpsButton, OPS_COLORS, OPS_SERIF, opsInputStyle } from './ui'
 
 /* ------------------------------------------------------------------ */
 /* Operations > Students > a student's full record: the child, their    */
@@ -57,7 +57,61 @@ function Block({ title, children }) {
   )
 }
 
-export function StudentRecord({ session, studentId, attendance, onClose }) {
+const londonToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/London' })
+
+// Staff put a child in a class by hand (e.g. a walk-in who hasn't booked online):
+// they go on that class's register from the start date. No booking or payment.
+function ClassAssignment({ session, student, classes, onSaved }) {
+  const [className, setClassName] = useState(student.className || classes[0] || '')
+  const [startDate, setStartDate] = useState(londonToday())
+  const [editing, setEditing] = useState(!student.className)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState({ text: '', tone: '' })
+  const cancelled = student.membershipStatus === 'cancelled'
+
+  const save = async () => {
+    setBusy(true)
+    setMessage({ text: '', tone: '' })
+    try {
+      const response = await fetch(`/api/admin/students/${encodeURIComponent(student.id)}/class`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` }, body: JSON.stringify({ className, startDate }) })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || 'The class could not be saved.')
+      onSaved(result.student)
+      setEditing(false)
+      setMessage({ text: `${student.name.trim()} is now in ${result.student.className} from ${formatDate(result.student.term)} and on that class's register.`, tone: 'ok' })
+    } catch (saveError) {
+      setMessage({ text: saveError.message, tone: 'warn' })
+    }
+    setBusy(false)
+  }
+
+  return (
+    <Block title="Class">
+      <Row label="Class">{student.className ? `${student.className}${student.term && /^\d{4}-/.test(student.term) ? ` · from ${formatDate(student.term)}` : ''}` : <span style={{ color: '#8a6d12' }}>Not in a class yet, so not on any register</span>}</Row>
+      {cancelled && <p style={{ fontSize: 12.5, color: OPS_COLORS.muted, margin: '4px 0 0' }}>This child is marked cancelled (the family's membership ended). Mark the family active on Subscriptions before putting them in a class.</p>}
+      {!cancelled && !editing && <div style={{ marginTop: 6 }}><OpsButton small variant="ghost" onClick={() => setEditing(true)}>Change class</OpsButton></div>}
+      {!cancelled && editing && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end', marginTop: 6 }}>
+          <label style={{ fontSize: 12, color: OPS_COLORS.muted }}>Class<br />
+            <select aria-label="Class" value={className} onChange={(event) => setClassName(event.target.value)} style={{ ...opsInputStyle, width: 'auto', minWidth: 220 }}>
+              {!classes.length && <option value="">No classes on the schedule</option>}
+              {classes.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+          </label>
+          <label style={{ fontSize: 12, color: OPS_COLORS.muted }}>Starting<br />
+            <input type="date" aria-label="Start date" value={startDate} onChange={(event) => setStartDate(event.target.value)} style={{ ...opsInputStyle, width: 'auto' }} />
+          </label>
+          <OpsButton small disabled={busy || !className} onClick={save}>{busy ? 'Saving…' : student.className ? 'Save class' : 'Put in class'}</OpsButton>
+          {student.className && <OpsButton small variant="ghost" onClick={() => setEditing(false)}>Cancel</OpsButton>}
+        </div>
+      )}
+      {!cancelled && editing && <p style={{ fontSize: 12, color: OPS_COLORS.muted, margin: '6px 0 0' }}>They appear on the register from the start date. This doesn't create a booking or take payment: their membership status stays as it is.</p>}
+      {message.text && <p role="status" style={{ fontSize: 13, margin: '6px 0 0', color: message.tone === 'ok' ? OPS_COLORS.okGreen : OPS_COLORS.warn }}>{message.text}</p>}
+    </Block>
+  )
+}
+
+export function StudentRecord({ session, studentId, attendance, onClose, onClassChanged = () => {} }) {
   const [record, setRecord] = useState(null)
   const [error, setError] = useState('')
 
@@ -104,6 +158,7 @@ export function StudentRecord({ session, studentId, attendance, onClose }) {
               <Row label="Emergency contact">{[record.guardian.emergencyName, record.guardian.emergencyPhone].filter(Boolean).join(' · ')}</Row>
               {record.siblings.length > 0 && <Row label="Siblings">{record.siblings.join(', ')}</Row>}
             </Block>
+            <ClassAssignment session={session} student={student} classes={record.classes || []} onSaved={(saved) => { setRecord((current) => ({ ...current, student: { ...current.student, className: saved.className, term: saved.term } })); onClassChanged(saved) }} />
             <Block title="Plan and membership">
               <Row label="Plan">{planText(record.family)}</Row>
               <Row label="Membership">{record.family ? <><Pill text={record.family.paused && record.family.membershipStatus === 'active' ? 'Paused' : record.family.membershipStatus} tone={statusTone(record.family.membershipStatus)} />{record.family.hasSubscription ? <span style={{ fontSize: 12, color: OPS_COLORS.muted, marginLeft: 8 }}>Stripe subscription</span> : null}</> : null}</Row>
