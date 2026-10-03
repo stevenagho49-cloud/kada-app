@@ -141,7 +141,7 @@ create table if not exists public.students (
   date_of_birth date not null,
   class_name text,
   term text,
-  membership_status text not null default 'active' check (membership_status in ('active', 'inactive')),
+  membership_status text not null default 'active' check (membership_status in ('active', 'inactive', 'cancelled')),
   created_at timestamptz default now()
 );
 

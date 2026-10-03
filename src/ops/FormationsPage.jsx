@@ -211,7 +211,8 @@ export function FormationsPage({ session }) {
     const { data: created, error: createError } = await supabase.from('formations').insert({ class_name: className, name: value, created_by: session.user.id, created_by_name: session.user.email }).select('id').single()
     if (createError) { setError(createError.code === '23505' ? `There's already a formation called "${value}".` : friendly(createError)); return }
     if (nameDraft.mode === 'copy' && Object.keys(positions).length) {
-      await supabase.from('formation_positions').insert(Object.entries(positions).map(([id, pos]) => ({ formation_id: created.id, student_id: id, x: pos.x, y: pos.y })))
+      const { error: copyError } = await supabase.from('formation_positions').insert(Object.entries(positions).map(([id, pos]) => ({ formation_id: created.id, student_id: id, x: pos.x, y: pos.y })))
+      if (copyError) { setNameDraft(null); await loadClass(className, created.id); setError(`"${value}" was created, but the positions could not be copied into it: ${friendly(copyError)}`); return }
     }
     setNameDraft(null)
     setError('')

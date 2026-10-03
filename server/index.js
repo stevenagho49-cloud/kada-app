@@ -155,6 +155,38 @@ async function notifyAdmin(subject, html, type = '') {
   return sendEmail({ to, subject: `[KADA] ${subject}`, html })
 }
 
+/* A failed write must never only reach the server log. alertFailure emails  */
+/* the admin alert inbox (it cannot be switched off in Settings); repeats of */
+/* the same failure are held back for 30 minutes so a retrying webhook or a  */
+/* broken table can't flood the inbox. Request handlers still return an      */
+/* error to whoever triggered the action as well.                            */
+const failureAlertSentAt = new Map()
+async function alertFailure(what, error, details = {}) {
+  const message = error?.message || String(error || 'Unknown error')
+  console.error(`${what}:`, message, details)
+  const key = `${what}|${message}`
+  if (Date.now() - (failureAlertSentAt.get(key) || 0) < 30 * 60 * 1000) return { sent: false, reason: 'Already alerted in the last 30 minutes.' }
+  failureAlertSentAt.set(key, Date.now())
+  const rows = Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([label, value]) => `<strong>${escHtml(label)}:</strong> ${escHtml(typeof value === 'string' ? value : JSON.stringify(value))}<br>`)
+    .join('')
+  try {
+    return await notifyAdmin(`Not saved: ${what}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2 style="color:#a3401f">Something did not save</h2><p>${escHtml(what)}.</p><p>${rows}<strong>Error:</strong> ${escHtml(message)}${error?.code ? ` (code ${escHtml(error.code)})` : ''}</p><p>The dashboard may be out of date for this record until it is fixed by hand or the action is repeated.</p></div>`, 'write-failure')
+  } catch (sendError) {
+    console.error('Failure alert could not be emailed:', sendError?.message || sendError)
+    return { sent: false, reason: 'Alert email failed.' }
+  }
+}
+
+// Awaits a Supabase write and alerts the admin if it failed. Returns the result,
+// so callers can still answer the request with an error.
+async function checkedWrite(what, query, details) {
+  const result = await query
+  if (result.error) await alertFailure(what, result.error, details)
+  return result
+}
+
 // A prominent button linking into the relevant Operations dashboard tab (deep link
 // via #ops/<tab>, which signs the admin in and lands on that page). Pass recordId to
 // open that exact record's modal: #ops/<tab>/<recordId>.
@@ -227,13 +259,15 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     // Per-child subscriptions: mirror the quantity Stripe is charging for (also
     // covers a quantity changed by hand in the Stripe dashboard).
     const perChild = subscription.metadata?.kada_pricing === 'per_child' && item ? { membership_children: item.quantity, membership_monthly_pence: (item.price?.unit_amount ?? CLASS_PRICE_FALLBACK_PENCE.monthly_membership) * item.quantity } : {}
-    await supabase.from('parent_families').update({ membership_status: membershipStatus, ...perChild, updated_at: new Date().toISOString() }).eq('stripe_subscription_id', subscription.id)
+    const { data: families, error: familyError } = await checkedWrite(`Stripe ${event.type} could not update the family`, supabase.from('parent_families').update({ membership_status: membershipStatus, ...perChild, updated_at: new Date().toISOString() }).eq('stripe_subscription_id', subscription.id).select('id'), { 'Stripe subscription': subscription.id, 'New status': membershipStatus })
+    // Non-200 so Stripe retries instead of recording the event while nothing changed.
+    if (familyError) return response.status(500).json({ error: 'Family status write failed' })
     // Keep the children's roster status in step with the subscription ,  a cancelled
     // membership must not leave students showing as active in Operations.
     if (event.type === 'customer.subscription.deleted') {
-      const { data: cancelledFamilies } = await supabase.from('parent_families').select('id').eq('stripe_subscription_id', subscription.id)
-      const familyIds = (cancelledFamilies || []).map((family) => family.id)
-      if (familyIds.length) await supabase.from('students').update({ membership_status: 'cancelled' }).in('family_id', familyIds)
+      const familyIds = (families || []).map((family) => family.id)
+      const result = await cancelFamilyStudents(familyIds, `Stripe cancelled subscription ${subscription.id}`)
+      if (result.error) return response.status(500).json({ error: 'Student status write failed' })
     }
   }
 
@@ -241,7 +275,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   } catch (error) {
     // Unexpected throw (not one of the explicit checked writes above) ,  return non-200
     // so Stripe retries instead of recording this event as delivered.
-    console.error('Webhook processing threw:', error)
+    await alertFailure('A Stripe event could not be processed (Stripe will retry)', error, { 'Stripe event': event?.type })
     if (!response.headersSent) response.status(500).json({ error: 'Webhook processing failed' })
   }
 })
@@ -289,7 +323,10 @@ async function applyResendEvent({ emailId, type, at, data = {} }) {
   if (event === 'failed') update.error = String(data.failed?.reason || data.reason || 'Resend could not send this email.').slice(0, 300)
   // Events can arrive out of order: last_event only ever moves forward.
   if ((RESEND_EVENT_RANK[event] ?? -1) > (RESEND_EVENT_RANK[row.last_event] ?? -1)) update.last_event = event
-  if (Object.keys(update).length) await supabase.from('campaign_sends').update(update).eq('id', row.id)
+  if (Object.keys(update).length) {
+    const { error } = await checkedWrite('A Resend delivery event could not be saved on its campaign send', supabase.from('campaign_sends').update(update).eq('id', row.id), { 'Resend email': emailId, Event: event })
+    if (error) throw error
+  }
   return { matched: true, event }
 }
 
@@ -304,14 +341,16 @@ app.post('/api/resend/webhook', express.raw({ type: '*/*', limit: '1mb' }), asyn
   const { error: logError } = await supabase.from('resend_events').insert({ svix_id: String(request.headers['svix-id']), type: String(event?.type || ''), email_id: emailId, occurred_at: event?.created_at || null, payload: event })
   if (logError?.code === '23505') return response.json({ received: true, duplicate: true })
   if (logError) {
-    console.error('Resend event could not be stored:', logError.message)
+    await alertFailure('A Resend delivery event could not be stored', logError, { 'Resend email': emailId, Event: event?.type })
     return response.status(500).json({ error: 'Event could not be stored.' }) // Resend retries
   }
   try {
     const result = await applyResendEvent({ emailId, type: event?.type, at: event?.created_at, data: event?.data })
     response.json({ received: true, ...result })
   } catch (error) {
-    console.error('Resend event could not be applied:', error.message)
+    // applyResendEvent has already alerted the admin. Forget the stored event so
+    // Resend's retry is applied instead of being skipped as a duplicate.
+    await supabase.from('resend_events').delete().eq('svix_id', String(request.headers['svix-id']))
     response.status(500).json({ error: 'Event could not be applied.' })
   }
 })
@@ -343,7 +382,7 @@ async function recordEventTicketOrder(session) {
     attendee_names: attendeeNames,
   }, { onConflict: 'stripe_checkout_session_id' })
   if (ticketError) {
-    console.error('Ticket order creation failed:', ticketError)
+    await alertFailure('A paid ticket order could not be saved', ticketError, { 'Stripe session': session.id, Buyer: session.customer_details?.email || metadata.buyer_email })
     // Non-200 so Stripe retries instead of marking this delivered while nothing was written.
     return { ok: false }
   }
@@ -359,13 +398,13 @@ async function recordEventTicketOrder(session) {
     const { data: existingContact } = await supabase.from('contacts').select('id,kind,tags').eq('email', buyerEmail).maybeSingle()
     if (existingContact) {
       const tags = [...new Set([...(existingContact.tags || []), eventTag])]
-      await supabase.from('contacts').update({
+      await checkedWrite('A ticket buyer could not be tagged in Contacts', supabase.from('contacts').update({
         tags,
         kind: existingContact.kind === 'other' ? 'event-attendee' : existingContact.kind,
         updated_at: new Date().toISOString(),
-      }).eq('id', existingContact.id)
+      }).eq('id', existingContact.id), { Buyer: buyerEmail, Tag: eventTag })
     } else {
-      await supabase.from('contacts').insert({
+      await checkedWrite('A ticket buyer could not be added to Contacts', supabase.from('contacts').insert({
         kind: 'event-attendee',
         name: buyerName,
         email: buyerEmail,
@@ -373,19 +412,23 @@ async function recordEventTicketOrder(session) {
         tags: [eventTag],
         last_contacted_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
-      })
+      }), { Buyer: buyerEmail, Tag: eventTag })
     }
   }
 
   // Send confirmation email exactly once per order. Stripe redelivers webhook
   // events, so we atomically claim the order by setting confirmation_sent_at
   // only where it is still null ,  a redelivery finds it already set and skips.
-  const { data: claimed } = await supabase
+  const { data: claimed, error: claimError } = await supabase
     .from('event_ticket_orders')
     .update({ confirmation_sent_at: new Date().toISOString() })
     .eq('stripe_checkout_session_id', session.id)
     .is('confirmation_sent_at', null)
     .select('id')
+  if (claimError) {
+    await alertFailure('A ticket confirmation email could not be queued', claimError, { 'Stripe session': session.id, Buyer: buyerEmail })
+    return { ok: false }
+  }
   const shouldSend = !ticketError && (claimed || []).length > 0
   if (shouldSend) {
     const { data: orderEvent } = await supabase.from('events').select('*').eq('id', metadata.event_id).maybeSingle()
@@ -400,8 +443,8 @@ async function recordEventTicketOrder(session) {
     })
     // If the send failed (e.g. Resend not configured), release the claim so a retry can send it.
     if (!emailResult.sent) {
-      await supabase.from('event_ticket_orders').update({ confirmation_sent_at: null }).eq('stripe_checkout_session_id', session.id)
-      console.error('Confirmation email failed:', emailResult.reason)
+      await checkedWrite('A ticket confirmation email failed and could not be queued to resend', supabase.from('event_ticket_orders').update({ confirmation_sent_at: null }).eq('stripe_checkout_session_id', session.id), { 'Stripe session': session.id })
+      await alertFailure('A ticket confirmation email was not sent', emailResult.reason, { 'Stripe session': session.id, Buyer: buyerEmail })
     }
     await notifyAdmin('New event ticket sale', `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New event ticket sale</h2><p><strong>Event:</strong> ${orderEvent?.title || 'Event'}<br><strong>Buyer:</strong> ${metadata.buyer_name || session.customer_details?.name || 'Guest'} (${buyerEmail})<br><strong>Tickets:</strong> ${metadata.tickets}<br><strong>Amount:</strong> ${money(metadata.total_pence)}</p>${dashboardButton('events-published', 'View event', metadata.event_id)}</div>`, 'event-ticket')
   }
@@ -430,7 +473,11 @@ async function recordClassBooking(session) {
     ...(session.subscription && Number(metadata.children) ? { membership_pricing: 'per_child', membership_children: Number(metadata.children), membership_monthly_pence: Number(metadata.children) * (await classPrices()).monthly_membership } : {}),
     updated_at: new Date().toISOString(),
   }, { onConflict: 'id' })
-  if (familyError) console.error('Family creation failed:', familyError)
+  if (familyError) {
+    // Without the family row the children are never activated: stop here so Stripe retries.
+    await alertFailure('A paid class booking could not save the family', familyError, { Booking: metadata.booking_id, Family: metadata.family_id, Parent: metadata.parent_email, 'Stripe session': session.id })
+    return { ok: false }
+  }
   const { error } = await supabase.from('bookings').upsert({
     id: metadata.booking_id,
     family_id: metadata.family_id,
@@ -450,13 +497,16 @@ async function recordClassBooking(session) {
     requested_by: null,
   }, { onConflict: 'id' })
   if (error) {
-    console.error('Booking creation failed:', error)
+    await alertFailure('A paid class booking could not be saved', error, { Booking: metadata.booking_id, Parent: metadata.parent_email, 'Stripe session': session.id })
     // Non-200 so Stripe retries instead of marking this delivered while nothing was written.
     return { ok: false }
   }
-  if (!familyError && studentList.length) {
+  if (studentList.length) {
     const { error: studentError } = await supabase.from('students').update({ membership_status: 'active' }).eq('booking_id', metadata.booking_id)
-    if (studentError) console.error('Student creation failed:', studentError)
+    if (studentError) {
+      await alertFailure("A paid class booking could not activate the children", studentError, { Booking: metadata.booking_id, Parent: metadata.parent_email, 'Stripe session': session.id })
+      return { ok: false }
+    }
     // New children on a family with a per-child membership raise its monthly quantity.
     if (!session.subscription) syncMembershipSoon(metadata.family_id, 'children added by a class booking')
   }
@@ -467,12 +517,16 @@ async function recordClassBooking(session) {
     // Parent confirmation email, exactly once per booking ,  same idempotency
     // pattern as event tickets: atomically claim the booking by setting
     // confirmation_sent_at only where still null; a redelivery skips.
-    const { data: claimed } = await supabase
+    const { data: claimed, error: claimError } = await supabase
       .from('bookings')
       .update({ confirmation_sent_at: new Date().toISOString() })
       .eq('id', metadata.booking_id)
       .is('confirmation_sent_at', null)
       .select('id')
+    if (claimError) {
+      await alertFailure('A class booking confirmation email could not be queued', claimError, { Booking: metadata.booking_id, Parent: metadata.parent_email })
+      return { ok: false }
+    }
     if ((claimed || []).length > 0) {
       const parentEmailTo = session.customer_details?.email || metadata.parent_email
       const [{ data: classSession }, { data: bookingStudents }] = await Promise.all([
@@ -498,8 +552,8 @@ async function recordClassBooking(session) {
       })
       // If the send failed, release the claim so a webhook retry can send it.
       if (!emailResult.sent) {
-        await supabase.from('bookings').update({ confirmation_sent_at: null }).eq('id', metadata.booking_id)
-        console.error('Class booking confirmation email failed:', emailResult.reason)
+        await checkedWrite('A class booking confirmation email failed and could not be queued to resend', supabase.from('bookings').update({ confirmation_sent_at: null }).eq('id', metadata.booking_id), { Booking: metadata.booking_id })
+        await alertFailure('A class booking confirmation email was not sent', emailResult.reason, { Booking: metadata.booking_id, Parent: parentEmailTo })
       }
     }
   }
@@ -562,7 +616,7 @@ app.post('/api/public/contact', async (request, response) => {
     'contact',
   )
   // File the sender in the CRM ,  matched by email, never duplicated. Filing
-  // must never break the contact form, so failures are swallowed.
+  // must never break the contact form, so a failure alerts the admin instead.
   if (supabase) {
     const note = `Website message (${topicLabel}): ${cleanMessage.slice(0, 200)}`
     const kind = { school: 'school', parent: 'parent', partnership: 'partner', other: 'other' }[cleanTopic]
@@ -571,7 +625,8 @@ app.post('/api/public/contact', async (request, response) => {
       .then(({ data: existing }) => existing
         ? supabase.from('contacts').update({ notes: `${existing.notes ? `${existing.notes}\n` : ''}${note}`.slice(-4000), last_contacted_at: now, updated_at: now }).eq('id', existing.id)
         : supabase.from('contacts').insert({ kind, name: cleanName, email: cleanEmail.toLowerCase(), source: 'website', notes: note, last_contacted_at: now }))
-      .catch((error) => console.error('Contact filing failed:', error))
+      .then((result) => { if (result?.error) throw result.error })
+      .catch((error) => alertFailure('A website message sender could not be filed in Contacts', error, { Sender: cleanEmail }))
   }
   if (!result.sent) return response.status(503).json({ error: 'Messages cannot be sent right now. Please email bookings@kingsarkdance.com directly.' })
   response.json({ sent: true })
@@ -674,7 +729,7 @@ async function scheduleSession(type, schedule, userId) {
     end_time: item.endTime || null,
   }))).select('*')
   if (datesError) {
-    await supabase.from('scheduled_sessions').delete().eq('id', session.id)
+    await checkedWrite('A half-created scheduled session could not be removed', supabase.from('scheduled_sessions').delete().eq('id', session.id), { Session: session.id })
     throw datesError
   }
   dates.sort((a, b) => a.position - b.position)
@@ -685,7 +740,7 @@ async function scheduleSession(type, schedule, userId) {
     : dates.map((row) => ({ ...base, id: `job-session-date-${row.id}`, date: row.session_date, instructor_pay: schedule.payPerDay, session_dates: [dateEntry(row)] }))
   const { data: savedJobs, error: jobsError } = await supabase.from('job_board_jobs').insert(jobs).select('*')
   if (jobsError) {
-    await supabase.from('scheduled_sessions').delete().eq('id', session.id)
+    await checkedWrite('A half-created scheduled session could not be removed', supabase.from('scheduled_sessions').delete().eq('id', session.id), { Session: session.id })
     throw jobsError
   }
   return { session, dates, jobs: savedJobs }
@@ -770,10 +825,12 @@ app.post('/api/scheduled-sessions/:id/cancel', async (request, response) => {
   const { data: jobs } = await supabase.from('job_board_jobs').select('id,status').eq('scheduled_session_id', session.id)
   const taken = (jobs || []).filter((job) => ['pending', 'accepted'].includes(job.status))
   if (taken.length && !request.body?.force) return response.status(409).json({ error: `${taken.length} job${taken.length === 1 ? ' has' : 's have'} already been claimed or accepted. Cancel anyway?`, needsForce: true })
-  await supabase.from('job_board_jobs').delete().eq('scheduled_session_id', session.id)
-  await supabase.from('scheduled_session_dates').update({ instructor_id: null }).eq('scheduled_session_id', session.id)
+  const { error: jobsError } = await supabase.from('job_board_jobs').delete().eq('scheduled_session_id', session.id)
+  if (jobsError) return response.status(500).json({ error: `The session's jobs could not be taken off the job board, so nothing was cancelled: ${jobsError.message}` })
+  const { error: datesError } = await supabase.from('scheduled_session_dates').update({ instructor_id: null }).eq('scheduled_session_id', session.id)
+  if (datesError) return response.status(500).json({ error: `The jobs were removed, but the instructors could not be taken off the dates, so the session is not cancelled yet. Try again: ${datesError.message}` })
   const { error } = await supabase.from('scheduled_sessions').update({ status: 'cancelled' }).eq('id', session.id)
-  if (error) return response.status(500).json({ error: error.message })
+  if (error) return response.status(500).json({ error: `The jobs were removed, but the session could not be marked cancelled. Try again: ${error.message}` })
   response.json({ cancelled: true, removedJobs: (jobs || []).length })
 })
 
@@ -867,7 +924,11 @@ async function notifyNewSignups() {
     for (const account of fresh) {
       const profile = profileById.get(account.id)
       const role = profile?.role || account.user_metadata?.role || 'school'
-      const stamp = () => supabase.auth.admin.updateUserById(account.id, { app_metadata: { ...(account.app_metadata || {}), signup_notified_at: new Date().toISOString() } })
+      const stamp = async () => {
+        const { error: stampError } = await supabase.auth.admin.updateUserById(account.id, { app_metadata: { ...(account.app_metadata || {}), signup_notified_at: new Date().toISOString() } })
+        // Stop the sweep: an unstamped account would be alerted again every run.
+        if (stampError) throw new Error(`Sign-up of ${account.email} could not be marked as alerted: ${stampError.message}`)
+      }
       if (!SIGNUP_ROLE_LABELS[role] || invited.has((account.email || '').toLowerCase())) {
         await stamp() // eslint-disable-line no-await-in-loop
         continue
@@ -899,7 +960,7 @@ async function notifyNewSignups() {
     }
     return { notified: notified.length, accounts: notified }
   } catch (error) {
-    console.error('Sign-up sweep failed:', error.message)
+    await alertFailure('The new sign-up check stopped with an error', error)
     return { notified: notified.length, accounts: notified, error: error.message }
   } finally {
     signupSweepRunning = false
@@ -981,7 +1042,8 @@ app.post('/api/jobs/publish', async (request, response) => {
     published_at: new Date().toISOString(),
   }).select('*').single()
   if (error) return response.status(500).json({ error: `The job could not be published: ${error.message}` })
-  await supabase.from('bookings').update({ instructor_pay: instructorPay }).eq('id', booking.id)
+  const { error: payError } = await supabase.from('bookings').update({ instructor_pay: instructorPay }).eq('id', booking.id)
+  if (payError) return response.status(500).json({ error: `The job is on the board, but the instructor pay could not be saved on the booking: ${payError.message}`, job })
   response.json({ job })
 })
 
@@ -1006,14 +1068,17 @@ app.post('/api/jobs/:id/decision', async (request, response) => {
   if (!saved?.length) return response.status(409).json({ error: 'Someone else has just changed this job. Refresh and try again.' })
   // A booking job assigns the booking; a session job assigns each date it covers.
   const sessionDateIds = (job.session_dates || []).map((item) => item.id).filter(Boolean)
+  const assignments = []
   if (decision === 'accepted') {
-    if (job.booking_id) await supabase.from('bookings').update({ instructor_id: job.claimed_by }).eq('id', job.booking_id)
-    if (sessionDateIds.length) await supabase.from('scheduled_session_dates').update({ instructor_id: job.claimed_by }).in('id', sessionDateIds)
+    if (job.booking_id) assignments.push(await supabase.from('bookings').update({ instructor_id: job.claimed_by }).eq('id', job.booking_id))
+    if (sessionDateIds.length) assignments.push(await supabase.from('scheduled_session_dates').update({ instructor_id: job.claimed_by }).in('id', sessionDateIds))
   }
   if (decision === 'undo' && job.status === 'accepted') {
-    if (job.booking_id) await supabase.from('bookings').update({ instructor_id: null }).eq('id', job.booking_id).eq('instructor_id', job.claimed_by)
-    if (sessionDateIds.length) await supabase.from('scheduled_session_dates').update({ instructor_id: null }).in('id', sessionDateIds).eq('instructor_id', job.claimed_by)
+    if (job.booking_id) assignments.push(await supabase.from('bookings').update({ instructor_id: null }).eq('id', job.booking_id).eq('instructor_id', job.claimed_by))
+    if (sessionDateIds.length) assignments.push(await supabase.from('scheduled_session_dates').update({ instructor_id: null }).in('id', sessionDateIds).eq('instructor_id', job.claimed_by))
   }
+  const assignError = assignments.find((result) => result.error)?.error
+  if (assignError) return response.status(500).json({ error: `The decision was saved, but the instructor could not be ${decision === 'accepted' ? 'assigned to' : 'taken off'} the booking/dates. Check the calendar: ${assignError.message}` })
   let notification = null
   if (decision === 'accepted') {
     const [{ data: instructor }, { data: booking }] = await Promise.all([
@@ -1061,23 +1126,30 @@ async function resolveParentFamily(user) {
     const { data: unowned } = await supabase.from('parent_families').select('*').is('owner_user_id', null).ilike('guardian_email', likeExact(email)).order('created_at')
     const existing = unowned?.[0]
     if (existing) {
-      const { data: claimed } = await supabase.from('parent_families').update({ owner_user_id: user.id, updated_at: new Date().toISOString() }).eq('id', existing.id).is('owner_user_id', null).select('*')
+      const where = { Parent: email, 'Existing family': existing.id }
+      const { data: claimed } = await checkedWrite("A parent's new login could not be linked to their existing family", supabase.from('parent_families').update({ owner_user_id: user.id, updated_at: new Date().toISOString() }).eq('id', existing.id).is('owner_user_id', null).select('*'), where)
       if (claimed?.length) {
         // Fold the sign-up shell (and any other family this login owned) into the existing one.
         for (const shell of owned || []) {
-          await supabase.from('students').update({ family_id: existing.id }).eq('family_id', shell.id) // eslint-disable-line no-await-in-loop
-          await supabase.from('bookings').update({ family_id: existing.id }).eq('family_id', shell.id) // eslint-disable-line no-await-in-loop
-          if (!shell.stripe_customer_id && !shell.stripe_subscription_id) await supabase.from('parent_families').delete().eq('id', shell.id) // eslint-disable-line no-await-in-loop
-          else await supabase.from('parent_families').update({ owner_user_id: null }).eq('id', shell.id) // eslint-disable-line no-await-in-loop
+          /* eslint-disable no-await-in-loop */
+          const moved = [
+            await checkedWrite("A parent's children could not be moved into their existing family", supabase.from('students').update({ family_id: existing.id }).eq('family_id', shell.id), { ...where, 'Sign-up family': shell.id }),
+            await checkedWrite("A parent's bookings could not be moved into their existing family", supabase.from('bookings').update({ family_id: existing.id }).eq('family_id', shell.id), { ...where, 'Sign-up family': shell.id }),
+          ]
+          // Keep the shell if anything is still filed under it, so nothing is orphaned.
+          if (moved.some((result) => result.error)) continue
+          if (!shell.stripe_customer_id && !shell.stripe_subscription_id) await checkedWrite('An empty sign-up family could not be removed', supabase.from('parent_families').delete().eq('id', shell.id), { ...where, 'Sign-up family': shell.id })
+          else await checkedWrite('A sign-up family could not be detached from the login', supabase.from('parent_families').update({ owner_user_id: null }).eq('id', shell.id), { ...where, 'Sign-up family': shell.id })
+          /* eslint-enable no-await-in-loop */
         }
         family = claimed[0]
-        await supabase.from('profiles').update({ family_id: family.id }).eq('id', user.id)
+        await checkedWrite("A parent's profile could not be linked to their family", supabase.from('profiles').update({ family_id: family.id }).eq('id', user.id), where)
       }
     }
     if (family) {
       // Bookings and children filed under this email without a family (not school bookings).
-      await supabase.from('bookings').update({ family_id: family.id }).is('family_id', null).is('school_id', null).ilike('contact_email', likeExact(email))
-      await supabase.from('students').update({ family_id: family.id }).is('family_id', null).ilike('parent_email', likeExact(email))
+      await checkedWrite("A parent's earlier bookings could not be linked to their family", supabase.from('bookings').update({ family_id: family.id }).is('family_id', null).is('school_id', null).ilike('contact_email', likeExact(email)), { Parent: email, Family: family.id })
+      await checkedWrite("A parent's earlier children could not be linked to their family", supabase.from('students').update({ family_id: family.id }).is('family_id', null).ilike('parent_email', likeExact(email)), { Parent: email, Family: family.id })
     }
   }
   if (!family) return null
@@ -1096,9 +1168,12 @@ async function resolveParentFamily(user) {
       membership_status: 'inactive',
     }))
     const { error: childError } = rows.length ? await supabase.from('students').insert(rows) : { error: null }
-    if (childError) console.error('Sign-up children could not be created:', childError.message)
+    if (childError) await alertFailure('Children typed on a parent sign-up form could not be created', childError, { Parent: email, Family: family.id, Children: signupChildren.map((child) => child.name).join(', ') })
     else if (rows.length) syncMembershipSoon(family.id, 'children added at sign-up')
-    if (!childError) await supabase.auth.admin.updateUserById(user.id, { app_metadata: { ...(user.app_metadata || {}), children_created_at: new Date().toISOString() } })
+    if (!childError) {
+      const { error: markError } = await supabase.auth.admin.updateUserById(user.id, { app_metadata: { ...(user.app_metadata || {}), children_created_at: new Date().toISOString() } })
+      if (markError) await alertFailure('Sign-up children were created but the login could not be marked done (they may be added again)', markError, { Parent: email })
+    }
   }
   return family
 }
@@ -1167,7 +1242,7 @@ app.post('/api/parent/children', async (request, response) => {
     const { data: created, error } = await supabase.from('parent_families').insert({ id: crypto.randomUUID(), owner_user_id: user.id, guardian_name: user.user_metadata?.full_name || 'Parent', guardian_email: user.email, membership_status: 'pending' }).select('*').single()
     if (error) return response.status(500).json({ error: 'Your family record could not be created.' })
     family = created
-    await supabase.from('profiles').update({ family_id: family.id }).eq('id', user.id)
+    await checkedWrite("A parent's profile could not be linked to their new family", supabase.from('profiles').update({ family_id: family.id }).eq('id', user.id), { Parent: user.email, Family: family.id })
   }
   const { data: current } = await supabase.from('students').select('name,date_of_birth').eq('family_id', family.id)
   const known = new Set((current || []).map((row) => `${row.name.trim().toLowerCase()}|${row.date_of_birth}`))
@@ -1355,12 +1430,14 @@ app.post('/api/admin/team/invite', async (request, response) => {
     const { data: instructor } = await supabase.from('instructors').select('id').ilike('email', cleanEmail).maybeSingle()
     if (instructor) update.instructor_id = instructor.id
   }
-  await supabase.from('profiles').update(update).eq('id', target.id)
+  const { error: profileError } = await supabase.from('profiles').update(update).eq('id', target.id)
+  if (profileError) return response.status(500).json({ error: `The invite email was sent, but ${cleanName}'s role and permissions could not be saved: ${profileError.message}. Set them on the Team page before they sign in.` })
 
   // Status is honest: 'sent' until they actually sign in (the trigger flips
   // it); only accounts that have signed in before count as account_created.
   const status = target.last_sign_in_at ? 'account_created' : 'sent'
-  await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status, invited_by: user.id, user_id: target.id, account_created_at: target.last_sign_in_at || null }, { onConflict: 'email' })
+  const { error: inviteError } = await supabase.from('invitations').upsert({ email: cleanEmail, full_name: cleanName, role: cleanRole, permissions: cleanPermissions(permissions), job_title: String(jobTitle).trim().slice(0, 80), status, invited_by: user.id, user_id: target.id, account_created_at: target.last_sign_in_at || null }, { onConflict: 'email' })
+  if (inviteError) return response.status(500).json({ error: `The invite email was sent and the account is set up, but the invite could not be recorded in the invitations list: ${inviteError.message}` })
   response.json({ invited: true, alreadyRegistered, emailSent: emailResult.sent })
 })
 
@@ -1383,7 +1460,8 @@ app.post('/api/admin/team/:userId/remove', async (request, response) => {
   if (userId === user.id) return response.status(400).json({ error: 'You cannot remove your own access.' })
   const { data: target } = await supabase.from('profiles').select('role').eq('id', userId).maybeSingle()
   if (!target || !['admin', 'staff'].includes(target.role)) return response.status(404).json({ error: 'Team member not found.' })
-  await supabase.from('profiles').delete().eq('id', userId)
+  const { error: profileError } = await supabase.from('profiles').delete().eq('id', userId)
+  if (profileError) return response.status(500).json({ error: `Team member could not be removed: ${profileError.message}` })
   const { error } = await supabase.auth.admin.deleteUser(userId)
   if (error) return response.status(500).json({ error: 'Sign-in could not be removed.' })
   response.json({ removed: true })
@@ -1410,7 +1488,8 @@ app.post('/api/inbound-email', express.urlencoded({ extended: true }), async (re
   const now = new Date().toISOString()
   const { data: existing } = await supabase.from('contacts').select('id,notes').eq('email', sender.email).maybeSingle()
   if (existing) {
-    await supabase.from('contacts').update({ notes: `${existing.notes ? `${existing.notes}\n` : ''}${note}`.slice(-4000), last_contacted_at: now, updated_at: now }).eq('id', existing.id)
+    const { error } = await supabase.from('contacts').update({ notes: `${existing.notes ? `${existing.notes}\n` : ''}${note}`.slice(-4000), last_contacted_at: now, updated_at: now }).eq('id', existing.id)
+    if (error) return response.status(500).json({ error: 'Contact could not be updated.' })
     return response.json({ filed: true, created: false })
   }
   const { error } = await supabase.from('contacts').insert({ kind: 'other', name, email: sender.email, source: 'email', notes: note, last_contacted_at: now })
@@ -1452,7 +1531,8 @@ app.post('/api/parent/settings', async (request, response) => {
       photo_consent: typeof studentUpdate.photo_consent === 'boolean' ? studentUpdate.photo_consent : null,
     }
     // eslint-disable-next-line no-await-in-loop
-    const { data: savedStudent } = await supabase.from('students').update(payload).eq('id', studentUpdate.id).eq('family_id', family.id).select().maybeSingle()
+    const { data: savedStudent, error: studentError } = await supabase.from('students').update(payload).eq('id', studentUpdate.id).eq('family_id', family.id).select().maybeSingle()
+    if (studentError) return response.status(500).json({ error: `Your details were saved, but a child's welfare notes could not be: ${studentError.message}`, family: savedFamily, students: savedStudents })
     if (savedStudent) savedStudents.push(savedStudent)
   }
   response.json({ family: savedFamily, students: savedStudents })
@@ -1554,7 +1634,7 @@ async function sendAwardEmail(awardId) {
   const { data: family } = student?.family_id ? await supabase.from('parent_families').select('guardian_name,guardian_email').eq('id', student.family_id).maybeSingle() : { data: null }
   const to = family?.guardian_email || student?.parent_email
   if (!to) {
-    await supabase.from('student_awards').update({ email_error: 'No parent email on file.' }).eq('id', awardId)
+    await checkedWrite("An award's email status could not be saved", supabase.from('student_awards').update({ email_error: 'No parent email on file.' }).eq('id', awardId), { Award: awardId })
     return { sent: false, reason: 'No parent email on file.' }
   }
   const childFirst = (student.name || '').split(' ')[0] || 'Your child'
@@ -1563,7 +1643,7 @@ async function sendAwardEmail(awardId) {
     subject: `🏅 ${childFirst} earned ${award.award_name} at KADA!`,
     html: awardEmailHtml({ award, childName: student.name, parentFirstName: (family?.guardian_name || student.parent_name || '').split(' ')[0], giverFirstName: (award.given_by_name || '').split(' ')[0] }),
   })
-  await supabase.from('student_awards').update(result.sent ? { email_sent_at: new Date().toISOString(), email_error: null } : { email_error: result.reason || 'Email failed.' }).eq('id', awardId)
+  await checkedWrite("An award's email status could not be saved (the awards list may show the wrong email state)", supabase.from('student_awards').update(result.sent ? { email_sent_at: new Date().toISOString(), email_error: null } : { email_error: result.reason || 'Email failed.' }).eq('id', awardId), { Award: awardId, 'Email sent': result.sent ? 'yes' : 'no' })
   return { ...result, to }
 }
 
@@ -1721,7 +1801,7 @@ app.post('/api/homework', async (request, response) => {
     guardian_name: familyById.get(student.family_id)?.guardian_name || student.parent_name || '',
   })))
   if (assignError) {
-    await supabase.from('homework_tasks').delete().eq('id', task.id)
+    await checkedWrite('A half-created homework task could not be removed', supabase.from('homework_tasks').delete().eq('id', task.id), { Task: task.id })
     return response.status(500).json({ error: `The task could not be assigned: ${assignError.message}` })
   }
 
@@ -1746,7 +1826,7 @@ app.post('/api/homework', async (request, response) => {
       : { sent: false, reason: 'No parent email on file.' }
     if (result.sent) emailed += 1
     else failures.push({ children: childNames, reason: result.reason })
-    await supabase.from('homework_assignments').update(result.sent ? { emailed_at: new Date().toISOString(), email_error: null } : { email_error: result.reason || 'Email failed.' }).eq('task_id', task.id).in('student_id', studentIdsHere) // eslint-disable-line no-await-in-loop
+    await checkedWrite("A homework email's status could not be saved (Homework may show the wrong email state)", supabase.from('homework_assignments').update(result.sent ? { emailed_at: new Date().toISOString(), email_error: null } : { email_error: result.reason || 'Email failed.' }).eq('task_id', task.id).in('student_id', studentIdsHere), { Task: task.id, Children: childNames }) // eslint-disable-line no-await-in-loop
   }
   response.json({ task, assigned: students.length, skipped: ids.length - students.length, familiesEmailed: emailed, emailFailures: failures })
 })
@@ -1769,7 +1849,8 @@ app.post('/api/admin/invitations/:id/resend', async (request, response) => {
   if (linkError || !tokenHash) return response.status(502).json({ error: `Setup link could not be generated: ${linkError?.message || 'unknown error'}` })
   const emailResult = await sendInviteEmail({ email: invite.email, name: invite.full_name || invite.email, role: invite.role, setupUrl: `${APP_URL}/#token_hash=${tokenHash}&type=recovery` })
   if (!emailResult.sent) return response.status(502).json({ error: `Invite email could not be sent: ${emailResult.reason || 'email not configured'}` })
-  await supabase.from('invitations').update({ status: 'sent', accepted_at: null }).eq('id', invite.id)
+  const { error: statusError } = await supabase.from('invitations').update({ status: 'sent', accepted_at: null }).eq('id', invite.id)
+  if (statusError) return response.status(500).json({ error: `The invite email was re-sent, but its status could not be updated: ${statusError.message}` })
   response.json({ resent: true })
 })
 
@@ -1860,10 +1941,11 @@ async function queueDueCampaigns() {
   let queued = 0
   for (const campaign of due || []) {
     const next = campaign.recurrence !== 'none' ? new Date(now.getTime() + (RECURRENCE_MS[campaign.recurrence] || 0)) : null
-    const { data: claimed } = await supabase.from('campaigns') // eslint-disable-line no-await-in-loop
+    const { data: claimed, error: claimError } = await supabase.from('campaigns') // eslint-disable-line no-await-in-loop
       .update({ status: next ? 'active' : 'done', scheduled_at: next ? next.toISOString() : null, updated_at: now.toISOString() })
       .eq('id', campaign.id).eq('status', campaign.status).eq('scheduled_at', campaign.scheduled_at)
       .select('id')
+    if (claimError) throw new Error(`Campaign "${campaign.name}" could not be started: ${claimError.message}`)
     if (!claimed?.length) continue // another run got there first
     // Recover the one-off list: from the column when migrated, else from the
     // campaign-name marker (pre-migration fallback). Marked campaigns are
@@ -1918,7 +2000,9 @@ async function sendQueuedCampaignEmails() {
         : { sent: false, reason: 'Campaign was deleted.' }
       const update = { status: result.sent ? 'sent' : 'failed', error: result.sent ? null : result.reason, sent_at: result.sent ? new Date().toISOString() : null }
       if (tracking && result.sent) Object.assign(update, { resend_id: result.id, last_event: 'sent' })
-      await supabase.from('campaign_sends').update(update).eq('id', row.id).eq('status', 'queued') // eslint-disable-line no-await-in-loop
+      const { error: sendError } = await supabase.from('campaign_sends').update(update).eq('id', row.id).eq('status', 'queued') // eslint-disable-line no-await-in-loop
+      // Stop the run: a row left 'queued' would be picked up again on the next pass.
+      if (sendError) throw new Error(`Campaign email to ${row.email} was ${result.sent ? 'sent' : 'not sent'}, but its status could not be saved: ${sendError.message}`)
       if (result.sent) sent += 1
       else failed += 1
       await sleep(CAMPAIGN_SEND_INTERVAL_MS) // eslint-disable-line no-await-in-loop
@@ -1940,8 +2024,8 @@ async function runDueCampaigns() {
     campaignRunning = false
   }
 }
-setInterval(() => { runDueCampaigns().catch((error) => console.error('Campaign scheduler error:', error)) }, 60000)
-setTimeout(() => { runDueCampaigns().catch((error) => console.error('Campaign scheduler error:', error)) }, 20000)
+setInterval(() => { runDueCampaigns().catch((error) => alertFailure('The email campaign scheduler stopped with an error', error)) }, 60000)
+setTimeout(() => { runDueCampaigns().catch((error) => alertFailure('The email campaign scheduler stopped with an error', error)) }, 20000)
 
 app.post('/api/admin/campaigns', async (request, response) => {
   const user = await requireAdmin(request, response)
@@ -2022,10 +2106,11 @@ app.post('/api/admin/campaigns/:id/send-now', async (request, response) => {
   if (!user) return
   const { data: campaign } = await supabase.from('campaigns').select('*').eq('id', request.params.id).maybeSingle()
   if (!campaign) return response.status(404).json({ error: 'Campaign not found.' })
-  await supabase.from('campaigns').update({ status: 'scheduled', scheduled_at: new Date().toISOString() }).eq('id', campaign.id)
+  const { error: scheduleError } = await supabase.from('campaigns').update({ status: 'scheduled', scheduled_at: new Date().toISOString() }).eq('id', campaign.id)
+  if (scheduleError) return response.status(500).json({ error: `The campaign could not be started: ${scheduleError.message}` })
   // A big list takes a while (paced under Resend's rate limit), so the send runs in
   // the background; the campaign list and Stats show progress as rows go out.
-  runDueCampaigns().catch((error) => console.error('Campaign send error:', error))
+  runDueCampaigns().catch((error) => alertFailure('A campaign send stopped with an error', error))
   response.json({ started: true })
 })
 
@@ -2268,13 +2353,13 @@ app.get('/api/t/open/:sendId.gif', async (request, response) => {
     // migration is applied they are tallied separately for transparency.
     if (truthful) {
       const { data: row } = await supabase.from('campaign_sends').select('machine_opens').eq('id', send.id).maybeSingle()
-      await supabase.from('campaign_sends').update({ machine_opens: (row?.machine_opens || 0) + 1, last_open_user_agent: userAgent }).eq('id', send.id)
+      await checkedWrite('Campaign open tracking could not be saved', supabase.from('campaign_sends').update({ machine_opens: (row?.machine_opens || 0) + 1, last_open_user_agent: userAgent }).eq('id', send.id))
     }
     return
   }
   const update = { opens: (send.opens || 0) + 1, first_opened_at: send.opens ? undefined : new Date().toISOString() }
   if (truthful) update.last_open_user_agent = userAgent
-  await supabase.from('campaign_sends').update(update).eq('id', send.id)
+  await checkedWrite('Campaign open tracking could not be saved', supabase.from('campaign_sends').update(update).eq('id', send.id))
 })
 
 app.get('/api/t/click/:sendId', async (request, response) => {
@@ -2287,12 +2372,12 @@ app.get('/api/t/click/:sendId', async (request, response) => {
   if (send) {
     // A click is proof a person read the email, so it always counts as an
     // open even when the image pixel was blocked or filtered as machine.
-    await supabase.from('campaign_sends').update({
+    await checkedWrite('Campaign click tracking could not be saved', supabase.from('campaign_sends').update({
       clicks: (send.clicks || 0) + 1,
       last_clicked_at: new Date().toISOString(),
       opens: send.opens ? send.opens : 1,
       first_opened_at: send.first_opened_at || new Date().toISOString(),
-    }).eq('id', send.id)
+    }).eq('id', send.id))
   }
 })
 
@@ -2303,7 +2388,7 @@ app.post('/api/track/pageview', async (request, response) => {
   const pathName = String(request.body?.path || '/').slice(0, 200)
   const referrer = String(request.body?.referrer || '').slice(0, 300)
   const userAgent = String(request.headers['user-agent'] || '').slice(0, 300)
-  await supabase.from('page_views').insert({ path: pathName, referrer, user_agent: userAgent })
+  await checkedWrite('Site page views could not be recorded (Analytics will undercount)', supabase.from('page_views').insert({ path: pathName, referrer, user_agent: userAgent }))
 })
 
 /* Admin analytics: per-campaign delivery and engagement. "Sent" only means     */
@@ -2373,12 +2458,13 @@ app.post('/api/admin/campaigns/:id/sync-resend', async (request, response) => {
         if (['opened', 'clicked', 'complained'].includes(event)) await applyResendEvent({ emailId: row.resend_id, type: 'delivered' }) // eslint-disable-line no-await-in-loop
         if (event === 'clicked') await applyResendEvent({ emailId: row.resend_id, type: 'opened' }) // eslint-disable-line no-await-in-loop
         await applyResendEvent({ emailId: row.resend_id, type: event }) // eslint-disable-line no-await-in-loop
-        await supabase.from('campaign_sends').update({ events_synced_at: new Date().toISOString() }).eq('id', row.id) // eslint-disable-line no-await-in-loop
+        const { error: syncedError } = await supabase.from('campaign_sends').update({ events_synced_at: new Date().toISOString() }).eq('id', row.id) // eslint-disable-line no-await-in-loop
+        if (syncedError) throw syncedError
       }
       await sleep(CAMPAIGN_SEND_INTERVAL_MS) // eslint-disable-line no-await-in-loop
     }
   } catch (error) {
-    console.error('Resend sync failed:', error.message)
+    await alertFailure('"Check with Resend" stopped part-way and could not save delivery results', error, { Campaign: campaignId })
   } finally {
     resendSyncRunning.delete(campaignId)
   }
@@ -2453,7 +2539,8 @@ async function ensureInvoiceNumber(bookingId) {
   const { data: numbered } = await supabase.from('bookings').select('invoice_number').like('invoice_number', 'KADA-%')
   const highest = Math.max(0, ...(numbered || []).map((row) => Number(row.invoice_number.slice(5)) || 0))
   const invoiceNumber = `KADA-${String(highest + 1).padStart(4, '0')}`
-  const { data: claimed } = await supabase.from('bookings').update({ invoice_number: invoiceNumber }).eq('id', bookingId).or('invoice_number.is.null,invoice_number.eq.').select('invoice_number')
+  const { data: claimed, error } = await supabase.from('bookings').update({ invoice_number: invoiceNumber }).eq('id', bookingId).or('invoice_number.is.null,invoice_number.eq.').select('invoice_number')
+  if (error) throw new Error(`The invoice number could not be saved: ${error.message}`)
   if (claimed?.length) return invoiceNumber
   // Another request numbered it first ,  use theirs.
   const { data: latest } = await supabase.from('bookings').select('invoice_number').eq('id', bookingId).maybeSingle()
@@ -2817,7 +2904,7 @@ async function sendInvoiceReminder({ bookingId, template, kind = 'manual', sentB
     .select('id').single()
   if (claimError) {
     if (claimError.code === '23505') return { sent: false, status: 409, reason: 'This reminder has already been sent.', duplicate: true }
-    console.error('Invoice reminder claim failed:', claimError)
+    if (kind !== 'manual') await alertFailure('An automatic invoice reminder could not be logged, so it was not sent', claimError, { Invoice: row.invoice_number || row.id })
     return { sent: false, status: 500, reason: 'The reminder could not be logged, so it was not sent.' }
   }
 
@@ -2844,13 +2931,14 @@ async function sendInvoiceReminder({ bookingId, template, kind = 'manual', sentB
     attachments: [{ filename: `${row.invoice_number || row.id}.pdf`, content: pdf.toString('base64') }],
   })
 
+  const where = { Invoice: row.invoice_number || row.id, Reminder: kind }
   if (result.sent) {
-    await supabase.from('invoice_reminders').update({ status: 'sent', resend_id: result.id }).eq('id', claim.id)
+    await checkedWrite('An invoice reminder was sent but could not be logged as sent', supabase.from('invoice_reminders').update({ status: 'sent', resend_id: result.id }).eq('id', claim.id), where)
   } else if (kind === 'manual') {
-    await supabase.from('invoice_reminders').update({ status: 'failed', error: result.reason }).eq('id', claim.id)
+    await checkedWrite('A failed invoice reminder could not be logged as failed', supabase.from('invoice_reminders').update({ status: 'failed', error: result.reason }).eq('id', claim.id), where)
   } else {
     // Release the automatic slot so the next scheduler run can retry.
-    await supabase.from('invoice_reminders').delete().eq('id', claim.id)
+    await checkedWrite('A failed automatic invoice reminder could not be released for a retry (it will not be resent)', supabase.from('invoice_reminders').delete().eq('id', claim.id), where)
   }
   return { sent: result.sent, status: result.sent ? 200 : 502, reason: result.sent ? '' : `The email could not be sent: ${result.reason}`, recipient: invoice.recipient, daysOverdue: overdue }
 }
@@ -2865,7 +2953,7 @@ async function runInvoiceReminders() {
     .select('id,invoice_number,invoice_due_date,status')
     .eq('invoice_status', 'Sent').is('invoice_paid_at', null).lte('invoice_due_date', cutoff)
   if (error) {
-    console.error('Invoice reminder query failed:', error.message)
+    await alertFailure('Automatic invoice reminders could not check for overdue invoices', error)
     return { checked: 0, sent: [], error: error.message }
   }
   const due = (rows || [])
@@ -2883,26 +2971,26 @@ async function runInvoiceReminders() {
     const result = await sendInvoiceReminder({ bookingId: row.id, template: kind === 'auto_firm' ? 'firm' : 'friendly', kind }) // eslint-disable-line no-await-in-loop
     if (result.skip) continue
     if (!result.duplicate) sent.push({ bookingId: row.id, invoiceNumber: row.invoice_number, kind, daysOverdue: overdue, sent: result.sent, reason: result.reason || undefined })
-    if (!result.sent && !result.duplicate) console.error(`Invoice reminder (${kind}) for ${row.invoice_number || row.id} failed:`, result.reason)
+    if (!result.sent && !result.duplicate) await alertFailure(`An automatic invoice reminder (${kind}) was not sent`, result.reason, { Invoice: row.invoice_number || row.id }) // eslint-disable-line no-await-in-loop
   }
   return { checked: due.length, sent }
 }
 
 const INVOICE_REMINDER_INTERVAL_MS = Number(process.env.INVOICE_REMINDER_INTERVAL_MS || 3600000)
-setInterval(() => { runInvoiceReminders().catch((error) => console.error('Invoice reminder scheduler error:', error)) }, INVOICE_REMINDER_INTERVAL_MS)
-setTimeout(() => { runInvoiceReminders().catch((error) => console.error('Invoice reminder scheduler error:', error)) }, 30000)
+setInterval(() => { runInvoiceReminders().catch((error) => alertFailure('The invoice reminder scheduler stopped with an error', error)) }, INVOICE_REMINDER_INTERVAL_MS)
+setTimeout(() => { runInvoiceReminders().catch((error) => alertFailure('The invoice reminder scheduler stopped with an error', error)) }, 30000)
 
 // Webhook handler for kind=invoice_payment. Returns { ok: false } on a failed
 // write so the webhook answers non-200 and Stripe retries.
 async function recordInvoicePayment(session) {
   const bookingId = session.metadata?.invoice_booking_id
   if (!bookingId) {
-    console.error('Invoice payment webhook without invoice_booking_id:', session.id)
+    await alertFailure('An invoice was paid online without an invoice reference', 'Check the payment in Stripe and mark the invoice paid by hand.', { 'Stripe session': session.id })
     return { ok: true } // nothing we could ever write; don't make Stripe retry forever
   }
   const { data: before, error: loadError } = await supabase.from('bookings').select('id,invoice_status,invoice_number,invoice_payment_session_id').eq('id', bookingId).maybeSingle()
   if (loadError) {
-    console.error('Invoice payment lookup failed:', loadError)
+    await alertFailure('An online invoice payment could not be matched to its invoice', loadError, { Booking: bookingId, 'Stripe session': session.id })
     return { ok: false }
   }
   const amountPence = Number(session.amount_total ?? session.metadata?.amount_pence ?? 0)
@@ -2918,7 +3006,7 @@ async function recordInvoicePayment(session) {
     .update({ invoice_status: 'Paid', payment_status: 'paid', invoice_paid_at: new Date().toISOString(), invoice_paid_amount_pence: amountPence, invoice_payment_session_id: session.id })
     .eq('id', bookingId).is('invoice_paid_at', null).select('id')
   if (error) {
-    console.error('Invoice payment write failed:', error)
+    await alertFailure('An online invoice payment could not be marked paid', error, { Booking: bookingId, 'Stripe session': session.id })
     return { ok: false }
   }
   if (!claimed?.length) {
@@ -2936,7 +3024,7 @@ async function recordInvoicePayment(session) {
     subject: `Payment received: invoice ${invoiceLabel}`,
     html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml((invoice?.contactName || '').split(' ')[0] || 'there')},</p><p>Thank you. We've received your payment of <strong>${money(amountPence)}</strong> for invoice <strong>${escHtml(invoiceLabel)}</strong>, and it is now marked as paid.</p><p>Stripe will also email you a card receipt.</p><p>Thank you for booking King's Ark Dance Academy.</p></div>`,
   })
-  if (!emailResult.sent) console.error('Invoice payment receipt email failed:', emailResult.reason)
+  if (!emailResult.sent) await alertFailure('An invoice payment receipt email was not sent', emailResult.reason, { Invoice: invoiceLabel, Payer: payerEmail })
   const alreadyMarkedPaid = before.invoice_status === 'Paid'
   await notifyAdmin(`Invoice paid: ${invoiceLabel}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Invoice ${escHtml(invoiceLabel)} paid online</h2><p><strong>From:</strong> ${escHtml(invoice?.payerName || '')} (${escHtml(payerEmail || '')})<br><strong>Amount:</strong> ${money(amountPence)}</p>${alreadyMarkedPaid ? '<p style="color:#a3401f"><strong>Note:</strong> this invoice had already been marked paid by hand. If it was also paid by bank transfer, refund one payment in Stripe.</p>' : ''}${dashboardButton('arrears', 'Open arrears')}</div>`, 'invoice-payment')
   return { ok: true }
@@ -3604,7 +3692,8 @@ app.post('/api/invoices/arrears/manual', async (request, response) => {
   })
   if (!result.sent) {
     // Nothing reached the parent, so don't leave an arrears entry they were never told about.
-    await supabase.from('bookings').delete().eq('id', id)
+    const { error: removeError } = await supabase.from('bookings').delete().eq('id', id)
+    if (removeError) return response.status(502).json({ error: `The email could not be sent (${result.reason}), and the unsent arrears entry could not be removed either. Delete it from Bookings by hand: ${removeError.message}` })
     return response.status(502).json({ error: `The email could not be sent, so the arrears were not saved: ${result.reason}` })
   }
   // The bookings_invoice_guard trigger stamps the sent date (and 14-day due date unless one was chosen).
@@ -3772,7 +3861,8 @@ app.post('/api/admin/subscription-requests', async (request, response) => {
     subject: `Set up your ${plan.label} (${planTotalLabel(plan, quote)}${quote.discountPence > 0 ? `, ${discountLabel(discount)}` : ''}) - King's Ark Dance Academy`,
     html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml(firstName)},</p><p>We'd like to move your family onto our <strong>${escHtml(plan.label)}</strong>, paid automatically by card, so you don't need to pay for classes one at a time. It's ${money(plan.pricePence)} a ${escHtml(plan.interval)} per child: with <strong>${childrenLabel(children)}</strong> on your account that's <strong>${money(totalPence)} a ${escHtml(plan.interval)}</strong>.</p>${subscriptionDiscountHtml(plan, quote)}<p>The button below takes you to Stripe's secure checkout to set it up${quote.discountPence > 0 ? ', with your discount already applied' : ''}. Your first payment of ${money(quote.totalPence)} is taken today, then ${quote.laterPence !== quote.totalPence ? `${money(quote.laterPence)} ` : ''}on the same date each ${escHtml(plan.interval)}. You can cancel at any time from your KADA account.</p><p style="margin:20px 0 6px"><a href="${link}" style="background:#c9a227;color:#0b3d2e;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Set up my ${escHtml(plan.label)} →</a></p><p style="color:#767066;font-size:12px;margin:0 0 14px">Secure card payment by Stripe. If the button doesn't work, copy this link into your browser:<br><span style="word-break:break-all">${link}</span></p><p>Any questions, just reply to this email.</p><p>Thank you,<br>King's Ark Dance Academy</p></div>`,
   })
-  await supabase.from('subscription_requests').update(result.sent ? { status: 'sent', resend_id: result.id } : { status: 'failed', error: result.reason }).eq('id', claim.id)
+  const { error: statusError } = await supabase.from('subscription_requests').update(result.sent ? { status: 'sent', resend_id: result.id } : { status: 'failed', error: result.reason }).eq('id', claim.id)
+  if (statusError && result.sent) return response.status(500).json({ error: `The email was sent to ${family.guardian_email}, but the request could not be marked as sent: ${statusError.message}` })
   if (!result.sent) return response.status(502).json({ error: `The email could not be sent: ${result.reason}` })
   response.json({ id: claim.id, recipient: family.guardian_email, plan, children, totalPence: quote.totalPence, subtotalPence: quote.subtotalPence, laterPence: quote.laterPence, discount: quote.discount, emailId: result.id })
 })
@@ -3782,7 +3872,7 @@ app.post('/api/admin/subscription-requests', async (request, response) => {
 // starting today (London). Children who already have a class are left alone.
 async function enrolUnassignedChildren(familyId) {
   const { data: kids, error } = await supabase.from('students').select('id,class_name').eq('family_id', familyId)
-  if (error) return console.error('Enrol children lookup failed:', error)
+  if (error) return alertFailure("A new member's children could not be put in a class", error, { Family: familyId })
   const unassigned = (kids || []).filter((kid) => !kid.class_name)
   if (!unassigned.length) return
   let className = kids.find((kid) => kid.class_name)?.class_name
@@ -3790,9 +3880,9 @@ async function enrolUnassignedChildren(familyId) {
     const { data: classes } = await supabase.from('class_sessions').select('name').eq('active', true)
     if (classes?.length === 1) className = classes[0].name
   }
-  if (!className) return console.error(`Family ${familyId}: children not enrolled in a class (no sibling class and not exactly one scheduled class).`)
+  if (!className) return alertFailure("A new member's children are not in a class, so they won't appear on a register", 'No sibling class and not exactly one scheduled class. Set their class on the Students page.', { Family: familyId })
   const { error: enrolError } = await supabase.from('students').update({ class_name: className, term: londonNow().date }).in('id', unassigned.map((kid) => kid.id))
-  if (enrolError) console.error('Enrol children failed:', enrolError)
+  if (enrolError) await alertFailure("A new member's children could not be put in a class", enrolError, { Family: familyId, Class: className })
 }
 
 // Webhook (and return page) handler for kind=subscription_request. Safe to run
@@ -3804,11 +3894,11 @@ async function recordSubscriptionRequest(session) {
     ? await supabase.from('subscription_requests').select('*').eq('id', metadata.subscription_request_id).maybeSingle()
     : { data: null, error: null }
   if (loadError) {
-    console.error('Subscription request lookup failed:', loadError)
+    await alertFailure('A paid subscription request could not be looked up', loadError, { 'Stripe session': session.id })
     return { ok: false }
   }
   if (!subscriptionRequest) {
-    console.error('Subscription checkout for an unknown request:', session.id)
+    await alertFailure('A subscription was paid for a request that does not exist', 'Check the payment in Stripe and set the family up by hand.', { 'Stripe session': session.id, Payer: session.customer_details?.email })
     return { ok: true } // nothing we could ever write; don't make Stripe retry forever
   }
   const subscriptionId = typeof session.subscription === 'string' ? session.subscription : session.subscription?.id || null
@@ -3824,20 +3914,23 @@ async function recordSubscriptionRequest(session) {
     updated_at: new Date().toISOString(),
   }).eq('id', subscriptionRequest.family_id).select('id,guardian_name,guardian_email').maybeSingle()
   if (familyError) {
-    console.error('Subscription request family update failed:', familyError)
+    await alertFailure('A paid subscription could not activate the family', familyError, { Family: subscriptionRequest.family_id, 'Stripe session': session.id })
     return { ok: false }
   }
   // The membership covers the family, so its children show as active members.
   if (family) {
     const { error: studentError } = await supabase.from('students').update({ membership_status: 'active' }).eq('family_id', family.id)
-    if (studentError) console.error('Subscription request student update failed:', studentError)
+    if (studentError) {
+      await alertFailure("A paid subscription could not activate the family's children", studentError, { Family: family.id, 'Stripe session': session.id })
+      return { ok: false }
+    }
     await enrolUnassignedChildren(family.id)
   }
   const { data: claimed, error: claimError } = await supabase.from('subscription_requests')
     .update({ status: 'completed', completed_at: new Date().toISOString(), stripe_checkout_session_id: session.id, stripe_subscription_id: subscriptionId })
     .eq('id', subscriptionRequest.id).is('completed_at', null).select('id')
   if (claimError) {
-    console.error('Subscription request completion write failed:', claimError)
+    await alertFailure('A paid subscription request could not be marked completed', claimError, { Request: subscriptionRequest.id, 'Stripe session': session.id })
     return { ok: false }
   }
   if (!claimed?.length) return { ok: true } // already recorded
@@ -3856,7 +3949,7 @@ async function recordSubscriptionRequest(session) {
     subject: `Your ${plan.label} is set up - King's Ark Dance Academy`,
     html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml((family?.guardian_name || '').split(' ')[0] || 'there')},</p><p>Thank you. Your <strong>${escHtml(plan.label)}</strong> (${escHtml(amountLabel)}) is now active, and payments will be taken automatically each ${escHtml(plan.interval)}.</p><p>Stripe will email you a receipt for each payment. You can manage or cancel the subscription any time from your <a href="${APP_URL}#ops/dashboard" style="color:#0b3d2e">KADA account</a>.</p><p>Thank you,<br>King's Ark Dance Academy</p></div>`,
   })
-  if (!emailResult.sent) console.error('Subscription confirmation email failed:', emailResult.reason)
+  if (!emailResult.sent) await alertFailure('A subscription confirmation email was not sent', emailResult.reason, { Parent: email })
   await notifyAdmin(`Subscription set up: ${family?.guardian_name || email}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Subscription request completed</h2><p><strong>Parent:</strong> ${escHtml(family?.guardian_name || '')} (${escHtml(email || '')})<br><strong>Plan:</strong> ${escHtml(plan.label)} (${escHtml(amountLabel)})<br><strong>Stripe subscription:</strong> ${escHtml(subscriptionId || 'n/a')}</p>${dashboardButton('subscriptions', 'Open subscriptions')}</div>`, 'subscription-request')
   return { ok: true }
 }
@@ -3994,11 +4087,15 @@ async function syncFamilyMembership(familyId, { notify = true, reason = '' } = {
     const monthlyPence = unitPence * children
     const columns = { membership_children: children, membership_monthly_pence: monthlyPence }
     if (item.quantity === children) {
-      if (family.membership_children !== children || family.membership_monthly_pence !== monthlyPence) await supabase.from('parent_families').update(columns).eq('id', family.id)
+      if (family.membership_children !== children || family.membership_monthly_pence !== monthlyPence) {
+        const { error } = await supabase.from('parent_families').update(columns).eq('id', family.id)
+        if (error) throw error
+      }
       return { changed: false, children, monthlyPence }
     }
     await stripe.subscriptionItems.update(item.id, { quantity: children, proration_behavior: 'none' })
-    await supabase.from('parent_families').update({ ...columns, updated_at: new Date().toISOString() }).eq('id', family.id)
+    const { error: saveError } = await supabase.from('parent_families').update({ ...columns, updated_at: new Date().toISOString() }).eq('id', family.id)
+    if (saveError) throw new Error(`Stripe now charges for ${childrenLabel(children)} (${money(monthlyPence)} a month), but the family record could not be updated to match: ${saveError.message}`)
     const nextPayment = item.current_period_end || subscription.current_period_end
     const nextDate = nextPayment ? formatDateGB(new Date(nextPayment * 1000).toISOString().slice(0, 10)) : 'your next payment date'
     if (notify) {
@@ -4007,26 +4104,29 @@ async function syncFamilyMembership(familyId, { notify = true, reason = '' } = {
         subject: `Your Monthly Membership is now ${money(monthlyPence)} a month - King's Ark Dance Academy`,
         html: `<div style="font-family:Arial,sans-serif;color:#232323;line-height:1.6;max-width:560px"><h2 style="color:#0b3d2e;margin:0 0 12px">King's Ark Dance Academy</h2><p>Hi ${escHtml((family.guardian_name || '').split(' ')[0] || 'there')},</p><p>The Monthly Membership is ${money(unitPence)} a month for each child on your account. You now have <strong>${childrenLabel(children)}</strong> on your account (before: ${childrenLabel(item.quantity)}), so from your next payment on <strong>${escHtml(nextDate)}</strong> it will be <strong>${money(monthlyPence)} a month</strong>.</p><p>Nothing extra is charged for the rest of this month. If this doesn't look right, just reply to this email.</p><p>Thank you,<br>King's Ark Dance Academy</p></div>`,
       })
-      if (!emailResult.sent) console.error('Membership change email failed:', emailResult.reason)
+      if (!emailResult.sent) await alertFailure('A membership price change email was not sent', emailResult.reason, { Parent: family.guardian_email })
       await notifyAdmin(`Membership updated: ${family.guardian_name || family.guardian_email}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>Membership quantity updated</h2><p><strong>Parent:</strong> ${escHtml(family.guardian_name || '')} (${escHtml(family.guardian_email || '')})<br><strong>Children:</strong> ${item.quantity} → ${children}<br><strong>Monthly:</strong> ${money(unitPence * item.quantity)} → ${money(monthlyPence)} from ${escHtml(nextDate)}${reason ? `<br><strong>Why:</strong> ${escHtml(reason)}` : ''}</p>${dashboardButton('subscriptions', 'Open subscriptions')}</div>`, 'subscription-request')
     }
     return { changed: true, from: item.quantity, children, monthlyPence, nextDate }
   } catch (error) {
-    console.error(`Membership sync for family ${familyId} failed:`, error.message)
+    // A test-mode server reading live-mode subscriptions (local dev against the
+    // live database) is not a failure worth an alert.
+    if (error?.code === 'resource_missing' && /similar object exists in live mode/.test(error.message || '')) return { changed: false, skipped: 'live-mode subscription on a test-mode server' }
+    await alertFailure('A per-child membership could not be kept in step with the children on the account', error, { Family: familyId })
     return { changed: false, error: error.message }
   } finally {
     membershipSyncing.delete(familyId)
   }
 }
 
-// Fire-and-forget after a child is added; failures are logged and the sweep retries.
+// Fire-and-forget after a child is added; failures alert the admin and the sweep retries.
 const syncMembershipSoon = (familyId, reason) => { if (familyId) syncFamilyMembership(familyId, { reason }).catch(() => {}) }
 
 async function runMembershipSync() {
   if (!stripe || !supabase) return { checked: 0, changed: [] }
   const { data: families, error } = await supabase.from('parent_families').select('id').eq('membership_pricing', 'per_child').eq('membership_status', 'active').not('stripe_subscription_id', 'is', null)
   if (error) {
-    if (!/membership_pricing/.test(error.message)) console.error('Membership sync query failed:', error.message)
+    if (!/membership_pricing/.test(error.message)) await alertFailure('The hourly membership check could not list families', error)
     return { checked: 0, changed: [], error: error.message }
   }
   const changed = []
@@ -4036,8 +4136,8 @@ async function runMembershipSync() {
   }
   return { checked: (families || []).length, changed }
 }
-setInterval(() => { runMembershipSync().catch((error) => console.error('Membership sync error:', error)) }, INVOICE_REMINDER_INTERVAL_MS)
-setTimeout(() => { runMembershipSync().catch((error) => console.error('Membership sync error:', error)) }, 45000)
+setInterval(() => { runMembershipSync().catch((error) => alertFailure('The hourly membership check stopped with an error', error)) }, INVOICE_REMINDER_INTERVAL_MS)
+setTimeout(() => { runMembershipSync().catch((error) => alertFailure('The hourly membership check stopped with an error', error)) }, 45000)
 
 app.post('/api/admin/memberships/sync', async (request, response) => {
   const access = await requireInvoiceAccess(request, response)
@@ -4109,7 +4209,7 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   }
   if (familyId) {
     if (user?.id && !existingFamilies[0].owner_user_id) {
-      await supabase.from('parent_families').update({ owner_user_id: user.id }).eq('id', familyId)
+      await checkedWrite("A parent's login could not be linked to their family while booking", supabase.from('parent_families').update({ owner_user_id: user.id }).eq('id', familyId), { Parent: parentEmail, Family: familyId })
     }
   } else {
     familyId = `family-${crypto.randomUUID()}`
@@ -4165,7 +4265,8 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
   // month: that still needs a Stripe subscription (and card) for the months after.
   const free = totals.totalPence === 0 && (!isMembership || membershipDuration === 'forever')
   if (!free && totals.totalPence > 0 && totals.totalPence < 30) return response.status(400).json({ error: 'With that discount the total is too small to pay by card. Please contact us to book.' })
-  await supabase.from('bookings').update({ price: totals.totalPence / 100 }).eq('id', bookingId)
+  const { error: priceError } = await supabase.from('bookings').update({ price: totals.totalPence / 100 }).eq('id', bookingId)
+  if (priceError) return response.status(500).json({ error: 'Your booking could not be priced. Please try again.' })
   // Return to the host the parent actually used (same pattern as event checkout) , 
   // so dev/localhost sessions redirect back to dev, not to the live site.
   const requestOrigin = request.headers.origin || request.headers.referer?.replace(/\/[^/]*$/, '') || ''
@@ -4422,7 +4523,7 @@ app.post('/api/stripe/create-payment-link-checkout', async (request, response) =
     })
   } catch (stripeError) {
     console.error('Payment link checkout creation failed:', stripeError)
-    await supabase.from('payment_link_orders').delete().eq('id', orderId).eq('payment_status', 'pending')
+    await checkedWrite('An unstarted payment link order could not be removed (it will show as pending)', supabase.from('payment_link_orders').delete().eq('id', orderId).eq('payment_status', 'pending'), { Order: orderId })
     return response.status(502).json({ error: 'Checkout could not be started. Please try again.' })
   }
   const { error: sessionSaveError } = await supabase.from('payment_link_orders').update({ stripe_checkout_session_id: session.id }).eq('id', orderId)
@@ -4436,7 +4537,7 @@ async function recordPaymentLinkOrder(session) {
   const metadata = session.metadata || {}
   const orderId = metadata.order_id
   if (!orderId) {
-    console.error('Payment link webhook without order_id:', session.id)
+    await alertFailure('A payment link was paid without an order reference', 'Check the payment in Stripe and record it by hand.', { 'Stripe session': session.id, Buyer: session.customer_details?.email })
     return { ok: true } // nothing we could ever write; don't make Stripe retry forever
   }
   const paidFields = {
@@ -4448,7 +4549,7 @@ async function recordPaymentLinkOrder(session) {
   }
   const { data: existing, error: loadError } = await supabase.from('payment_link_orders').select('id,payment_status').eq('id', orderId).maybeSingle()
   if (loadError) {
-    console.error('Payment link order lookup failed:', loadError)
+    await alertFailure('A paid payment link order could not be looked up', loadError, { Order: orderId, 'Stripe session': session.id })
     return { ok: false }
   }
   if (existing) {
@@ -4456,7 +4557,7 @@ async function recordPaymentLinkOrder(session) {
     if (existing.payment_status === 'pending') {
       const { error } = await supabase.from('payment_link_orders').update(paidFields).eq('id', orderId).eq('payment_status', 'pending')
       if (error) {
-        console.error('Payment link order update failed:', error)
+        await alertFailure('A paid payment link order could not be marked paid', error, { Order: orderId, 'Stripe session': session.id })
         return { ok: false }
       }
     }
@@ -4473,19 +4574,23 @@ async function recordPaymentLinkOrder(session) {
       ...paidFields,
     })
     if (error) {
-      console.error('Payment link order creation failed:', error)
+      await alertFailure('A paid payment link order could not be saved', error, { Order: orderId, 'Stripe session': session.id })
       return { ok: false }
     }
   }
 
   // Confirmation email exactly once per order ,  same claim pattern as event
   // tickets: set confirmation_sent_at only where still null; a redelivery skips.
-  const { data: claimed } = await supabase
+  const { data: claimed, error: claimError } = await supabase
     .from('payment_link_orders')
     .update({ confirmation_sent_at: new Date().toISOString() })
     .eq('id', orderId)
     .is('confirmation_sent_at', null)
     .select('*')
+  if (claimError) {
+    await alertFailure('A payment link confirmation email could not be queued', claimError, { Order: orderId })
+    return { ok: false }
+  }
   const order = (claimed || [])[0]
   if (!order) return { ok: true }
 
@@ -4502,8 +4607,8 @@ async function recordPaymentLinkOrder(session) {
   })
   // If the send failed, release the claim so a webhook retry can send it.
   if (!emailResult.sent) {
-    await supabase.from('payment_link_orders').update({ confirmation_sent_at: null }).eq('id', orderId)
-    console.error('Payment link confirmation email failed:', emailResult.reason)
+    await checkedWrite('A payment link confirmation email failed and could not be queued to resend', supabase.from('payment_link_orders').update({ confirmation_sent_at: null }).eq('id', orderId), { Order: orderId })
+    await alertFailure('A payment link confirmation email was not sent', emailResult.reason, { Order: orderId, Buyer: order.buyer_email })
   }
   await notifyAdmin(`New payment: ${order.link_name}`, `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New payment: ${escHtml(order.link_name)}</h2><p><strong>Buyer:</strong> ${escHtml(order.buyer_name)} (${escHtml(order.buyer_email)})<br>${answerRows.map((answer) => `<strong>${escHtml(answer.label)}:</strong> ${escHtml(answer.value)}<br>`).join('')}<strong>Amount:</strong> ${money(order.amount_pence)}</p>${dashboardButton('payment-links', 'See who has paid', order.payment_link_id)}</div>`, 'payment-link')
   return { ok: true }
@@ -4569,16 +4674,40 @@ app.post('/api/parent/billing-portal', async (request, response) => {
   response.json({ url: portal.url })
 })
 
+// A cancelled membership means the family has left: every child is marked
+// 'cancelled' (off the register, red on Students), which is different from
+// 'inactive' (enrolled, not paid yet). Needs migration
+// 20261003_students_cancelled_status.sql, without which the database rejects it.
+const CANCELLED_STATUS_MIGRATION = 'Apply supabase/migrations/20261003_students_cancelled_status.sql in the Supabase SQL Editor.'
+async function cancelFamilyStudents(familyIds, why) {
+  if (!familyIds.length) return { error: null, count: 0 }
+  const { data, error } = await supabase.from('students').update({ membership_status: 'cancelled' }).in('family_id', familyIds).select('id')
+  if (error) {
+    const needsMigration = /membership_status_check/.test(error.message)
+    await alertFailure('Children of a cancelled membership could not be marked cancelled (they still show as members and stay on the register)', error, { Families: familyIds.join(', '), Why: why, Fix: needsMigration ? CANCELLED_STATUS_MIGRATION : '' })
+    return { error: needsMigration ? new Error(`Students cannot be marked cancelled yet. ${CANCELLED_STATUS_MIGRATION}`) : error, count: 0 }
+  }
+  return { error: null, count: (data || []).length }
+}
+
 app.post('/api/parent/cancel-subscription', async (request, response) => {
   if (!stripe || !supabase) return response.status(503).json({ error: 'Billing is not configured on the server.' })
   const user = await authenticatedUser(request)
   if (!user) return response.status(401).json({ error: 'Authentication is required.' })
   const { data: family } = await supabase.from('parent_families').select('id,stripe_subscription_id').eq('owner_user_id', user.id).maybeSingle()
   if (!family?.stripe_subscription_id) return response.status(400).json({ error: 'No active subscription was found.' })
-  await stripe.subscriptions.cancel(family.stripe_subscription_id)
-  await supabase.from('parent_families').update({ membership_status: 'cancelled', updated_at: new Date().toISOString() }).eq('owner_user_id', user.id)
-  await supabase.from('students').update({ membership_status: 'cancelled' }).eq('family_id', family.id)
-  response.json({ cancelled: true })
+  try {
+    await stripe.subscriptions.cancel(family.stripe_subscription_id)
+  } catch (error) {
+    return response.status(502).json({ error: `Your subscription could not be cancelled: ${error.message}` })
+  }
+  // From here Stripe has stopped billing, so a failed write must not be reported to
+  // the parent as a clean cancellation, and the admin has to know to fix the record.
+  const { error: familyError } = await checkedWrite('A parent cancelled their subscription in Stripe, but the family could not be marked cancelled', supabase.from('parent_families').update({ membership_status: 'cancelled', paused_at: null, updated_at: new Date().toISOString() }).eq('id', family.id), { Family: family.id, Parent: user.email, 'Stripe subscription': family.stripe_subscription_id })
+  if (familyError) return response.status(500).json({ error: 'Your subscription is cancelled and you will not be charged again, but your account could not be updated. We have been told and will fix it.' })
+  const result = await cancelFamilyStudents([family.id], `Parent ${user.email} cancelled their subscription`)
+  if (result.error) return response.status(500).json({ error: "Your subscription is cancelled and you will not be charged again, but your children's records could not be updated. We have been told and will fix it.", familyCancelled: true })
+  response.json({ cancelled: true, students: result.count })
 })
 
 // Admin subscription management from the Operations > Sales > Subscriptions table.
@@ -4624,9 +4753,13 @@ app.post('/api/admin/subscriptions/:familyId/:action', async (request, response)
       update.membership_status = 'cancelled'
       update.paused_at = null
     }
-    const { data, error } = await supabase.from('parent_families').update(update).eq('id', familyId).select().single()
-    if (error) return response.status(500).json({ error: 'Stripe was updated, but the family record could not be saved.' })
-    if (action === 'cancel') await supabase.from('students').update({ membership_status: 'cancelled' }).eq('family_id', familyId)
+    const { data, error } = await checkedWrite(`An admin ${action === 'cancel' ? 'cancelled' : action === 'pause' ? 'paused' : 'resumed'} a subscription in Stripe, but the family record could not be saved`, supabase.from('parent_families').update(update).eq('id', familyId).select().single(), { Family: familyId, 'Stripe subscription': family.stripe_subscription_id })
+    if (error) return response.status(500).json({ error: `Stripe was updated, but the family record could not be saved: ${error.message}` })
+    if (action === 'cancel') {
+      const result = await cancelFamilyStudents([familyId], 'An admin cancelled the subscription')
+      if (result.error) return response.status(500).json({ error: `The subscription is cancelled in Stripe and the family is marked cancelled, but the children could not be: ${result.error.message}`, family: data })
+      return response.json({ family: data, studentsCancelled: result.count })
+    }
     response.json({ family: data })
   } catch (error) {
     response.status(502).json({ error: error.message || 'Stripe could not apply the subscription action.' })
@@ -4710,7 +4843,7 @@ async function sendDueReminders() {
     .select('*, events(*)')
     .eq('payment_status', 'paid')
     .is('reminder_sent_at', null)
-  if (error) { console.error('Reminder query failed:', error); return { checked: 0, sent: 0, error: error.message } }
+  if (error) { await alertFailure('Event ticket reminders could not check for upcoming events', error); return { checked: 0, sent: 0, error: error.message } }
 
   let sent = 0
   for (const order of orders || []) {
@@ -4727,7 +4860,9 @@ async function sendDueReminders() {
       attachments: [{ filename: 'event.ics', content: Buffer.from(buildIcs({ title: eventRow.title, date: eventRow.event_date, startTime: eventRow.event_time, endTime: eventRow.event_end_time, location: eventRow.location, description: eventRow.description, url: `${PUBLIC_BASE_URL}/event/${order.event_id}` })).toString('base64') }],
     })
     if (result.sent || !process.env.RESEND_API_KEY) {
-      await supabase.from('event_ticket_orders').update({ reminder_sent_at: new Date().toISOString() }).eq('id', order.id)
+      const { error: markError } = await supabase.from('event_ticket_orders').update({ reminder_sent_at: new Date().toISOString() }).eq('id', order.id) // eslint-disable-line no-await-in-loop
+      // Stop: an order not marked would be reminded again on every run.
+      if (markError) throw new Error(`The reminder to ${order.buyer_email} was sent but could not be recorded, so reminders are paused to avoid repeats: ${markError.message}`)
       if (result.sent) sent += 1
     }
   }
@@ -4745,7 +4880,8 @@ app.post('/api/admin/send-event-reminders', async (request, response) => {
 })
 
 const REMINDER_INTERVAL_MS = Number(process.env.REMINDER_INTERVAL_MS || 60000)
-setInterval(() => { sendDueReminders().catch((error) => console.error('Reminder scheduler error:', error)) }, REMINDER_INTERVAL_MS)
+// A failure that keeps happening alerts once per 30 minutes (see alertFailure).
+setInterval(() => { sendDueReminders().catch((error) => alertFailure('Event ticket reminders stopped with an error', error)) }, REMINDER_INTERVAL_MS)
 
 /* ------------------------------------------------------------------ */
 /* Production: serve the built Vite app (dist/) and fall back to        */

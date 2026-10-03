@@ -372,13 +372,9 @@ async function saveTable(tableName, rows) {
               ? rows.map(toDbJob)
           : rows
 
+  // Returns the error so the caller can tell the user: a failed save must not look saved.
   const { error } = await supabase.from(tableName).upsert(payload, { onConflict: 'id' })
-  if (error) {
-    console.error(`Supabase save failed for ${tableName}:`, error)
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(tableName, JSON.stringify(rows))
-    }
-  }
+  return error || null
 }
 
 // Built-in workshop types plus every active staff-made session type (and the
@@ -1449,10 +1445,10 @@ function App() {
 
     setBookings(nextBookings)
     setSchools(nextSchools)
-    void saveTable('schools', nextSchools)
+    void saveRows('schools', nextSchools)
     const discountCode = String(schoolRequest.discountCode || '').trim()
     void (async () => {
-      await saveTable('bookings', nextBookings)
+      if (await saveRows('bookings', nextBookings)) return
       // School bookings are invoiced: the code becomes a discount on this booking's invoice.
       let codeNote = ''
       if (discountCode) {
@@ -1481,7 +1477,13 @@ function App() {
     })
   }
 
-  const persistRows = (tableName, rows, setter) => { setter(rows); void saveTable(tableName, rows) }
+  const TABLE_LABELS = { bookings: 'Booking', schools: 'School', instructors: 'Instructor', students: 'Student', job_board_jobs: 'Job' }
+  const saveRows = async (tableName, rows) => {
+    const error = await saveTable(tableName, rows)
+    if (error) setToast(`${TABLE_LABELS[tableName] || 'Record'} changes were NOT saved: ${error.message}. Refresh to see what is stored.`)
+    return error
+  }
+  const persistRows = (tableName, rows, setter) => { setter(rows); void saveRows(tableName, rows) }
   const sendInvoice = async (booking) => {
     const school = schools.find((item) => item.id === booking.schoolId)
     setInvoiceSending(true)
@@ -1507,7 +1509,7 @@ function App() {
     setBookings(next)
     setBookingModal(null)
     // The row must exist before the invoice endpoint numbers it and marks it sent.
-    await saveTable('bookings', next)
+    if (await saveRows('bookings', next)) return
     if (booking.status === 'Confirmed' && booking.invoiceStatus === 'Not sent' && previous?.status !== 'Confirmed' && (schools.find((item) => item.id === booking.schoolId)?.email || booking.contactEmail)) await sendInvoice(booking)
   }
   const saveSchool = (school) => { const next = schools.some((item) => item.id === school.id) ? schools.map((item) => item.id === school.id ? school : item) : [school, ...schools]; persistRows('schools', next, setSchools); setSchoolModal(null); setSchoolRecord(next.find((item) => item.id === school.id) || null) }
@@ -1627,7 +1629,8 @@ function App() {
   const deleteSiteBlock = async (id) => {
     const { error } = await supabase.from('site_blocks').delete().eq('id', id)
     if (error) { setToast(`Content block could not be deleted: ${error.message}`); return }
-    await supabase.from('site_sections').delete().eq('section_key', `block:${id}`)
+    const { error: sectionError } = await supabase.from('site_sections').delete().eq('section_key', `block:${id}`)
+    if (sectionError) setToast(`The block was deleted, but its homepage slot could not be removed: ${sectionError.message}`)
     setSectionLayout((current) => current.filter((section) => section.sectionKey !== `block:${id}`))
     setSiteBlocks((current) => current.filter((block) => block.id !== id))
     setToast('Content block removed from the homepage.')
@@ -1658,7 +1661,25 @@ function App() {
   const saveFamily = async (family, changes) => {
     setFamilies((current) => current.map((item) => item.id === family.id ? { ...item, ...changes } : item))
     const { error } = await supabase.from('parent_families').update({ ...changes, updated_at: new Date().toISOString() }).eq('id', family.id)
-    if (error) setToast(`Family record could not be saved: ${error.message}`)
+    if (error) {
+      setFamilies((current) => current.map((item) => item.id === family.id ? family : item))
+      setToast(`Family record could not be saved: ${error.message}`)
+      return
+    }
+    // Marking a family cancelled by hand means its children have left too (off the
+    // register); marking it active again brings those children back.
+    const status = changes.membership_status
+    if (status === 'cancelled' || (status === 'active' && family.membership_status === 'cancelled')) {
+      const query = supabase.from('students').update({ membership_status: status }).eq('family_id', family.id)
+      const { data: changed, error: studentError } = await (status === 'active' ? query.eq('membership_status', 'cancelled') : query).select('id')
+      if (studentError) {
+        setToast(`The family is marked ${status}, but its children could NOT be: ${/membership_status_check/.test(studentError.message) ? 'apply supabase/migrations/20261003_students_cancelled_status.sql first' : studentError.message}`)
+        return
+      }
+      const ids = new Set((changed || []).map((row) => row.id))
+      setStudents((current) => current.map((student) => ids.has(student.id) ? { ...student, membershipStatus: status } : student))
+      setToast(`Family marked ${status}${ids.size ? `, with ${ids.size} child${ids.size === 1 ? '' : 'ren'}` : ''}.`)
+    }
   }
   // Parent portal > Settings ,  family contact/emergency details plus per-child
   // welfare info. Routed through the server so family ownership is verified.
@@ -1685,8 +1706,10 @@ function App() {
     try {
       const response = await fetch(`/api/admin/subscriptions/${encodeURIComponent(family.id)}/${action}`, { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}` } })
       const result = await response.json()
+      // A partial failure can still carry the saved family (e.g. cancelled, children not).
+      if (result.family) setFamilies((current) => current.map((item) => item.id === family.id ? result.family : item))
       if (!response.ok) throw new Error(result.error || 'Subscription action failed.')
-      setFamilies((current) => current.map((item) => item.id === family.id ? result.family : item))
+      if (action === 'cancel') setStudents((current) => current.map((student) => student.familyId === family.id ? { ...student, membershipStatus: 'cancelled' } : student))
       setToast(`Subscription ${action === 'pause' ? 'paused' : action === 'resume' ? 'resumed' : 'cancelled'}.`)
     } catch (error) {
       setToast(error.message)
@@ -1730,9 +1753,18 @@ function App() {
   const parentBookings = parentFamily ? bookings.filter((booking) => booking.familyId === parentFamily.id) : bookings
   const parentStudents = parentFamily ? students.filter((student) => student.familyId === parentFamily.id) : students
   const parentRequest = (path, body = {}) => fetch(path, { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-  const cancelParentBooking = async (bookingId) => { const response = await parentRequest('/api/parent/cancel-booking', { bookingId }); setToast(response.ok ? 'Booking cancelled.' : 'Booking could not be cancelled.'); if (response.ok) setBookings(bookings.map((booking) => booking.id === bookingId ? { ...booking, status: 'Cancelled' } : booking)) }
+  const cancelParentBooking = async (bookingId) => { const response = await parentRequest('/api/parent/cancel-booking', { bookingId }); const result = await response.json().catch(() => ({})); setToast(response.ok ? 'Booking cancelled.' : result.error || 'Booking could not be cancelled.'); if (response.ok) setBookings(bookings.map((booking) => booking.id === bookingId ? { ...booking, status: 'Cancelled' } : booking)) }
   const openBillingPortal = async () => { const response = await parentRequest('/api/parent/billing-portal'); const result = await response.json(); if (response.ok) window.location.assign(result.url); else setToast(result.error) }
-  const cancelParentSubscription = async () => { const response = await parentRequest('/api/parent/cancel-subscription'); setToast(response.ok ? 'Subscription cancelled.' : 'Subscription could not be cancelled.') }
+  const cancelParentSubscription = async () => {
+    if (!window.confirm("Are you sure you want to cancel your Monthly Membership? Payments stop straight away and your children's places in class end. To come back later you'd need to set up a new membership.")) return
+    const response = await parentRequest('/api/parent/cancel-subscription')
+    const result = await response.json().catch(() => ({}))
+    setToast(response.ok ? 'Subscription cancelled.' : result.error || 'Subscription could not be cancelled.')
+    if (response.ok || result.familyCancelled) {
+      setFamilies((current) => current.map((family) => family.id === parentFamily?.id ? { ...family, membership_status: 'cancelled' } : family))
+      setStudents((current) => current.map((student) => student.familyId === parentFamily?.id ? { ...student, membershipStatus: 'cancelled' } : student))
+    }
+  }
   const markBookingDone = async (bookingId) => { const completedAt = new Date().toISOString(); const response = await fetch('/api/instructor/mark-done', { method: 'POST', headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ bookingId }) }); if (response.ok) setBookings(bookings.map((booking) => booking.id === bookingId ? { ...booking, status: 'Delivered', needsAdminAttention: true, completedAt } : booking)); setToast(response.ok ? 'Session marked as done. Admin review is now pending.' : 'Session could not be marked as done.') }
   const instructorRecord = isInstructor ? instructors.find((instructor) => instructor.id === profile?.instructor_id) : null
   const uploadDbs = async (file) => {
@@ -1921,7 +1953,7 @@ function App() {
   if (payLinkSlug) return <Suspense fallback={routeFallback}><PaymentLinkPage slug={payLinkSlug} onBack={() => { window.history.pushState(null, '', '/'); setPayLinkSlug(null) }} /></Suspense>
   if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
   if (view === 'ops' && session && needsPasswordSetup) return <AuthScreen requirePasswordSetup onAuthenticated={() => { setNeedsPasswordSetup(false); setView('ops') }} />
-  if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard initialTab={tab} session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} invoices={parentInvoices} onAddChildren={addParentChildren} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} /></Suspense>
+  if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard initialTab={tab} session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} invoices={parentInvoices} onAddChildren={addParentChildren} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} />{toast && <div className="toast" role="status">{toast}</div>}</Suspense>
 
   return (
     <div className="app-shell">

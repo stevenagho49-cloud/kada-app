@@ -120,6 +120,8 @@ export default function SubscriptionsPage({ session, families, busyId, onAction,
               if (action.startsWith('set:')) onSaveFamily(family, { membership_status: action.slice(4) })
               else if (action === 'per-child') {
                 if (window.confirm(`Switch ${family.guardian_name || 'this family'} from their flat rate${family.membership_monthly_pence ? ` (${money(family.membership_monthly_pence)}/month)` : ''} to the Monthly Membership price per child? The new amount starts from their next payment, and they'll be emailed about it.`)) onAction(family, action)
+              } else if (action === 'cancel') {
+                if (window.confirm(`Are you sure you want to cancel ${family.guardian_name ? `${family.guardian_name}'s` : "this family's"} subscription? Stripe stops billing straight away and their children are marked cancelled. This can't be undone; they would need a new subscription.`)) onAction(family, action)
               } else onAction(family, action)
             }}
           />

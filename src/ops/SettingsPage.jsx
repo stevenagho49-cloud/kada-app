@@ -59,6 +59,7 @@ export function SettingsPage({ content, onSaveContent, session }) {
   // app_settings-backed notifications (admin-only, read by the server)
   const [notifications, setNotifications] = useState({ notifyEmail: '', newBooking: true, newContact: true, jobAlerts: true, eventSales: true, paymentLinkSales: true, invoicePayments: true, newSignups: true })
   const [notificationsLoaded, setNotificationsLoaded] = useState(false)
+  const [notificationsError, setNotificationsError] = useState('')
 
   useEffect(() => {
     let mounted = true
@@ -80,9 +81,11 @@ export function SettingsPage({ content, onSaveContent, session }) {
 
   const saveNotifications = async () => {
     setSavingKey('notifications')
-    await supabase.from('app_settings').upsert({ key: 'notifications', value: notifications, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+    const { error } = await supabase.from('app_settings').upsert({ key: 'notifications', value: notifications, updated_at: new Date().toISOString() }, { onConflict: 'key' })
     setSavingKey('')
-    setDirty((current) => ({ ...current, notifications: false }))
+    // Left marked unsaved on failure, so it can't look saved when it isn't.
+    setNotificationsError(error ? `Not saved: ${error.message}` : '')
+    if (!error) setDirty((current) => ({ ...current, notifications: false }))
   }
 
   const editNotifications = (changes) => {
@@ -127,6 +130,7 @@ export function SettingsPage({ content, onSaveContent, session }) {
         saving={savingKey === 'notifications'}
         onSave={saveNotifications}
       >
+        {notificationsError && <p role="alert" style={{ color: '#a3401f', fontSize: 13, margin: '0 0 8px' }}>{notificationsError}</p>}
         <TextField label="Send admin alerts to" type="email" placeholder="bookings@kingsarkdance.com" value={notifications.notifyEmail} onChange={(value) => editNotifications({ notifyEmail: value })} />
         {notificationsLoaded && (
           <>

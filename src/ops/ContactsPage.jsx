@@ -144,6 +144,7 @@ export function ContactsPage({ session }) {
   const [showEmailAdd, setShowEmailAdd] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const [notice, setNotice] = useState('')
+  const [actionError, setActionError] = useState('')
 
   // PostgREST caps responses at 1,000 rows ,  paginate so large imports still
   // show everything and dedupe stays accurate.
@@ -245,7 +246,9 @@ export function ContactsPage({ session }) {
 
   const remove = async (contact) => {
     if (!window.confirm(`Delete ${contact.name} from contacts? This cannot be undone.`)) return
-    await supabase.from('contacts').delete().eq('id', contact.id)
+    const { error } = await supabase.from('contacts').delete().eq('id', contact.id)
+    if (error) { setActionError(`${contact.name} could not be deleted: ${error.message}`); return }
+    setActionError('')
     await load()
   }
 
@@ -322,6 +325,7 @@ export function ContactsPage({ session }) {
       </div>
 
       {notice && <p style={{ color: OPS_COLORS.okGreen, fontSize: 13 }}>{notice}</p>}
+      {actionError && <p role="alert" style={{ color: OPS_COLORS.warn, fontSize: 13 }}>{actionError}</p>}
       {loadError && <p style={{ color: OPS_COLORS.warn, fontSize: 13 }}>Contacts could not be loaded ({loadError}). Has the 20260921_crm_contacts.sql migration been applied in Supabase?</p>}
       {loading ? <p style={{ color: OPS_COLORS.muted }}>Loading contacts…</p> : (
         <DataTable
