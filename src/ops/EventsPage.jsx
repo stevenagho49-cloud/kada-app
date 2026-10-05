@@ -528,7 +528,7 @@ export function EventForm({ event, onSave, onUploadFlyer }) {
           <div>
             <input
               type="file"
-              accept="image/png,image/jpeg,image/webp"
+              accept="image/*"
               onChange={async (inputEvent) => {
                 const file = inputEvent.target.files?.[0]
                 if (!file) return
@@ -543,7 +543,8 @@ export function EventForm({ event, onSave, onUploadFlyer }) {
               }}
               style={{ fontSize: 12, color: OPS_COLORS.muted }}
             />
-            {uploadingFlyer && <div style={{ fontSize: 12, color: OPS_COLORS.emerald, marginTop: 4 }}>Uploading flyer…</div>}
+            {uploadingFlyer && <div style={{ fontSize: 12, color: OPS_COLORS.emerald, marginTop: 4 }}>Optimising and uploading flyer…</div>}
+            <div style={{ fontSize: 11, color: OPS_COLORS.muted, marginTop: 4 }}>Any size is fine: it is resized and saved as a JPEG automatically.</div>
             {form.flyerPath && (
               <button type="button" onClick={() => setForm({ ...form, flyerPath: '' })} style={{ background: 'none', border: 'none', color: OPS_COLORS.warn, fontSize: 12, cursor: 'pointer', padding: 0, marginTop: 4 }}>Remove flyer</button>
             )}

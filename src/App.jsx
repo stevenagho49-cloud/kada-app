@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, lazy, Suspense, Component } from 'react'
 import { supabase, initialAuthCallback, verifyAuthToken } from './lib/supabase'
+import { compressFlyer, flyerFileName } from './lib/flyerImage'
 import { readAuthCallback } from './lib/authRecovery'
 import './App.css'
 import { OpsSidebar, DataTable, Pill, OpsButton, EmptyState } from './ops/ui'
@@ -1636,9 +1637,14 @@ function App() {
     setToast('Event deleted.')
   }
   const uploadEventFlyer = async (eventId, file) => {
-    const path = `${eventId}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`
-    const { error } = await supabase.storage.from('event-flyers').upload(path, file, { cacheControl: '3600', upsert: true, contentType: file.type })
+    let flyer
+    try { flyer = await compressFlyer(file) } catch (error) { setToast(error.message); return '' }
+    // Each upload gets a new path, so browsers can cache it for a year.
+    const path = `${eventId}/${Date.now()}-${flyerFileName(file.name)}`
+    const { error } = await supabase.storage.from('event-flyers').upload(path, flyer.blob, { cacheControl: '31536000', upsert: true, contentType: 'image/jpeg' })
     if (error) { setToast(error.message || 'Flyer could not be uploaded.'); return '' }
+    const resized = flyer.width !== flyer.originalWidth ? `, resized from ${flyer.originalWidth}×${flyer.originalHeight}` : ''
+    setToast(`Flyer uploaded: ${flyer.width}×${flyer.height} JPEG, ${Math.round(flyer.blob.size / 1024)} KB${resized}.`)
     return path
   }
   const saveSectionLayout = async (next) => {
