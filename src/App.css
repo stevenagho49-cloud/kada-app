@@ -518,6 +518,21 @@
   margin-bottom: 0;
 }
 
+.quote-section.in-modal {
+  padding: 4px 0;
+}
+
+.quote-section.in-modal .quote-wrap {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  padding: 0;
+}
+
+.quote-section.in-modal .section-head h2 {
+  font-size: 34px;
+  margin-bottom: 6px;
+}
+
 .quote-form {
   background: #fff;
   border: 1px solid #ddd3b3;
@@ -1476,6 +1491,7 @@ footer {
 .site-public .about-img { background: linear-gradient(165deg, #1a5142, #0a2e23); background-position: center; background-size: cover; border: 0; }
 .site-public .about-copy { background: var(--ivory); margin-left: -90px; margin-top: 60px; padding: 56px 60px; border-color: var(--rule); }
 .site-public .about-copy h2 { font-size: 42px; }
+.site-public .about-copy .btn { margin-top: 26px; }
 .site-public .values { background: var(--deep); padding: 140px 0; }
 .site-public .values h2 { font-size: 44px; }
 .site-public .value-list { display: flex; flex-direction: column; }
@@ -1549,7 +1565,7 @@ footer {
   .site-public .value-line { grid-template-columns: 70px 1fr; gap: 14px; }
   .site-public .value-line p { grid-column: 2; }
   .site-public .service { min-height: 620px; }
-  .site-public .service-card, .site-public .service.dark .service-card, .site-public .service.light .service-card { margin: 0 22px; max-width: 460px; padding: 42px 30px; }
+  .site-public .service-card, .site-public .service.dark .service-card, .site-public .service.light .service-card { margin: 0 22px; max-width: min(460px, calc(100% - 44px)); padding: 42px 30px; }
   .site-public .team-row { align-items: stretch; }
   .site-public .team-card { flex: 1 1 0; }
   .site-public .team-card:nth-child(2) { transform: none; }
@@ -1564,7 +1580,7 @@ footer {
   .site-public .value-line { grid-template-columns: 50px 1fr; padding: 24px 0; }
   .site-public .value-line h3 { font-size: 23px; }
   .site-public .service { min-height: 560px; }
-  .site-public .service-card, .site-public .service.dark .service-card, .site-public .service.light .service-card { margin: 0; padding: 34px 24px; }
+  .site-public .service-card, .site-public .service.dark .service-card, .site-public .service.light .service-card { margin: 0; max-width: 100%; padding: 34px 24px; }
   .site-public .team-row, .site-public .video-row { grid-template-columns: minmax(0, 1fr); display: grid; gap: 30px; }
   .site-public .video-card, .site-public .video-frame { width: 100%; max-width: 360px; margin-left: auto; margin-right: auto; }
   .site-public .team-card .photo { margin-left: 0; margin-right: 0; }

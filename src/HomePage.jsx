@@ -189,7 +189,7 @@ export default function HomePage({ SectionError, siteEvents, siteBlocks = [], si
         return (
           <section className="hero" key="hero">
             <div className="wrap">
-              <div className="hero-stamp" aria-label="Established Birmingham, King's Ark Dance Academy"><svg viewBox="0 0 104 104" aria-hidden="true"><defs><path id="hero-stamp-path" d="M 52,52 m -38,0 a 38,38 0 1,1 76,0 a 38,38 0 1,1 -76,0" /></defs><text><textPath href="#hero-stamp-path">EST. BIRMINGHAM · KING'S ARK DANCE ACADEMY · </textPath></text></svg></div>
+              <div className="hero-stamp" role="img" aria-label="Established Birmingham, King's Ark Dance Academy"><svg viewBox="0 0 104 104" aria-hidden="true"><defs><path id="hero-stamp-path" d="M 52,52 m -38,0 a 38,38 0 1,1 76,0 a 38,38 0 1,1 -76,0" /></defs><text><textPath href="#hero-stamp-path">EST. BIRMINGHAM · KING'S ARK DANCE ACADEMY · </textPath></text></svg></div>
               <div className="hero-grid hero-row">
               <div className="hero-copy">
                 <div className="hero-eyebrow eyebrow">Faith · Culture · Movement</div>
@@ -389,13 +389,15 @@ export default function HomePage({ SectionError, siteEvents, siteBlocks = [], si
 
   return (
     <div className="site-public">
-      {orderedVisibleSections.map((section) => {
-        const rendered = renderSection(section.sectionKey)
-        if (!rendered) return null
-        return SectionError ? <SectionError key={section.sectionKey}>{rendered}</SectionError> : rendered
-      })}
+      <main>
+        {orderedVisibleSections.map((section) => {
+          const rendered = renderSection(section.sectionKey)
+          if (!rendered) return null
+          return SectionError ? <SectionError key={section.sectionKey}>{rendered}</SectionError> : rendered
+        })}
+      </main>
       {/* The booking and quote forms open from any section or content block. */}
-            {publicForm === 'class' && <Modal title="Reserve a place" onClose={() => setPublicForm(null)} wide><section className="quote-section" id="class-booking">
+            {publicForm === 'class' && <Modal title="Reserve a place" onClose={() => setPublicForm(null)} wide><section className="quote-section in-modal" id="class-booking">
               <div className="wrap quote-wrap">
                 <div className="section-head left-align"><span className="eyebrow">Saturday Classes</span><h2 className="display">Reserve a place.</h2><p>Secure your child's place through secure checkout. The booking is confirmed after payment is completed.</p></div>
                 <form className="quote-form" onSubmit={startClassCheckout}>
@@ -418,7 +420,7 @@ export default function HomePage({ SectionError, siteEvents, siteBlocks = [], si
               </div>
             </section></Modal>}
 
-            {publicForm === 'school' && <Modal title="Get a pricing estimate" onClose={() => setPublicForm(null)} wide><section className="quote-section" id="school-quote">
+            {publicForm === 'school' && <Modal title="Get a pricing estimate" onClose={() => setPublicForm(null)} wide><section className="quote-section in-modal" id="school-quote">
               <div className="wrap quote-wrap">
                 <div className="section-head left-align">
                   <span className="eyebrow">School Enquiry</span>

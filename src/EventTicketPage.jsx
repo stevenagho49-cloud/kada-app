@@ -162,7 +162,7 @@ export function EventTicketPage({ eventId, onBack }) {
       <header style={{ background: emerald, color: ivory }}>
         <div style={{ maxWidth: 1040, margin: '0 auto', padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <img src={logoUrl} alt="King's Ark Dance Academy logo" style={{ width: 34, height: 34, objectFit: 'contain' }} />
+            <span style={{ background: ivory, borderRadius: 10, padding: '3px 6px', display: 'grid', placeItems: 'center', flexShrink: 0 }}><img src={logoUrl} alt="King's Ark Dance Academy logo" style={{ width: 72, height: 40, objectFit: 'contain', display: 'block' }} /></span>
             <div>
               <div style={{ fontFamily: 'Fraunces, Georgia, serif', fontSize: 18, fontWeight: 700, lineHeight: 1.1 }}>King's Ark</div>
               <div style={{ fontSize: 11.5, color: '#d5a443', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Dance Academy</div>
@@ -296,14 +296,16 @@ export function EventTicketPage({ eventId, onBack }) {
 
             {totalTickets > 0 && (
               <div style={{ marginBottom: 14 }}>
-                <span style={{ display: 'block', fontSize: 12, fontWeight: 700, color: emerald, marginBottom: 4 }}>
+                <span id="ticket-names-label" style={{ display: 'block', fontSize: 12, fontWeight: 700, color: emerald, marginBottom: 4 }}>
                   Who is coming? {totalTickets > 1 ? `One name per ticket (${totalTickets} tickets)` : 'Name on the ticket'}
                 </span>
-                <div style={{ display: 'grid', gap: 8 }}>
+                <div role="group" aria-labelledby="ticket-names-label" style={{ display: 'grid', gap: 8 }}>
                   {Array.from({ length: totalTickets }, (_, index) => (
                     <input
                       key={index}
                       style={inputStyle}
+                      aria-label={`Name on ticket ${index + 1}`}
+                      autoComplete={index === 0 ? 'name' : 'off'}
                       value={attendeeNames[index] ?? ''}
                       onChange={(inputEvent) => setAttendeeName(index, inputEvent.target.value)}
                       placeholder={index === 0 ? `Ticket 1 (usually you${buyerName.trim() ? `, ${buyerName.trim()}` : ''})` : `Ticket ${index + 1} guest name (same name is fine)`}
