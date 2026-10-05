@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, lazy, Suspense, Component } from 'react'
-import { supabase } from './lib/supabase'
+import { supabase, initialAuthCallback, verifyAuthToken } from './lib/supabase'
+import { readAuthCallback } from './lib/authRecovery'
 import './App.css'
 import { OpsSidebar, DataTable, Pill, OpsButton, EmptyState } from './ops/ui'
 import { BookingsTable, SchoolsTable, InstructorsTable } from './ops/tables'
@@ -752,15 +753,16 @@ function JobBoardView({ jobs, bookings, schools, instructors, canManage, onClaim
 
 
 
-function AuthScreen({ onAuthenticated, requirePasswordSetup = false }) {
+function AuthScreen({ onAuthenticated, requirePasswordSetup = false, initialMessage = '' }) {
   const [mode, setMode] = useState(requirePasswordSetup ? 'setup' : 'signin')
   const [role, setRole] = useState('school')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [fullName, setFullName] = useState('')
   const [schoolName, setSchoolName] = useState('')
   const [children, setChildren] = useState([{ name: '', dateOfBirth: '' }])
-  const [message, setMessage] = useState('')
+  const [message, setMessage] = useState(initialMessage)
   const [busy, setBusy] = useState(false)
 
   const submit = async (event) => {
@@ -768,43 +770,54 @@ function AuthScreen({ onAuthenticated, requirePasswordSetup = false }) {
     setBusy(true)
     setMessage('')
 
-    if (mode === 'setup') {
-      const { error } = await supabase.auth.updateUser({ password })
-      if (error) setMessage(error.message)
-      else onAuthenticated()
-    } else if (mode === 'signin') {
-      const { error } = await supabase.auth.signInWithPassword({ email, password })
-      if (error) setMessage(error.message)
-      else onAuthenticated()
-    } else {
-      // Children are carried on the account and added to the family when the
-      // parent first signs in (see resolveParentFamily in server/index.js).
-      const childList = role === 'parent' ? children.map((child) => ({ name: child.name.trim(), dateOfBirth: child.dateOfBirth })).filter((child) => child.name && child.dateOfBirth) : []
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-        // The confirmation link returns to the site they signed up on, rather than
-        // whatever Supabase's Site URL is set to. An address missing from Supabase's
-        // Redirect URLs list falls back to the Site URL.
-        options: { emailRedirectTo: window.location.origin, data: { role, full_name: fullName, school_name: schoolName, ...(childList.length ? { children: childList } : {}) } },
-      })
-      if (error) {
-        setMessage(error.message)
-      } else if (data.user) {
-        // Tells the server to alert the admin about the new account now.
-        void fetch('/api/public/signup-ping', { method: 'POST' }).catch(() => {})
-        setMessage('Account created. Check your email if confirmation is enabled, then sign in.')
+    try {
+      if (mode === 'forgot') {
+        const response = await fetch('/api/public/password-reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email.trim() }) })
+        const result = await response.json()
+        if (!response.ok) setMessage(result.error || 'Unable to send a reset link. Please try again.')
+        else setMessage(result.message)
+      } else if (mode === 'setup') {
+        if (password !== confirmPassword) {
+          setMessage('Passwords do not match.')
+          return
+        }
+        const { error } = await supabase.auth.updateUser({ password })
+        if (error) setMessage(error.message)
+        else onAuthenticated()
+      } else if (mode === 'signin') {
+        const { error } = await supabase.auth.signInWithPassword({ email, password })
+        if (error) setMessage(error.message)
+        else onAuthenticated()
+      } else {
+        // Children are carried on the account and added to the family when the
+        // parent first signs in (see resolveParentFamily in server/index.js).
+        const childList = role === 'parent' ? children.map((child) => ({ name: child.name.trim(), dateOfBirth: child.dateOfBirth })).filter((child) => child.name && child.dateOfBirth) : []
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          // An address missing from Supabase's Redirect URLs falls back to its Site URL.
+          options: { emailRedirectTo: window.location.origin, data: { role, full_name: fullName, school_name: schoolName, ...(childList.length ? { children: childList } : {}) } },
+        })
+        if (error) {
+          setMessage(error.message)
+        } else if (data.user) {
+          void fetch('/api/public/signup-ping', { method: 'POST' }).catch(() => {})
+          setMessage('Account created. Check your email if confirmation is enabled, then sign in.')
+        }
       }
+    } catch (error) {
+      setMessage(error.message || 'Unable to connect. Please try again.')
+    } finally {
+      setBusy(false)
     }
-    setBusy(false)
   }
 
   return (
     <main style={{ minHeight: '100vh', background: cream, display: 'grid', placeItems: 'center', padding: 24, fontFamily: sans }}>
       <div style={{ width: '100%', maxWidth: 430 }}>
         <p style={{ color: gold, fontSize: 11, letterSpacing: '0.18em', textTransform: 'uppercase', fontWeight: 700 }}>King's Ark Dance Academy</p>
-        <h1 style={{ fontFamily: serif, color: emerald, fontSize: 32, fontWeight: 400, margin: '6px 0 8px' }}>{mode === 'setup' ? 'Set your password.' : mode === 'signin' ? 'Welcome back.' : 'Create an account.'}</h1>
-        <p style={{ color: muted, fontSize: 14, marginBottom: 24 }}>{mode === 'setup' ? 'Choose a password to finish setting up your account.' : mode === 'signin' ? 'Sign in to access your KADA workspace.' : 'Create a parent, school or instructor account.'}</p>
+        <h1 style={{ fontFamily: serif, color: emerald, fontSize: 32, fontWeight: 400, margin: '6px 0 8px' }}>{mode === 'setup' ? 'Set your password.' : mode === 'forgot' ? 'Reset your password.' : mode === 'signin' ? 'Welcome back.' : 'Create an account.'}</h1>
+        <p style={{ color: muted, fontSize: 14, marginBottom: 24 }}>{mode === 'setup' ? 'Choose a new password of at least 8 characters.' : mode === 'forgot' ? 'Enter your account email and we will send you a password reset link.' : mode === 'signin' ? 'Sign in to access your KADA workspace.' : 'Create a parent, school or instructor account.'}</p>
         <Card style={{ padding: 22 }}>
           <form onSubmit={submit}>
             {mode === 'signup' && <>
@@ -821,12 +834,14 @@ function AuthScreen({ onAuthenticated, requirePasswordSetup = false }) {
                 <button type="button" onClick={() => setChildren([...children, { name: '', dateOfBirth: '' }])} style={{ background: 'none', border: 0, padding: 0, color: emerald, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>+ Add another child</button>
               </div>}
             </>}
-            {mode !== 'setup' && <Field label="Email"><input type="email" style={inputStyle} value={email} onChange={(event) => setEmail(event.target.value)} required /></Field>}
-            <Field label={mode === 'setup' ? 'New password' : 'Password'}><input type="password" minLength="8" style={inputStyle} value={password} onChange={(event) => setPassword(event.target.value)} required /></Field>
-            <Button type="submit" disabled={busy}>{busy ? 'Please wait…' : mode === 'setup' ? 'Save password and continue' : mode === 'signin' ? 'Sign in' : 'Create account'}</Button>
+            {mode !== 'setup' && <Field label="Email"><input type="email" autoComplete="email" style={inputStyle} value={email} onChange={(event) => setEmail(event.target.value)} required /></Field>}
+            {mode !== 'forgot' && <Field label={mode === 'setup' ? 'New password' : 'Password'}><input type="password" autoComplete={mode === 'signin' ? 'current-password' : 'new-password'} minLength="8" style={inputStyle} value={password} onChange={(event) => setPassword(event.target.value)} required /></Field>}
+            {mode === 'setup' && <Field label="Confirm new password"><input type="password" autoComplete="new-password" minLength="8" style={inputStyle} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></Field>}
+            {mode === 'signin' && <button type="button" disabled={busy} onClick={() => { setMode('forgot'); setMessage('') }} style={{ display: 'block', margin: '0 0 18px', background: 'none', border: 0, padding: '6px 0', color: emerald, fontFamily: sans, fontSize: 15, fontWeight: 700, textDecoration: 'underline', cursor: 'pointer' }}>Forgot password?</button>}
+            <Button type="submit" disabled={busy}>{busy ? 'Please wait…' : mode === 'setup' ? 'Save password and continue' : mode === 'forgot' ? 'Send reset link' : mode === 'signin' ? 'Sign in' : 'Create account'}</Button>
           </form>
-          {message && <p style={{ fontSize: 13, lineHeight: 1.5, color: message.includes('created') ? okGreen : warn, margin: '16px 0 0' }}>{message}</p>}
-          {mode !== 'setup' && <button type="button" onClick={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setMessage('') }} style={{ marginTop: 18, background: 'none', border: 'none', padding: 0, color: emerald, fontFamily: sans, fontSize: 13, cursor: 'pointer' }}>{mode === 'signin' ? 'Create a new account' : 'Already have an account? Sign in'}</button>}
+          {message && <p role="status" style={{ fontSize: 13, lineHeight: 1.5, color: message.includes('created') || message.startsWith('If an account') ? okGreen : warn, margin: '16px 0 0' }}>{message}</p>}
+          {mode !== 'setup' && <button type="button" disabled={busy} onClick={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setMessage(''); setPassword('') }} style={{ marginTop: 18, background: 'none', border: 'none', padding: 0, color: emerald, fontFamily: sans, fontSize: 13, cursor: 'pointer' }}>{mode === 'signin' ? 'Create a new account' : 'Back to sign in'}</button>}
         </Card>
       </div>
     </main>
@@ -841,6 +856,7 @@ function App() {
   const [profile, setProfile] = useState(null)
   const [authReady, setAuthReady] = useState(!supabaseReady)
   const [needsPasswordSetup, setNeedsPasswordSetup] = useState(false)
+  const [authLinkError, setAuthLinkError] = useState('')
   const [bookings, setBookings] = useState(defaultBookings)
   const [schools, setSchools] = useState(defaultSchools)
   const [instructors, setInstructors] = useState(defaultInstructors)
@@ -1016,21 +1032,19 @@ function App() {
 
     let mounted = true
     const loadSession = async () => {
-      // Invite / password-setup links arrive with the token in the URL hash , 
-      // give the Supabase client a moment to turn it into a real session.
-      const rawHash = window.location.hash || ''
-      const hashParams = new URLSearchParams(rawHash.slice(1))
-      const tokenHash = hashParams.get('token_hash')
-      const authHash = rawHash.includes('access_token=') || Boolean(tokenHash)
-      const isRecoveryLink = rawHash.includes('type=recovery') || rawHash.includes('type=invite')
-      // token_hash links (our invite/resend emails) need an explicit exchange ,
-      // access_token links (Supabase's own default templates) resolve themselves.
-      if (tokenHash) {
-        await supabase.auth.verifyOtp({ token_hash: tokenHash, type: hashParams.get('type') || 'recovery' })
+      const { tokenHash, type, isAuthLink: authHash, needsPasswordSetup: isRecoveryLink } = initialAuthCallback
+      let callbackError = initialAuthCallback.error
+      if (tokenHash && !callbackError) {
+        if (type !== 'recovery' && type !== 'invite') callbackError = 'Invalid password reset link.'
+        else {
+          const { error } = await verifyAuthToken(tokenHash, type)
+          callbackError = error?.message
+        }
       }
-      const { data } = await supabase.auth.getSession()
+      const { data, error: sessionError } = await supabase.auth.getSession()
+      callbackError ||= sessionError?.message
       let sessionNow = data.session
-      if (!sessionNow && authHash) {
+      if (!sessionNow && authHash && !callbackError) {
         await new Promise((resolve) => window.setTimeout(resolve, 600))
         const retry = await supabase.auth.getSession()
         sessionNow = retry.data.session
@@ -1039,15 +1053,24 @@ function App() {
       setSession(sessionNow)
       setAuthReady(true)
       if (authHash) {
-        window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${sessionNow ? '#ops' : ''}`)
-        if (sessionNow) {
+        window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${sessionNow && !callbackError ? '#ops' : ''}`)
+        if (sessionNow && !callbackError) {
           // Recovery/invite links mean the person must set a password first.
-          if (isRecoveryLink) setNeedsPasswordSetup(true)
+          if (isRecoveryLink) {
+            window.sessionStorage.setItem('kada-password-setup-user', sessionNow.user.id)
+            setNeedsPasswordSetup(true)
+          }
           setView('ops')
           return
         }
-        setToast('That invite link has expired. Ask your admin to resend it.')
+        setNeedsPasswordSetup(false)
+        setView('auth')
+        setAuthLinkError('That password reset or invitation link is invalid or has expired. Request a new link.')
         return
+      }
+      if (sessionNow && window.sessionStorage.getItem('kada-password-setup-user') === sessionNow.user.id) {
+        setNeedsPasswordSetup(true)
+        setView('ops')
       }
       // Deep link into a specific dashboard tab/record, e.g. #ops/bookings/book-123 from an admin email.
       const opsMatch = window.location.hash.match(/^#ops\/([\w-]+)(?:\/([\w-]+))?/)
@@ -1061,12 +1084,22 @@ function App() {
       }
     }
     loadSession()
+    const reloadAuthCallback = () => {
+      if (readAuthCallback(window.location.hash).isAuthLink) window.location.reload()
+    }
+    window.addEventListener('hashchange', reloadAuthCallback)
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession)
+      if (event === 'PASSWORD_RECOVERY' && nextSession) {
+        window.sessionStorage.setItem('kada-password-setup-user', nextSession.user.id)
+        setNeedsPasswordSetup(true)
+        setView('ops')
+      }
       if (!nextSession) {
         setProfile(null)
         setNeedsPasswordSetup(false)
+        window.sessionStorage.removeItem('kada-password-setup-user')
         setView('site')
         window.history.replaceState(null, '', window.location.pathname + window.location.search)
       }
@@ -1074,6 +1107,7 @@ function App() {
 
     return () => {
       mounted = false
+      window.removeEventListener('hashchange', reloadAuthCallback)
       listener.subscription.unsubscribe()
     }
   }, [])
@@ -1956,8 +1990,8 @@ function App() {
   if (eventPageId) return <Suspense fallback={routeFallback}><EventTicketPage eventId={eventPageId} onBack={() => { window.history.pushState(null, '', '/'); setEventPageId(null) }} /></Suspense>
   if (legalPageId) return <Suspense fallback={routeFallback}><LegalPage page={legalPageId} onBack={() => { window.history.pushState(null, '', '/'); setLegalPageId(null) }} /></Suspense>
   if (payLinkSlug) return <Suspense fallback={routeFallback}><PaymentLinkPage slug={payLinkSlug} onBack={() => { window.history.pushState(null, '', '/'); setPayLinkSlug(null) }} /></Suspense>
-  if (view === 'auth') return <AuthScreen onAuthenticated={() => setView('ops')} />
-  if (view === 'ops' && session && needsPasswordSetup) return <AuthScreen requirePasswordSetup onAuthenticated={() => { setNeedsPasswordSetup(false); setView('ops') }} />
+  if (view === 'auth') return <AuthScreen initialMessage={authLinkError} onAuthenticated={() => { setAuthLinkError(''); setView('ops') }} />
+  if (view === 'ops' && session && needsPasswordSetup) return <AuthScreen requirePasswordSetup onAuthenticated={() => { window.sessionStorage.removeItem('kada-password-setup-user'); setNeedsPasswordSetup(false); setView('ops') }} />
   if (view === 'ops' && profile?.role === 'parent') return <Suspense fallback={routeFallback}><ParentDashboard initialTab={tab} session={session} family={parentFamily} bookings={parentBookings} students={parentStudents} invoices={parentInvoices} onAddChildren={addParentChildren} classSessions={classSessions} onBookClass={startParentCheckout} checkoutBusy={checkoutBusy} onCancelBooking={cancelParentBooking} onBillingPortal={openBillingPortal} onCancelSubscription={cancelParentSubscription} onSaveSettings={saveParentSettings} onBack={() => setView('site')} onSignOut={() => supabase.auth.signOut()} />{toast && <div className="toast" role="status">{toast}</div>}</Suspense>
 
   return (

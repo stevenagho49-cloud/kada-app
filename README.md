@@ -40,6 +40,16 @@ update public.profiles set instructor_id = 'INSTRUCTOR_RECORD_ID' where id = 'AU
 
 The database policies enforce the visibility rules: admins manage everything, schools read and request bookings for their own school, and instructors read only assigned bookings plus the workshop template.
 
+### Password recovery
+
+The sign-in screen shows **Forgot password?** beside the password field. Its email-only form posts to `/api/public/password-reset`, limited to five requests per hour per IP. The server uses Supabase's built-in `recovery` token generation and the existing Resend sender to deliver a KADA-branded email. Set `SUPABASE_SERVICE_ROLE_KEY`, `RESEND_API_KEY` and `INVOICE_FROM_EMAIL` (a verified `@kingsarkdance.com` sender); missing configuration and delivery errors are shown explicitly.
+
+Recovery email links always point directly to `https://kingsarkdance.com/#token_hash=...&type=recovery`, never a caller-supplied host or Supabase's fallback Site URL. The app exchanges the single-use token with Supabase, requires a new password plus confirmation, then opens the workspace. Expired links show an error and let the user request another. Refreshing during password setup keeps the setup screen open.
+
+This recovery flow does not use Supabase's hosted email template or SMTP delivery. Separately, keep Supabase Dashboard > Authentication > URL Configuration **Site URL** and **Redirect URLs** set to `https://kingsarkdance.com/` for signup confirmations and any other Supabase-delivered links.
+
+Run focused recovery checks with `node --test scripts/password-recovery.test.js`. Live acceptance requires the deployed sign-in form, an approved inbox, receipt of the branded email, following its HTTPS link, setting a new password, signing out, and signing back in. Generating a token alone is not an end-to-end email test.
+
 ## Students and birthdays
 
 Run the latest `supabase-schema.sql` to create the `students` table. Parent class checkout collects the student's name and date of birth; the Stripe webhook creates the active roster record after payment. Operations calculates age from the date of birth and flags active students whose birthday is today or within seven days.
@@ -51,6 +61,28 @@ Parent class payments use the server in `server/index.js`. Put the rotated Strip
 For local webhook delivery, run `stripe listen --forward-to localhost:4242/api/stripe/webhook` and copy the returned `whsec_...` value into `STRIPE_WEBHOOK_SECRET`. The webhook creates a confirmed, paid booking after `checkout.session.completed`.
 
 The Stripe secret supplied in chat should be revoked and replaced before testing.
+
+## Event ticket stock
+
+Apply `supabase/migrations/20261005_event_ticket_inventory.sql` after the existing event ticketing, attendee and staff-permissions migrations, then deploy both frontend and server.
+
+In **Events > Edit event**, each tier has an optional **Limit quantity** (blank = unlimited), **Mark as sold out**, and a scarcity threshold (default 10; 0 disables the warning). Limits count individual tickets: a bundle of two uses two seats. The Events list shows paid tickets against the limit and checkout holds separately. Paid orders are the source of truth; refunded orders no longer count. Public and admin stock refresh every five seconds and on window focus. Scarcity shows the actual unsold count below the configured threshold; held-out stock is labelled temporarily unavailable, not sold.
+
+Checkout atomically locks the event in PostgreSQL and reserves seats before creating a Stripe session. This prevents competing checkouts, including free/fully discounted orders, from overselling. Card checkout holds last until payment or confirmed Stripe expiry (sessions expire after 30 minutes). Add **checkout.session.expired** to the Stripe webhook endpoint's subscribed events alongside **checkout.session.completed**. Do not release reservations merely because their creation time is old: delayed payment webhooks could otherwise oversell. Closing the Stripe tab or clicking Back does not release stock; Stripe expiry does. Existing reserved checkouts can complete even after an admin enables the manual override or lowers the limit.
+
+An ambiguous Stripe network failure keeps its hold and raises an operations alert. For an unresolved hold, locate the session by its `reservation_id` metadata; confirm it expired (or expire it in Stripe), then release it using the service-only `release_event_ticket_reservation` RPC. Never release a session that can still take payment. Before first enabling limits on existing tiers, expire any pre-deployment open checkout sessions, which have no reservations. The database also guards legacy paid writes against exceeding a limit.
+
+Focused checks:
+
+```bash
+node --test scripts/ticket-stock.test.js
+# Isolated PostgreSQL only; this suite recreates its fixture tables.
+TEST_DATABASE_URL=postgresql://localhost/kada_ticket_inventory_test node --test scripts/ticket-inventory-db.test.js
+```
+
+Live acceptance must use Stripe **test mode**, a dedicated non-homepage test event with a three-ticket tier, and completed test-card payments (not fabricated completion webhooks). Buy two tickets, verify `Only 1 left` and `2 / 3 sold`, then race two checkout requests for the last ticket: exactly one may create a session. Complete that session, verify `3 / 3 sold` and disabled **Sold out**, and reject another checkout. Independently toggle manual sold-out on a tier with no sales and confirm both the public page and checkout reject it. Also verify expired sessions release holds and duplicate webhook delivery does not increase sold counts.
+
+`scripts/verify-ticket-inventory-live.js` automates that acceptance, including admin editing and the admin sold-count display. Supply `PLAYWRIGHT_MODULE` as the absolute path to an installed Playwright `index.mjs` (with Chromium installed) and optionally `TICKET_TEST_SERVER_URL` (default `http://localhost:4242`). It completes real test-card checkout, fetches Stripe's genuine completion/expiry events and signs those events for local forwarding to the server; it does not verify deployed-domain webhook delivery. It requires the migration, server credentials, and Stripe test mode. Its non-homepage event, buyer contact, and temporary admin account are cleaned up afterward. A custom `TEST_TICKET_BUYER_EMAIL` must not already exist in Contacts.
 
 ## Automatic invoice emails
 

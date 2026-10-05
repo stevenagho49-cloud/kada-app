@@ -3,6 +3,8 @@ import { supabase } from './lib/supabase'
 import { useSiteLogo } from './lib/useSiteLogo'
 import { normalizeEvent, formatTierPrice, formatEventTimeRange, flyerPublicUrl } from './ops/EventsPage'
 import { DiscountCodeField } from './lib/DiscountCodeField'
+import { useTicketStock } from './lib/useTicketStock'
+import { ticketAvailability } from './lib/ticketStock'
 
 const emerald = '#0b3d2e'
 const emeraldLight = '#145c40'
@@ -55,6 +57,7 @@ export function EventTicketPage({ eventId, onBack }) {
   // successState: null (no redirect) | 'loading' | 'found' | 'pending'
   const [successState, setSuccessState] = useState(null)
   const [successOrder, setSuccessOrder] = useState(null)
+  const { stock, error: stockError } = useTicketStock([eventId])
 
   const params = new URLSearchParams(window.location.search)
   const ticketSuccess = params.get('ticket') === 'success'
@@ -101,6 +104,16 @@ export function EventTicketPage({ eventId, onBack }) {
   }, [ticketSuccess, sessionId])
 
   const selectedTier = event?.ticketTiers.find((tier) => tier.id === selectedTierId) || null
+  const selectedAvailability = selectedTier ? ticketAvailability(selectedTier, stock[`${eventId}:${selectedTier.id}`]) : null
+  const maxQuantity = selectedAvailability?.maxQuantity || 0
+  useEffect(() => {
+    if (!event) return
+    if (!selectedAvailability?.maxQuantity) {
+      const availableTier = event.ticketTiers.find((tier) => ticketAvailability(tier, stock[`${eventId}:${tier.id}`]).maxQuantity > 0)
+      if (availableTier) setSelectedTierId(availableTier.id)
+    }
+    if (maxQuantity > 0) setQuantity((current) => Math.min(current, maxQuantity))
+  }, [event, stock, eventId, maxQuantity, selectedAvailability?.maxQuantity])
   const totalPence = selectedTier ? selectedTier.pricePence * quantity : 0
   const totalTickets = selectedTier ? selectedTier.bundleSize * quantity : 0
   // One name slot per ticket: bundle deals (2-for-1) and multi-quantity orders
@@ -121,7 +134,7 @@ export function EventTicketPage({ eventId, onBack }) {
     })
   }
   const namesReady = attendeeNames.slice(0, totalTickets).every((name, index) => (index === 0 ? (name.trim() || buyerName.trim()) : name.trim() || buyerName.trim()))
-  const canBuy = Boolean(event?.ticketingEnabled && selectedTier && buyerName.trim() && /.+@.+\..+/.test(buyerEmail) && namesReady && !busy)
+  const canBuy = Boolean(event?.ticketingEnabled && selectedTier && !stockError && maxQuantity >= quantity && buyerName.trim() && /.+@.+\..+/.test(buyerEmail) && namesReady && !busy)
 
   const startTicketCheckout = async (submitEvent) => {
     submitEvent.preventDefault()
@@ -236,12 +249,14 @@ export function EventTicketPage({ eventId, onBack }) {
             <div style={{ display: 'grid', gap: 10, margin: '14px 0' }} role="radiogroup" aria-label="Ticket types">
               {event.ticketTiers.map((tier) => {
                 const selected = tier.id === selectedTierId
+                const availability = ticketAvailability(tier, stock[`${eventId}:${tier.id}`])
                 return (
                   <button
                     key={tier.id}
                     type="button"
                     role="radio"
                     aria-checked={selected}
+                    disabled={!availability.maxQuantity || Boolean(stockError)}
                     onClick={() => setSelectedTierId(tier.id)}
                     style={{
                       textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit', borderRadius: 10, padding: '12px 14px',
@@ -253,6 +268,7 @@ export function EventTicketPage({ eventId, onBack }) {
                       <div style={{ fontWeight: 700, fontSize: 14.5 }}>{tier.name || 'Ticket'}</div>
                       {tier.bundleSize > 1 && <div style={{ fontSize: 12, color: emeraldLight, fontWeight: 600, marginTop: 2 }}>Includes {tier.bundleSize} tickets per purchase</div>}
                       {tier.description && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{tier.description}</div>}
+                      {availability.message && <div aria-live="polite" style={{ fontSize: 12, color: availability.soldOut ? muted : emerald, fontWeight: 700, marginTop: 4 }}>{availability.message}</div>}
                     </div>
                     <div style={{ fontFamily: serif, fontSize: 19, fontWeight: 700, color: emerald, whiteSpace: 'nowrap' }}>{formatTierPrice(tier.pricePence)}</div>
                   </button>
@@ -265,7 +281,7 @@ export function EventTicketPage({ eventId, onBack }) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <button type="button" aria-label="Decrease quantity" onClick={() => setQuantity((current) => Math.max(1, current - 1))} style={stepperStyle}>−</button>
                 <span style={{ minWidth: 22, textAlign: 'center', fontWeight: 700 }}>{quantity}</span>
-                <button type="button" aria-label="Increase quantity" onClick={() => setQuantity((current) => Math.min(20, current + 1))} style={stepperStyle}>+</button>
+                <button type="button" aria-label="Increase quantity" disabled={quantity >= maxQuantity} onClick={() => setQuantity((current) => Math.min(maxQuantity, current + 1))} style={stepperStyle}>+</button>
               </div>
             </div>
 
@@ -313,6 +329,7 @@ export function EventTicketPage({ eventId, onBack }) {
             </div>
 
             {error && <p style={{ color: '#a3401f', fontSize: 13, margin: '0 0 10px' }}>{error}</p>}
+            {stockError && <p role="alert" style={{ color: '#a3401f', fontSize: 13 }}>{stockError}</p>}
             <button
               type="submit"
               disabled={!canBuy}

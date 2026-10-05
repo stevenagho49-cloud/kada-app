@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { AddressAutocomplete } from '../lib/AddressAutocomplete'
+import { useTicketStock } from '../lib/useTicketStock'
 import { DataTable, EditableText, StatusMenu, Toggle, OpsButton, EmptyState, Pill, OPS_COLORS, opsInputStyle } from './ui'
 
 export function flyerPublicUrl(path) {
@@ -22,6 +23,9 @@ export function normalizeTier(tier = {}) {
     pricePence: Math.round(Number(tier.pricePence ?? 0)) || 0,
     bundleSize: Math.max(1, Math.floor(Number(tier.bundleSize ?? 1)) || 1),
     description: tier.description ?? '',
+    quantityLimit: tier.quantityLimit ?? null,
+    lowStockThreshold: tier.lowStockThreshold ?? 10,
+    soldOut: Boolean(tier.soldOut),
   }
 }
 
@@ -58,7 +62,12 @@ export function toDbEvent(row) {
     show_on_homepage: Boolean(row.showOnHomepage),
     ticketing_enabled: Boolean(row.ticketingEnabled),
     guest_artists: row.guestArtists || null,
-    ticket_tiers: (row.ticketTiers || []).map((tier) => ({ id: tier.id, name: tier.name, pricePence: Math.round(Number(tier.pricePence) || 0), bundleSize: Math.max(1, Math.floor(Number(tier.bundleSize) || 1)), description: tier.description || '' })),
+    ticket_tiers: (row.ticketTiers || []).map((tier) => ({
+      id: tier.id, name: tier.name, pricePence: Math.round(Number(tier.pricePence) || 0),
+      bundleSize: Math.max(1, Math.floor(Number(tier.bundleSize) || 1)), description: tier.description || '',
+      quantityLimit: tier.quantityLimit === '' || tier.quantityLimit == null ? null : Number(tier.quantityLimit),
+      lowStockThreshold: Number(tier.lowStockThreshold ?? 10), soldOut: Boolean(tier.soldOut),
+    })),
     flyer_path: row.flyerPath || null,
   }
 }
@@ -115,6 +124,7 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
   const [salesEvent, setSalesEvent] = useState(null)
   const [attendeesEvent, setAttendeesEvent] = useState(null)
   const [copiedId, setCopiedId] = useState('')
+  const { stock, error: stockError } = useTicketStock(filtered.map((event) => event.id))
 
   const copyShareLink = async (event) => {
     const link = `${window.location.origin}/event/${event.id}`
@@ -164,6 +174,13 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
             {event.ticketTiers.length > 0 && (
               <div style={{ marginTop: 4, fontSize: 11.5, color: OPS_COLORS.muted }}>
                 from {formatTierPrice(Math.min(...event.ticketTiers.map((tier) => tier.pricePence)))}
+                {event.ticketTiers.map((tier) => {
+                  const counts = stock[`${event.id}:${tier.id}`]
+                  return <div key={tier.id} style={{ marginTop: 3 }}>
+                    {tier.name}: {counts ? `${counts.sold}${tier.quantityLimit == null ? ' / unlimited' : ` / ${tier.quantityLimit}`} sold${Number(counts.reserved) ? ` (${counts.reserved} held)` : ''}` : 'Loading stock...'}
+                    {(counts ? counts.sold_out : tier.soldOut) && <strong> - Sold out{tier.soldOut ? ' (manual)' : ''}</strong>}
+                  </div>
+                })}
               </div>
             )}
             {event.status === 'published' && (
@@ -231,6 +248,7 @@ export function EventsPage({ view, events, onSaveEvent, onEditEvent, onDeleteEve
         <OpsButton small onClick={onAddEvent}>+ Add event</OpsButton>
       </div>
       <p style={{ color: OPS_COLORS.muted, fontSize: 13, margin: '0 0 14px' }}>{copy.sub}</p>
+      {stockError && <p role="alert" style={{ color: OPS_COLORS.warn }}>{stockError}</p>}
       <DataTable
         columns={columns}
         rows={filtered}
@@ -540,7 +558,8 @@ export function EventForm({ event, onSave, onUploadFlyer }) {
         <div style={{ border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 8, padding: 12, marginBottom: 12, background: OPS_COLORS.cream }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: OPS_COLORS.emerald, marginBottom: 10 }}>Ticket tiers: add as many as you like, like Eventbrite</div>
           {form.ticketTiers.map((tier) => (
-            <div key={tier.id} style={{ display: 'grid', gridTemplateColumns: '1fr 110px 150px 30px', gap: 8, marginBottom: 10, alignItems: 'end' }}>
+            <div key={tier.id} style={{ borderBottom: `1px solid ${OPS_COLORS.rule}`, paddingBottom: 10, marginBottom: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 110px 150px 30px', gap: 8, alignItems: 'end' }}>
               <label>
                 <span style={tierLabelStyle}>Ticket type</span>
                 <input style={opsInputStyle} value={tier.name} placeholder="Early Bird" onChange={(inputEvent) => updateTier(tier.id, { name: inputEvent.target.value })} />
@@ -559,6 +578,22 @@ export function EventForm({ event, onSave, onUploadFlyer }) {
                 </select>
               </label>
               <button type="button" aria-label={`Remove ${tier.name || 'tier'}`} onClick={() => removeTier(tier.id)} style={{ border: `1px solid ${OPS_COLORS.rule}`, background: 'transparent', color: OPS_COLORS.warn, borderRadius: 6, height: 36, cursor: 'pointer', fontSize: 15 }}>×</button>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 10, alignItems: 'end' }}>
+              <label>
+                <span style={tierLabelStyle}>Limit quantity (optional)</span>
+                <input type="number" min="0" max="2147483647" step="1" style={opsInputStyle} value={tier.quantityLimit ?? ''} placeholder="Unlimited" onChange={(inputEvent) => updateTier(tier.id, { quantityLimit: inputEvent.target.value === '' ? null : Number(inputEvent.target.value) })} />
+              </label>
+              <label>
+                <span style={tierLabelStyle}>Show "Only N left" below</span>
+                <input type="number" min="0" max="2147483647" step="1" required style={opsInputStyle} value={tier.lowStockThreshold ?? 10} onChange={(inputEvent) => updateTier(tier.id, { lowStockThreshold: inputEvent.target.value === '' ? '' : Number(inputEvent.target.value) })} />
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, paddingBottom: 8 }}>
+                <input type="checkbox" checked={Boolean(tier.soldOut)} onChange={(inputEvent) => updateTier(tier.id, { soldOut: inputEvent.target.checked })} />
+                <span style={{ fontSize: 12 }}>Mark as sold out</span>
+              </label>
+            </div>
+            <p style={{ fontSize: 11, color: OPS_COLORS.muted, margin: '8px 0 0' }}>Limits count individual tickets, including bundles. Leave blank for unlimited. Set the warning threshold to 0 to hide scarcity messaging. Existing checkout holds can still complete.</p>
             </div>
           ))}
           <OpsButton small variant="ghost" onClick={addTier}>+ Add ticket tier</OpsButton>

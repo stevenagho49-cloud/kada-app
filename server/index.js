@@ -7,8 +7,9 @@ import { createClient } from '@supabase/supabase-js'
 import PDFDocument from 'pdfkit'
 import fs from 'node:fs'
 import path from 'node:path'
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto'
 import { eventIdsIn, refreshEventBlocks } from '../src/eventEmailBlock.js'
+import { PASSWORD_RESET_MESSAGE, sendPasswordRecovery } from './passwordRecovery.js'
 
 const app = express()
 // Render (and most hosts) sit behind a single proxy ,  trust one hop so req.ip
@@ -216,12 +217,20 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   }
 
   try {
-  if (event.type === 'checkout.session.completed') {
+  if (event.type === 'checkout.session.expired' && event.data.object.metadata?.kind === 'event_ticket') {
+    const reservationId = event.data.object.metadata.reservation_id
+    if (reservationId) {
+      const { error } = await supabase.rpc('release_event_ticket_reservation', { p_reservation_id: reservationId })
+      if (error) throw new Error(`Ticket reservation release failed: ${error.message}`)
+    }
+  }
+  if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
     const session = event.data.object
     const metadata = session.metadata || {}
 
     // Ticketed event purchases take a separate path from class bookings.
     if (metadata.kind === 'event_ticket') {
+      if (!['paid', 'no_payment_required'].includes(session.payment_status)) return response.json({ received: true })
       const result = await recordEventTicketOrder(session)
       if (!result.ok) return response.status(500).json({ error: 'Ticket order write failed' })
       return response.json({ received: true })
@@ -384,7 +393,8 @@ async function recordEventTicketOrder(session) {
     stripe_checkout_session_id: session.id,
     payment_status: 'paid',
     attendee_names: attendeeNames,
-  }, { onConflict: 'stripe_checkout_session_id' })
+    reservation_id: metadata.reservation_id || null,
+  }, { onConflict: 'stripe_checkout_session_id', ignoreDuplicates: true })
   if (ticketError) {
     await alertFailure('A paid ticket order could not be saved', ticketError, { 'Stripe session': session.id, Buyer: session.customer_details?.email || metadata.buyer_email })
     // Non-200 so Stripe retries instead of marking this delivered while nothing was written.
@@ -574,9 +584,27 @@ const tooMany = { error: 'Too many attempts. Please wait a few minutes, then try
 const checkoutLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 const lookupLimiter = rateLimit({ windowMs: 10 * 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 const contactLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
+const passwordResetLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false, message: tooMany })
 app.use(['/api/stripe/create-checkout-session', '/api/stripe/create-event-checkout', '/api/stripe/create-payment-link-checkout', '/api/invoices/pay', '/api/subscribe'], checkoutLimiter)
 app.use(['/api/stripe/event-order', '/api/stripe/class-booking', '/api/stripe/payment-link-order'], lookupLimiter)
 app.use('/api/public/contact', contactLimiter)
+app.post('/api/public/password-reset', passwordResetLimiter, async (request, response) => {
+  const email = typeof request.body?.email === 'string' ? request.body.email.trim().toLowerCase() : ''
+  if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return response.status(400).json({ error: 'Enter a valid email address.' })
+  }
+  if (!supabase || !process.env.RESEND_API_KEY || !/@kingsarkdance\.com(?:>)?$/i.test(EMAIL_FROM)) {
+    console.error('Password recovery requires Supabase, Resend and a verified kingsarkdance.com sender.')
+    return response.status(503).json({ error: 'Password reset is temporarily unavailable. Please contact bookings@kingsarkdance.com.' })
+  }
+  try {
+    await sendPasswordRecovery({ supabase, sendEmail, email })
+    response.json({ message: PASSWORD_RESET_MESSAGE })
+  } catch (error) {
+    console.error('Password recovery failed:', error.message)
+    response.status(502).json({ error: 'Unable to send a reset link right now. Please try again later.' })
+  }
+})
 
 // Health check for Render's uptime monitor ,  confirms the server is up and can
 // reach Supabase (the critical dependency for auth, data, and ticketing).
@@ -4660,7 +4688,7 @@ app.post('/api/stripe/create-checkout-session', async (request, response) => {
 app.post('/api/stripe/create-event-checkout', async (request, response) => {
   if (!stripe || !supabase) return response.status(503).json({ error: 'Ticketing is not configured on the server.' })
   const { eventId, tierId, quantity, buyerName, buyerEmail, attendeeNames = [], discountCode = '' } = request.body || {}
-  const qty = Math.floor(Number(quantity))
+  const qty = Number(quantity)
   if (!eventId || !tierId || !Number.isInteger(qty) || qty < 1 || qty > 20 || !buyerName?.trim() || !/.+@.+\..+/.test(buyerEmail || '')) {
     return response.status(400).json({ error: 'Event, ticket tier, quantity (1-20), and your name and email are required.' })
   }
@@ -4689,6 +4717,23 @@ app.post('/api/stripe/create-event-checkout', async (request, response) => {
   const totals = applyDiscount(code, unitAmount * qty)
   if (totals.totalPence > 0 && totals.totalPence < 30) return response.status(400).json({ error: 'With that discount the total is too small to pay by card. Please contact us.' })
 
+  const reservationId = randomUUID()
+  const { data: reservation, error: reserveError } = await supabase.rpc('reserve_event_tickets', {
+    p_event_id: eventId, p_tier_id: tierId, p_quantity: qty, p_reservation_id: reservationId,
+  })
+  if (reserveError) {
+    if (reserveError.code === 'P0001') return response.status(409).json({ error: reserveError.message })
+    await alertFailure('Ticket stock could not be reserved', reserveError, { Event: eventId, Tier: tierId })
+    return response.status(500).json({ error: 'Ticket availability could not be checked. Please try again.' })
+  }
+  const releaseReservation = async () => {
+    const { error } = await supabase.rpc('release_event_ticket_reservation', { p_reservation_id: reservationId })
+    if (error) await alertFailure('A ticket hold could not be released', error, { Reservation: reservationId })
+  }
+  if (JSON.stringify(reservation.tier) !== JSON.stringify(tier)) {
+    await releaseReservation()
+    return response.status(409).json({ error: 'This ticket tier has changed. Refresh the page and try again.' })
+  }
   const tierDescription = [bundleSize > 1 ? `${bundleSize} tickets per purchase` : '', event.event_date ? `Event date: ${event.event_date}` : ''].filter(Boolean).join(' · ')
   // Return to the host the buyer actually used (works through the Codespaces forwarded
   // URL, where plain localhost isn't reachable from the browser).
@@ -4696,6 +4741,7 @@ app.post('/api/stripe/create-event-checkout', async (request, response) => {
   const clientUrl = requestOrigin.startsWith('http') ? requestOrigin : (process.env.CLIENT_URL || 'http://localhost:5173')
   const metadata = {
     kind: 'event_ticket',
+    reservation_id: reservationId,
     event_id: event.id,
     tier_id: tier.id,
     tier_name: tier.name,
@@ -4711,12 +4757,20 @@ app.post('/api/stripe/create-event-checkout', async (request, response) => {
   if (totals.totalPence === 0) {
     const freeSession = freeCheckoutSession({ metadata, email: buyerEmail.trim(), name: buyerName.trim() })
     const result = await recordEventTicketOrder(freeSession)
-    if (!result.ok) return response.status(500).json({ error: 'Your tickets could not be saved. Please try again.' })
+    if (!result.ok) {
+      await releaseReservation()
+      return response.status(500).json({ error: 'Your tickets could not be saved. Please try again.' })
+    }
     return response.json({ url: `${clientUrl}/event/${event.id}?ticket=success&session_id=${freeSession.id}`, free: true })
   }
+  let stripeCreationStarted = false
   try {
+    const couponId = code && totals.discountPence > 0 ? await stripeCouponId({ code, amountOffPence: totals.discountPence }) : null
+    stripeCreationStarted = true
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
+      payment_method_types: ['card'],
+      expires_at: Math.floor(Date.now() / 1000) + 1800,
       customer_email: buyerEmail.trim(),
       line_items: [{
         quantity: qty,
@@ -4729,13 +4783,26 @@ app.post('/api/stripe/create-event-checkout', async (request, response) => {
           },
         },
       }],
-      ...(code && totals.discountPence > 0 ? { discounts: [{ coupon: await stripeCouponId({ code, amountOffPence: totals.discountPence }) }] } : {}),
+      ...(couponId ? { discounts: [{ coupon: couponId }] } : {}),
       metadata,
       success_url: `${clientUrl}/event/${event.id}?ticket=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${clientUrl}/event/${event.id}`,
-    })
+    }, { idempotencyKey: `event-ticket-${reservationId}` })
+    const { error: bindError } = await supabase.from('event_ticket_reservations')
+      .update({ stripe_checkout_session_id: session.id }).eq('id', reservationId)
+    if (bindError) {
+      await alertFailure('A ticket checkout could not be linked to its stock hold', bindError, { Reservation: reservationId, 'Stripe session': session.id })
+      // Metadata still links expiry/completion webhooks to the reservation.
+    }
     response.json({ url: session.url })
   } catch (error) {
+    if (!stripeCreationStarted || ['StripeInvalidRequestError', 'StripeAuthenticationError', 'StripePermissionError'].includes(error.type)) {
+      await releaseReservation()
+    } else {
+      // A network/server error can hide a successfully created session. Keep
+      // the hold rather than sell the same tickets twice, and alert operations.
+      await alertFailure('Ticket checkout failed with an unresolved stock hold', error, { Reservation: reservationId })
+    }
     console.error('Event checkout creation failed:', error)
     response.status(502).json({ error: 'Checkout could not be started. Please try again.' })
   }
