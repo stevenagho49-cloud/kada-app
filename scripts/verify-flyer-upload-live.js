@@ -4,9 +4,11 @@ import { createClient } from '@supabase/supabase-js'
 import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 
-// Uploads real image files through the admin "+ Add event" form and checks what
-// storage actually holds. The event is never saved; the temporary admin and every
-// uploaded object are removed afterwards. Usage:
+// Uploads real image files through the "+ Add event" form and checks what storage
+// actually holds. FLYER_TEST_ROLE=staff signs in as a staff member holding only the
+// 'events' permission (default: admin) and also checks that staff without it are
+// refused. The event is never saved; the temporary users and every uploaded
+// object are removed afterwards. Usage:
 //   PLAYWRIGHT_MODULE=/abs/playwright-core/index.mjs FLYER_TEST_DIR=/abs/dir \
 //   FLYER_TEST_SERVER_URL=https://kingsarkdance.com node scripts/verify-flyer-upload-live.js
 // FLYER_TEST_DIR must hold huge-transparent.png (6000x3000, transparent top-left
@@ -20,15 +22,23 @@ const service = createClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY)
 const base = process.env.FLYER_TEST_SERVER_URL || 'http://localhost:4173'
 const dir = process.env.FLYER_TEST_DIR
 const checked = (result) => { if (result.error) throw new Error(result.error.message); return result.data }
+const role = process.env.FLYER_TEST_ROLE || 'admin'
+assert.ok(['admin', 'staff'].includes(role), 'FLYER_TEST_ROLE must be admin or staff')
 const uploaded = []
+const userIds = []
 let browser
-let adminUserId
+const signIn = async (label, profile) => {
+  const email = `verify-flyer-${Date.now()}-${label}@example.com`
+  const password = `${randomUUID()}Aa1!`
+  const id = checked(await service.auth.admin.createUser({ email, password, email_confirm: true })).user.id
+  userIds.push(id)
+  checked(await service.from('profiles').upsert({ id, full_name: 'Flyer Upload Test', ...profile }))
+  const client = createClient(supabaseUrl, process.env.VITE_SUPABASE_ANON_KEY, { auth: { persistSession: false } })
+  const session = checked(await client.auth.signInWithPassword({ email, password })).session
+  return { client, session }
+}
 try {
-  const adminEmail = `verify-flyer-${Date.now()}-admin@example.com`
-  const adminPassword = `${randomUUID()}Aa1!`
-  adminUserId = checked(await service.auth.admin.createUser({ email: adminEmail, password: adminPassword, email_confirm: true })).user.id
-  checked(await service.from('profiles').upsert({ id: adminUserId, role: 'admin', full_name: 'Flyer Upload Test' }))
-  const session = checked(await createClient(supabaseUrl, process.env.VITE_SUPABASE_ANON_KEY).auth.signInWithPassword({ email: adminEmail, password: adminPassword })).session
+  const { client: user, session } = await signIn(role, role === 'staff' ? { role: 'staff', permissions: ['events'] } : { role: 'admin' })
   browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || undefined, args: ['--disable-dev-shm-usage'] })
   const page = await browser.newPage({ viewport: { width: 1366, height: 900 } })
   const authKey = `sb-${new URL(supabaseUrl).hostname.split('.')[0]}-auth-token`
@@ -42,7 +52,7 @@ try {
   const upload = async (name) => {
     const before = await dialog.locator('img[alt="Event flyer preview"]').getAttribute('src').catch(() => null)
     await fileInput.setInputFiles(`${dir}/${name}`)
-    const toast = page.getByText(/^(Flyer uploaded:|That image could not be read)/).last()
+    const toast = page.getByText(/^(Flyer uploaded:|That image could not be read|Flyer could not be uploaded|new row violates)/).last()
     await toast.waitFor({ timeout: 60000 })
     const message = await toast.innerText()
     await page.waitForTimeout(500)
@@ -64,7 +74,8 @@ try {
   }
 
   const big = await upload('huge-transparent.png')
-  console.log('huge-transparent.png (26 MB, 6000x3000) ->', JSON.stringify(big))
+  console.log('huge-transparent.png (6000x3000) ->', JSON.stringify(big))
+  assert.ok(big.path, `upload refused: ${big.message}`)
   assert.equal(big.mimetype, 'image/jpeg')
   assert.match(big.path, /\.jpg$/)
   assert.deepEqual([big.width, big.height], [1600, 800])
@@ -86,10 +97,34 @@ try {
   assert.match(bad.message, /could not be read/)
   console.log('PASS: non-image rejected with a clear message and nothing stored')
 
+  // Direct API uploads: the bucket only takes JPEGs, and only from admins or
+  // staff holding 'events'. Uses a placeholder event id so nothing is linked.
+  const probeFolder = randomUUID()
+  const jpeg = new Blob([await (await fetch(`${supabaseUrl}/storage/v1/object/public/event-flyers/${big.path}`)).arrayBuffer()], { type: 'image/jpeg' })
+  const ownPath = `${probeFolder}/probe.jpg`
+  checked(await user.storage.from('event-flyers').upload(ownPath, jpeg, { contentType: 'image/jpeg' }))
+  uploaded.push(ownPath)
+  checked(await user.storage.from('event-flyers').upload(ownPath, jpeg, { contentType: 'image/jpeg', upsert: true }))
+  const pngAttempt = await user.storage.from('event-flyers').upload(`${probeFolder}/probe.png`, new Blob(['x'], { type: 'image/png' }), { contentType: 'image/png' })
+  if (!pngAttempt.error) uploaded.push(`${probeFolder}/probe.png`)
+  assert.ok(pngAttempt.error, 'the bucket must reject a PNG')
+  console.log(`PASS: ${role} can upload and replace a JPEG directly; PNG rejected (${pngAttempt.error.message})`)
+  const { client: outsider } = await signIn('no-events', { role: 'staff', permissions: ['bookings'] })
+  const outsiderAttempt = await outsider.storage.from('event-flyers').upload(`${probeFolder}/outsider.jpg`, jpeg, { contentType: 'image/jpeg' })
+  if (!outsiderAttempt.error) uploaded.push(`${probeFolder}/outsider.jpg`)
+  assert.ok(outsiderAttempt.error, 'staff without the events permission must not upload flyers')
+  const outsiderDelete = checked(await outsider.storage.from('event-flyers').remove([ownPath]))
+  assert.equal(outsiderDelete.length, 0, 'staff without the events permission must not delete flyers')
+  console.log(`PASS: staff without 'events' cannot upload (${outsiderAttempt.error.message}) or delete flyers`)
+  const removed = checked(await user.storage.from('event-flyers').remove([ownPath]))
+  assert.equal(removed.length, 1, `${role} should be able to delete a flyer`)
+  uploaded.splice(uploaded.indexOf(ownPath), 1)
+  console.log(`PASS: ${role} can delete a flyer`)
+
   const draftId = await dialog.locator('img[alt="Event flyer preview"]').getAttribute('src').then((src) => decodeURIComponent(src.split('/event-flyers/')[1]).split('/')[0])
   assert.equal(checked(await service.from('events').select('id').eq('id', draftId)).length, 0, 'the test event must not have been saved')
 } finally {
   if (uploaded.length) checked(await service.storage.from('event-flyers').remove(uploaded))
   if (browser) await browser.close()
-  if (adminUserId) checked(await service.auth.admin.deleteUser(adminUserId))
+  for (const id of userIds) checked(await service.auth.admin.deleteUser(id))
 }
