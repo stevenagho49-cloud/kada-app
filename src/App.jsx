@@ -2117,7 +2117,7 @@ function App() {
 
           {tab === 'students' && (isAdmin || can('students')) && <StudentPlansView students={students} canSeeAttendance={can('attendance')} session={session} onStudentChanged={({ id, className, term }) => setStudents((current) => current.map((student) => student.id === id ? { ...student, className, term } : student))} />}
           {tab === 'invoice-settings' && (isAdmin || can('sales')) && <InvoiceSettings settings={invoiceSettings} onSave={saveInvoiceSettings} saving={invoiceSettingsSaving} />}
-          {tab === 'contacts' && can('contacts') && <ContactsPage />}
+          {tab === 'contacts' && can('contacts') && <ContactsPage session={session} />}
           {tab === 'team' && isAdmin && session && <TeamPage session={session} />}
           {tab === 'campaigns' && isAdmin && session && <CampaignsPage session={session} events={events} seedEventId={promoteEventId} onSeedUsed={() => setPromoteEventId('')} />}
           {tab === 'settings' && isAdmin && <SettingsPage content={siteContent} onSaveContent={saveSiteContent} session={session} />}
