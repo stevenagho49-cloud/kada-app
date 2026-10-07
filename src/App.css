@@ -792,6 +792,19 @@
   justify-self: center;
 }
 
+/* Honeypot field: off-screen rather than display:none, which some bots skip. */
+.contact-form-trap {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+.contact-form-turnstile {
+  justify-self: center;
+}
+
 .contact-form-error {
   margin: 0;
   color: #f2b8a5;

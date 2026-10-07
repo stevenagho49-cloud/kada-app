@@ -127,6 +127,90 @@ function toDbRow(draft) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Website messages held as suspected spam (random-string names or     */
+/* text). Nothing here was emailed or filed in Contacts. "Not spam"    */
+/* sends it on exactly like a normal website message.                  */
+/* ------------------------------------------------------------------ */
+const TOPIC_LABELS = { parent: 'Parent', school: 'School', partnership: 'Partnership', other: 'General' }
+
+async function heldRequest(path, method = 'GET') {
+  const { data } = await supabase.auth.getSession()
+  const response = await fetch(`/api/admin/held-messages${path}`, { method, headers: { Authorization: `Bearer ${data.session?.access_token || ''}` } })
+  const result = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(result.error || 'The held messages could not be updated.')
+  return result
+}
+
+function HeldMessagesPanel({ onReleased }) {
+  const [messages, setMessages] = useState([])
+  const [migrationNeeded, setMigrationNeeded] = useState('')
+  const [open, setOpen] = useState(false)
+  const [busyId, setBusyId] = useState('')
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+
+  const load = async () => {
+    try {
+      const result = await heldRequest('')
+      setMessages(result.messages || [])
+      setMigrationNeeded(result.migrationNeeded || '')
+    } catch (loadError) { setError(loadError.message) }
+  }
+  useEffect(() => { void load() }, [])
+
+  const act = async (id, action) => {
+    setBusyId(id)
+    setError('')
+    setNotice('')
+    try {
+      if (action === 'release') await heldRequest(`/${id}/release`, 'POST')
+      else if (id === 'all' && !window.confirm(`Delete all ${messages.length} held messages? This cannot be undone.`)) return
+      else await heldRequest(`/${id}`, 'DELETE')
+      setNotice(action === 'release' ? 'Sent to the inbox and filed in Contacts.' : 'Deleted.')
+      if (action === 'release') onReleased()
+      await load()
+    } catch (actionError) { setError(actionError.message) } finally { setBusyId('') }
+  }
+
+  if (migrationNeeded) return <div className="panel"><p style={{ color: OPS_COLORS.warn, fontSize: 13, margin: 0 }}>{migrationNeeded}</p></div>
+  if (!messages.length && !error && !notice) return null
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h3>Held as suspected spam ({messages.length})</h3>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {messages.length > 0 && <OpsButton small variant="ghost" onClick={() => setOpen((current) => !current)}>{open ? 'Hide' : 'Review'}</OpsButton>}
+          {open && messages.length > 0 && <OpsButton small variant="danger" disabled={!!busyId} onClick={() => act('all', 'delete')}>Delete all</OpsButton>}
+        </div>
+      </div>
+      <p style={{ color: OPS_COLORS.muted, fontSize: 13, margin: '0 0 10px' }}>
+        Website messages that look like random text. They were not emailed to the inbox or added to Contacts.
+        If one is a real message, choose <strong>Not spam, send it on</strong>.
+      </p>
+      {notice && <p style={{ color: OPS_COLORS.okGreen, fontSize: 13 }}>{notice}</p>}
+      {error && <p role="alert" style={{ color: OPS_COLORS.warn, fontSize: 13 }}>{error}</p>}
+      {open && messages.map((message) => (
+        <div key={message.id} style={{ borderTop: `1px solid ${OPS_COLORS.rule}`, padding: '12px 0', display: 'grid', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', fontSize: 13.5 }}>
+            <strong style={{ overflowWrap: 'anywhere' }}>{message.name}</strong>
+            <span style={{ color: OPS_COLORS.muted, overflowWrap: 'anywhere' }}>{message.email}</span>
+            <Pill text={TOPIC_LABELS[message.topic] || 'General'} />
+            <span style={{ color: OPS_COLORS.muted, fontSize: 12 }}>{new Date(message.created_at).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}</span>
+          </div>
+          <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 13.5, maxHeight: 160, overflowY: 'auto', background: OPS_COLORS.ivory, border: `1px solid ${OPS_COLORS.rule}`, borderRadius: 6, padding: '8px 10px' }}>{message.message}</div>
+          <div style={{ color: OPS_COLORS.muted, fontSize: 12 }}>Held because: {(message.reasons || []).join('; ') || 'looked automated'}</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <OpsButton small variant="gold" disabled={!!busyId} onClick={() => act(message.id, 'release')}>{busyId === message.id ? 'Working…' : 'Not spam, send it on'}</OpsButton>
+            <OpsButton small variant="danger" disabled={!!busyId} onClick={() => act(message.id, 'delete')}>Delete</OpsButton>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function ContactsPage({ session }) {
   const [contacts, setContacts] = useState([])
   const [loading, setLoading] = useState(true)
@@ -288,6 +372,8 @@ export function ContactsPage({ session }) {
   ]
 
   return (
+    <>
+    <HeldMessagesPanel onReleased={() => setTimeout(() => { void load() }, 1500)} />
     <div className="panel">
       <div className="panel-head">
         <h3>Contacts</h3>
@@ -404,6 +490,7 @@ export function ContactsPage({ session }) {
         />
       )}
     </div>
+    </>
   )
 }
 

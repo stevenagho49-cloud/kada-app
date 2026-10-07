@@ -53,7 +53,7 @@ const LEGAL_CONTENT = {
       {
         heading: 'Who processes your data',
         paragraphs: [
-          'We use a small number of trusted processors: Stripe (payments), Supabase (secure database and sign-in), Resend (transactional email), and Render (website hosting). Each processes data only on our instructions and under their own security and data-protection terms. Some processors may handle data outside the UK; where they do, appropriate safeguards (such as standard contractual clauses) apply.',
+          'We use a small number of trusted processors: Stripe (payments), Supabase (secure database and sign-in), Resend (transactional email), Render (website hosting), and Cloudflare Turnstile (spam protection on our contact form, which checks your browser without tracking cookies). Each processes data only on our instructions and under their own security and data-protection terms. Some processors may handle data outside the UK; where they do, appropriate safeguards (such as standard contractual clauses) apply.',
         ],
       },
       {

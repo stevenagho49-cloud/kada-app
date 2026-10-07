@@ -11,6 +11,7 @@ import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto'
 import { eventIdsIn, refreshEventBlocks } from '../src/eventEmailBlock.js'
 import { PASSWORD_RESET_MESSAGE, sendPasswordRecovery } from './passwordRecovery.js'
 import { registerSocialRoutes } from './social/routes.js'
+import { contactSpamReasons } from './contactSpam.js'
 
 const app = express()
 // Render (and most hosts) sit behind a single proxy ,  trust one hop so req.ip
@@ -629,43 +630,138 @@ app.get('/api/health', async (_request, response) => {
   response.status(status.ok ? 200 : 503).json(status)
 })
 
-// Admin notification relay ,  the dashboard calls this after client-side actions that
-// need an admin email (job claim pending review, DBS uploaded, school enquiry received).
 // Public contact form ,  no account needed. Validates + relays to the admin inbox.
-// Rate limited (5/hour/IP) since it is unauthenticated.
-app.post('/api/public/contact', async (request, response) => {
-  const { name, email, topic, message } = request.body || {}
-  const cleanName = String(name || '').trim().slice(0, 120)
-  const cleanEmail = String(email || '').trim().slice(0, 200)
-  const cleanTopic = ['parent', 'school', 'partnership', 'other'].includes(topic) ? topic : 'other'
-  const cleanMessage = String(message || '').trim().slice(0, 3000)
-  if (!cleanName || !/.+@.+\..+/.test(cleanEmail) || cleanMessage.length < 10) {
-    return response.status(400).json({ error: 'Please add your name, a valid email, and a message of at least 10 characters.' })
+// Spam protection, in order: a hidden honeypot field (filled = silently
+// dropped), a minimum time on the page, Cloudflare Turnstile, and the 5/hour/IP
+// limiter above. Messages that still look like random strings are held in
+// held_contact_messages for review instead of being emailed.
+const CONTACT_TOPIC_LABELS = { parent: 'Parent', school: 'School', partnership: 'Partnership', other: 'General' }
+const CONTACT_MIN_MS = 3000
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || ''
+
+function cleanContactMessage({ name, email, topic, message } = {}) {
+  return {
+    name: String(name || '').trim().slice(0, 120),
+    email: String(email || '').trim().slice(0, 200),
+    topic: topic in CONTACT_TOPIC_LABELS ? topic : 'other',
+    message: String(message || '').trim().slice(0, 3000),
   }
-  const topicLabel = { parent: 'Parent', school: 'School', partnership: 'Partnership', other: 'General' }[cleanTopic]
+}
+
+// Emails the admin inbox and files the sender in the CRM ,  matched by email,
+// never duplicated. Filing must never break the contact form, so a failure
+// alerts the admin instead. Also used when staff release a held message.
+async function deliverContactMessage({ name, email, topic, message }, { subjectNote = '' } = {}) {
+  const topicLabel = CONTACT_TOPIC_LABELS[topic]
   const esc = (text) => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   const result = await notifyAdmin(
-    `Website contact: ${topicLabel}`,
-    `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New website message</h2><p><strong>From:</strong> ${esc(cleanName)} &lt;${esc(cleanEmail)}&gt;<br><strong>Topic:</strong> ${topicLabel}</p><p style="white-space:pre-wrap">${esc(cleanMessage)}</p><p style="color:#767066;font-size:12px">Reply directly to this email to respond to the sender.</p></div>`,
+    `Website contact: ${topicLabel}${subjectNote}`,
+    `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New website message</h2><p><strong>From:</strong> ${esc(name)} &lt;${esc(email)}&gt;<br><strong>Topic:</strong> ${topicLabel}</p><p style="white-space:pre-wrap">${esc(message)}</p><p style="color:#767066;font-size:12px">Reply directly to this email to respond to the sender.</p></div>`,
     'contact',
   )
-  // File the sender in the CRM ,  matched by email, never duplicated. Filing
-  // must never break the contact form, so a failure alerts the admin instead.
   if (supabase) {
-    const note = `Website message (${topicLabel}): ${cleanMessage.slice(0, 200)}`
-    const kind = { school: 'school', parent: 'parent', partnership: 'partner', other: 'other' }[cleanTopic]
+    const note = `Website message (${topicLabel}): ${message.slice(0, 200)}`
+    const kind = { school: 'school', parent: 'parent', partnership: 'partner', other: 'other' }[topic]
     const now = new Date().toISOString()
-    void supabase.from('contacts').select('id,notes').eq('email', cleanEmail.toLowerCase()).maybeSingle()
+    void supabase.from('contacts').select('id,notes').eq('email', email.toLowerCase()).maybeSingle()
       .then(({ data: existing }) => existing
         ? supabase.from('contacts').update({ notes: `${existing.notes ? `${existing.notes}\n` : ''}${note}`.slice(-4000), last_contacted_at: now, updated_at: now }).eq('id', existing.id)
-        : supabase.from('contacts').insert({ kind, name: cleanName, email: cleanEmail.toLowerCase(), source: 'website', notes: note, last_contacted_at: now }))
+        : supabase.from('contacts').insert({ kind, name, email: email.toLowerCase(), source: 'website', notes: note, last_contacted_at: now }))
       .then((result) => { if (result?.error) throw result.error })
-      .catch((error) => alertFailure('A website message sender could not be filed in Contacts', error, { Sender: cleanEmail }))
+      .catch((error) => alertFailure('A website message sender could not be filed in Contacts', error, { Sender: email }))
   }
+  return result
+}
+
+// Returns 'ok', 'failed', or 'unavailable' (Cloudflare unreachable ,  the form
+// then still works, the other checks keep running).
+async function verifyTurnstile(token, ip) {
+  try {
+    const body = new URLSearchParams({ secret: TURNSTILE_SECRET_KEY, response: token })
+    if (ip) body.set('remoteip', ip)
+    const reply = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body, signal: AbortSignal.timeout(8000) })
+    const result = await reply.json()
+    if (!result.success) console.warn('Turnstile rejected a contact form submission:', (result['error-codes'] || []).join(', '))
+    return result.success ? 'ok' : 'failed'
+  } catch (error) {
+    console.error('Turnstile verification unavailable:', error.message)
+    return 'unavailable'
+  }
+}
+
+app.post('/api/public/contact', async (request, response) => {
+  const body = request.body || {}
+  // Honeypot: a field real visitors never see. Answer as if it was sent.
+  if (String(body.website || '').trim()) return response.json({ sent: true })
+  const contact = cleanContactMessage(body)
+  if (!contact.name || !/.+@.+\..+/.test(contact.email) || contact.message.length < 10) {
+    return response.status(400).json({ error: 'Please add your name, a valid email, and a message of at least 10 characters.' })
+  }
+  const elapsedMs = Number(body.elapsedMs)
+  if (!Number.isFinite(elapsedMs) || elapsedMs < CONTACT_MIN_MS) {
+    return response.status(400).json({ error: 'That was very quick. Please check your message, then press Send again.' })
+  }
+  if (TURNSTILE_SECRET_KEY) {
+    const token = typeof body.turnstileToken === 'string' ? body.turnstileToken.slice(0, 4096) : ''
+    const check = token ? await verifyTurnstile(token, request.ip) : 'failed'
+    if (check === 'failed') return response.status(400).json({ error: 'We could not confirm you are not a robot. Please refresh the page and try again, or email bookings@kingsarkdance.com.' })
+  }
+  const reasons = contactSpamReasons(contact)
+  if (reasons.length && supabase) {
+    const { error } = await supabase.from('held_contact_messages').insert({ ...contact, email: contact.email.toLowerCase(), reasons, ip: request.ip || null })
+    if (!error) return response.json({ sent: true })
+    // Never lose a message because the held list is unavailable: send it, marked.
+    console.error('A suspected spam message could not be held:', error.message)
+    const result = await deliverContactMessage(contact, { subjectNote: ' (suspected spam)' })
+    if (!result.sent) return response.status(503).json({ error: 'Messages cannot be sent right now. Please email bookings@kingsarkdance.com directly.' })
+    return response.json({ sent: true })
+  }
+  const result = await deliverContactMessage(contact)
   if (!result.sent) return response.status(503).json({ error: 'Messages cannot be sent right now. Please email bookings@kingsarkdance.com directly.' })
   response.json({ sent: true })
 })
 
+/* Held as suspected spam ,  reviewed in Operations > Contacts by admins and   */
+/* staff with the contacts permission. Releasing sends the message on exactly */
+/* as if it had arrived normally.                                             */
+async function requireContactsAccess(request, response) {
+  const user = await authenticatedUser(request)
+  if (!user || !supabase) { response.status(401).json({ error: 'Authentication is required.' }); return null }
+  const { data: profile } = await supabase.from('profiles').select('role,permissions').eq('id', user.id).maybeSingle()
+  const allowed = profile?.role === 'admin' || (profile?.role === 'staff' && (profile.permissions || []).includes('contacts'))
+  if (!allowed) { response.status(403).json({ error: 'You need the contacts permission to review held messages.' }); return null }
+  return user
+}
+const HELD_MIGRATION = 'Run supabase/migrations/20261007_held_contact_messages.sql in the Supabase SQL Editor to turn on the held messages list.'
+
+app.get('/api/admin/held-messages', async (request, response) => {
+  if (!await requireContactsAccess(request, response)) return
+  const { data, error } = await supabase.from('held_contact_messages').select('id,name,email,topic,message,reasons,created_at').order('created_at', { ascending: false }).limit(500)
+  if (error) return response.json({ messages: [], migrationNeeded: HELD_MIGRATION })
+  response.json({ messages: data || [] })
+})
+
+app.post('/api/admin/held-messages/:id/release', async (request, response) => {
+  if (!await requireContactsAccess(request, response)) return
+  const { data: held, error } = await supabase.from('held_contact_messages').select('*').eq('id', request.params.id).maybeSingle()
+  if (error || !held) return response.status(404).json({ error: 'That message is no longer in the held list.' })
+  const result = await deliverContactMessage(cleanContactMessage(held))
+  if (!result.sent) return response.status(502).json({ error: `The message could not be sent on: ${result.reason || 'email failed'}. It is still in the held list.` })
+  const { error: deleteError } = await supabase.from('held_contact_messages').delete().eq('id', held.id)
+  if (deleteError) await alertFailure('A released website message could not be removed from the held list', deleteError, { Message: held.id })
+  response.json({ released: true })
+})
+
+app.delete('/api/admin/held-messages/:id', async (request, response) => {
+  if (!await requireContactsAccess(request, response)) return
+  const query = supabase.from('held_contact_messages').delete()
+  const { error } = await (request.params.id === 'all' ? query.not('id', 'is', null) : query.eq('id', request.params.id))
+  if (error) return response.status(500).json({ error: 'The held message could not be deleted.' })
+  response.json({ deleted: true })
+})
+
+// Admin notification relay ,  the dashboard calls this after client-side actions that
+// need an admin email (job claim pending review, DBS uploaded, school enquiry received).
 app.post('/api/notify-admin', async (request, response) => {
   const user = await authenticatedUser(request)
   if (!user || !supabase) return response.status(401).json({ error: 'Authentication is required.' })

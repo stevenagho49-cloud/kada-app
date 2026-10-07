@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { flyerPublicUrl, formatEventTimeRange } from './ops/EventsPage'
 import { ClassDatePicker, DAY_NAMES, classEndedOnDate, nextClassDate, startOfToday } from './lib/classDates'
 import { DiscountCodeField, poundsFromPence } from './lib/DiscountCodeField'
@@ -37,23 +37,72 @@ export const HOME_SECTIONS = [
 export const DEFAULT_SECTION_ORDER = HOME_SECTIONS.map((section, index) => ({ sectionKey: section.key, label: section.label, visible: true, sortOrder: (index + 1) * 10 }))
 
 /* Public contact form. Posts to /api/public/contact, which emails the admin
-   inbox. Kept inside HomePage so it inherits the public site's fonts/colours. */
+   inbox. Kept inside HomePage so it inherits the public site's fonts/colours.
+   Spam protection: a hidden honeypot field, the time since the form loaded,
+   and a Cloudflare Turnstile token (only when VITE_TURNSTILE_SITE_KEY is set). */
+const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || ''
+let turnstileScript = null
+function loadTurnstile() {
+  if (window.turnstile) return Promise.resolve(window.turnstile)
+  turnstileScript ||= new Promise((resolve, reject) => {
+    const script = document.createElement('script')
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+    script.async = true
+    script.onload = () => resolve(window.turnstile)
+    script.onerror = () => { turnstileScript = null; reject(new Error('Turnstile could not load')) }
+    document.head.appendChild(script)
+  })
+  return turnstileScript
+}
+
 function ContactForm() {
-  const [form, setForm] = useState({ name: '', email: '', topic: 'parent', message: '' })
+  const [form, setForm] = useState({ name: '', email: '', topic: 'parent', message: '', website: '' })
   const [status, setStatus] = useState('idle') // idle | sending | sent | error
   const [errorText, setErrorText] = useState('')
+  const [turnstileToken, setTurnstileToken] = useState('')
+  const loadedAt = useRef(0)
+  const turnstileBox = useRef(null)
+  const turnstileWidget = useRef(null)
+
+  useEffect(() => { loadedAt.current = Date.now() }, [])
+
+  useEffect(() => {
+    if (!TURNSTILE_SITE_KEY) return undefined
+    let cancelled = false
+    loadTurnstile().then((turnstile) => {
+      if (cancelled || !turnstileBox.current) return
+      turnstileWidget.current = turnstile.render(turnstileBox.current, {
+        sitekey: TURNSTILE_SITE_KEY,
+        action: 'contact',
+        appearance: 'interaction-only',
+        callback: setTurnstileToken,
+        'expired-callback': () => setTurnstileToken(''),
+        'error-callback': () => setTurnstileToken(''),
+      })
+    }).catch(() => {})
+    return () => {
+      cancelled = true
+      if (turnstileWidget.current !== null) window.turnstile?.remove(turnstileWidget.current)
+      turnstileWidget.current = null
+    }
+  }, [])
 
   const set = (field) => (event) => setForm({ ...form, [field]: event.target.value })
 
   const submit = async (event) => {
     event.preventDefault()
+    if (TURNSTILE_SITE_KEY && !turnstileToken) {
+      setErrorText('We are still checking you are not a robot. Wait a moment, then press Send again. If this keeps happening, email bookings@kingsarkdance.com.')
+      setStatus('error')
+      return
+    }
     setStatus('sending')
     setErrorText('')
     try {
       const response = await fetch('/api/public/contact', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify({ ...form, elapsedMs: Date.now() - loadedAt.current, turnstileToken }),
       })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Your message could not be sent.')
@@ -61,6 +110,8 @@ function ContactForm() {
     } catch (error) {
       setErrorText(error.message)
       setStatus('error')
+      // A Turnstile token works once, so get a fresh one for the next try.
+      if (turnstileWidget.current !== null) { setTurnstileToken(''); window.turnstile?.reset(turnstileWidget.current) }
     }
   }
 
@@ -86,6 +137,11 @@ function ContactForm() {
         <option value="other">Something else</option>
       </select>
       <textarea aria-label="Your message" placeholder="How can we help?" value={form.message} onChange={set('message')} required minLength={10} maxLength={3000} rows={4} />
+      {/* Honeypot: hidden from people and screen readers; bots fill it in. */}
+      <div className="contact-form-trap" aria-hidden="true">
+        <label>Website <input name="website" tabIndex={-1} autoComplete="off" value={form.website} onChange={set('website')} /></label>
+      </div>
+      {TURNSTILE_SITE_KEY && <div ref={turnstileBox} className="contact-form-turnstile" />}
       {status === 'error' && <p className="contact-form-error">{errorText}</p>}
       <button type="submit" className="btn btn-gold" disabled={status === 'sending'}>{status === 'sending' ? 'Sending…' : 'Send message'}</button>
     </form>
