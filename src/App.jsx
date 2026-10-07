@@ -33,6 +33,7 @@ const AttendancePage = lazy(() => import('./ops/AttendancePage').then((module) =
 const HomeworkPage = lazy(() => import('./ops/HomeworkPage').then((module) => ({ default: module.HomeworkPage })))
 const FormationsPage = lazy(() => import('./ops/FormationsPage').then((module) => ({ default: module.FormationsPage })))
 const SessionTypesPage = lazy(() => import('./ops/SessionTypesPage').then((module) => ({ default: module.SessionTypesPage })))
+const SocialStudioPage = lazy(() => import('./ops/SocialStudioPage').then((module) => ({ default: module.SocialStudioPage })))
 const ArrearsPage = lazy(() => import('./ops/ArrearsPage').then((module) => ({ default: module.ArrearsPage })))
 const ParentDashboard = lazy(() => import('./ParentDashboard').then((module) => ({ default: module.ParentDashboard })))
 
@@ -1953,6 +1954,15 @@ function App() {
         { key: 'events-add', label: '+ Add event', action: true },
       ],
     }] : []),
+    ...(can('social') ? [{
+      label: 'Social Studio',
+      children: [
+        { key: 'social-posts', label: 'Posts' },
+        { key: 'social-calendar', label: 'Calendar' },
+        { key: 'social-library', label: 'Media library' },
+        { key: 'social-settings', label: 'Drafting rules' },
+      ],
+    }] : []),
     ...(can('site') ? [{
       label: 'Site',
       children: [
@@ -2152,6 +2162,7 @@ function App() {
           {can('site') && tab === 'site-layout' && <SiteLayoutPage sections={sectionLayout.length ? sectionLayout : DEFAULT_SECTION_ORDER} onSave={saveSectionLayout} blocks={siteBlocks} events={events} onSaveBlock={saveSiteBlock} onDeleteBlock={deleteSiteBlock} />}
           {can('site') && tab === 'site-content' && <SiteContentPage content={siteContent} onSave={saveSiteContent} />}
           {can('sales') && tab === 'payment-links' && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><PaymentLinksPage focusLinkId={paymentLinkFocus} onFocusHandled={() => setPaymentLinkFocus('')} /></Suspense>}
+          {can('social') && tab.startsWith('social-') && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><SocialStudioPage session={session} view={tab.replace('social-', '')} /></Suspense>}
           {can('attendance') && tab === 'attendance' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><AttendancePage session={session} isAdmin={isAdmin} /></Suspense>}
           {can('homework') && tab === 'homework' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><HomeworkPage session={session} /></Suspense>}
           {can('sessions') && tab === 'session-types' && session && <Suspense fallback={<p style={{ color: muted }}>Loading…</p>}><SessionTypesPage session={session} onChanged={() => setSessionsVersion((version) => version + 1)} /></Suspense>}

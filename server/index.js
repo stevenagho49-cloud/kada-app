@@ -10,6 +10,7 @@ import path from 'node:path'
 import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto'
 import { eventIdsIn, refreshEventBlocks } from '../src/eventEmailBlock.js'
 import { PASSWORD_RESET_MESSAGE, sendPasswordRecovery } from './passwordRecovery.js'
+import { registerSocialRoutes } from './social/routes.js'
 
 const app = express()
 // Render (and most hosts) sit behind a single proxy ,  trust one hop so req.ip
@@ -1371,7 +1372,7 @@ app.post('/api/admin/invoice-permissions', async (request, response) => {
 /* accounts. Roles/permissions/job titles live on profiles; emails     */
 /* come from auth.users (service role only).                           */
 /* ------------------------------------------------------------------ */
-const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'attendance', 'homework', 'formations', 'jobs', 'sessions', 'template', 'events', 'messages', 'site', 'sales']
+const TEAM_PERMISSIONS = ['bookings', 'contacts', 'schools', 'students', 'attendance', 'homework', 'formations', 'jobs', 'sessions', 'template', 'events', 'messages', 'site', 'sales', 'social']
 const cleanPermissions = (value) => (Array.isArray(value) ? value.filter((item) => TEAM_PERMISSIONS.includes(item)) : [])
 
 async function requireAdmin(request, response) {
@@ -5298,6 +5299,9 @@ app.post('/api/admin/send-event-reminders', async (request, response) => {
 const REMINDER_INTERVAL_MS = Number(process.env.REMINDER_INTERVAL_MS || 60000)
 // A failure that keeps happening alerts once per 30 minutes (see alertFailure).
 setInterval(() => { sendDueReminders().catch((error) => alertFailure('Event ticket reminders stopped with an error', error)) }, REMINDER_INTERVAL_MS)
+
+// Operations > Social Studio (server/social/routes.js).
+registerSocialRoutes(app, { supabase, authenticatedUser, alertFailure, classPrices, appUrl: APP_URL })
 
 /* ------------------------------------------------------------------ */
 /* Production: serve the built Vite app (dist/) and fall back to        */

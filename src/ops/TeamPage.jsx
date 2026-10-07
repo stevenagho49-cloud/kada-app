@@ -24,6 +24,7 @@ export const PERMISSION_AREAS = [
   { key: 'messages', label: 'Messages' },
   { key: 'site', label: 'Site content & layout' },
   { key: 'sales', label: 'Sales (subscriptions & invoices)' },
+  { key: 'social', label: 'Social Studio (media library & posts)' },
 ]
 
 const labelStyle = { display: 'block', fontSize: 12, fontWeight: 700, color: OPS_COLORS.emerald, marginBottom: 4 }
