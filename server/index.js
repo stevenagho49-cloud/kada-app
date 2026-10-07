@@ -1046,7 +1046,7 @@ async function notifyNewSignups() {
     const fresh = (await listAllAuthUsers()).filter((item) => Date.parse(item.created_at) >= since && !item.app_metadata?.signup_notified_at)
     if (!fresh.length) return { notified: 0 }
     const [{ data: profiles }, { data: invites }] = await Promise.all([
-      supabase.from('profiles').select('id,role,full_name').in('id', fresh.map((item) => item.id)),
+      supabase.from('profiles').select('id,role,full_name,instructor_id').in('id', fresh.map((item) => item.id)),
       supabase.from('invitations').select('email').in('email', fresh.map((item) => (item.email || '').toLowerCase())),
     ])
     const profileById = new Map((profiles || []).map((row) => [row.id, row]))
@@ -1073,11 +1073,11 @@ async function notifyNewSignups() {
         ...(role === 'parent' ? [['Children added', children.length ? children.map((child) => child.name).join(', ') : 'None yet']] : []),
       ].map(([label, value]) => `<strong>${label}:</strong> ${escHtml(value)}`).join('<br>')
       const next = role === 'instructor'
-        ? '<p>Add or link their instructor record (same email) under Instructors so they can upload a DBS certificate and see the job board.</p>'
+        ? '<p>Their instructor record was created automatically and is waiting for approval. They can upload a DBS certificate now; they see the job board once you approve it.</p>'
         : role === 'parent' ? '<p>If this family already owes an invoice or has a record with us, it is linked to this account automatically by email once they sign in.</p>' : ''
       const result = await notifyAdmin( // eslint-disable-line no-await-in-loop
         `New ${SIGNUP_ROLE_LABELS[role].toLowerCase()} sign-up: ${name || account.email}`,
-        `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New ${SIGNUP_ROLE_LABELS[role].toLowerCase()} account</h2><p>${lines}</p>${next}${dashboardButton(role === 'instructor' ? 'instructors' : role === 'school' ? 'schools' : 'students', 'Open dashboard')}</div>`,
+        `<div style="font-family:Arial,sans-serif;line-height:1.6"><h2>New ${SIGNUP_ROLE_LABELS[role].toLowerCase()} account</h2><p>${lines}</p>${next}${role === 'instructor' ? dashboardButton('instructors', profile?.instructor_id ? 'Open instructor' : 'Open pending instructors', profile?.instructor_id || 'pending') : dashboardButton(role === 'school' ? 'schools' : 'students', 'Open dashboard')}</div>`,
         'signup',
       )
       // Unsent alerts are retried on the next sweep; switched-off alerts are stamped.
